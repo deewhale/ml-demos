@@ -1238,6 +1238,7 @@ class AgentV6:
         self.prev_combat_snap = None
         self.current_floor = 0
         self.combat_hp_value_start = 0.0
+        self.combat_hp_start = 0  # 绝对 HP，用于选牌回溯反馈
         self.combat_turns = 0
 
         # Anti-stuck
@@ -1616,16 +1617,13 @@ class AgentV6:
         action = dist.sample().item()
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        # 基于稀有度的即时奖励，skip=0 让 agent 有选牌信号
-        if action == len(cards):
-            reward = 0.0  # skip
-        else:
-            rarity = cards[action].get("rarity", "COMMON").upper()
-            reward = {"COMMON": 0.1, "UNCOMMON": 0.3, "RARE": 0.5}.get(rarity, 0.1)
+        # 选牌即时 reward 为 0，由战斗结果回溯反馈
+        reward = 0.0
 
+        extra = {"card_id": cards[action].get("id", "unknown")} if action < len(cards) else {"card_id": "skip"}
         state_data = {"tokens": _detach_tokens(tokens), "candidate_features": [f.detach().cpu() for f in candidate_feats]}
         self.current_trajectory.append(Transition(
-            "draft", state_data, (action,), log_prob, value.item(), reward
+            "draft", state_data, (action,), log_prob, value.item(), reward, extra=extra
         ))
 
         if action == len(cards):
@@ -1658,10 +1656,11 @@ class AgentV6:
         action = dist.sample().item()
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        reward = 0.1
+        reward = 0.0  # 由战斗结果回溯反馈
+        extra = {"card_id": cards[action].get("id", "unknown")} if action < len(cards) else {"card_id": "skip"}
         state_data = {"tokens": _detach_tokens(tokens), "candidate_features": [f.detach().cpu() for f in candidate_feats]}
         self.current_trajectory.append(Transition(
-            "draft", state_data, (action,), log_prob, value.item(), reward
+            "draft", state_data, (action,), log_prob, value.item(), reward, extra=extra
         ))
 
         if allow_skip and action == len(cards):
@@ -1695,10 +1694,11 @@ class AgentV6:
         dist = torch.distributions.Categorical(logits=logits)
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        reward = 0.1
+        reward = 0.0  # 由战斗结果回溯反馈
+        extra = {"card_id": cards[action].get("id", "unknown") if action < len(cards) else "purge_skip"}
         state_data = {"tokens": _detach_tokens(tokens), "candidate_features": [f.detach().cpu() for f in candidate_feats]}
         self.current_trajectory.append(Transition(
-            "draft", state_data, (action,), log_prob, value.item(), reward
+            "draft", state_data, (action,), log_prob, value.item(), reward, extra=extra
         ))
 
         if action >= len(cards):
@@ -2015,9 +2015,59 @@ class AgentV6:
                     t.done = True
                     break
 
+        # --- 选牌回溯反馈：根据战斗 HP 变化更新之前的 draft 决策 ---
+        hp_after = gs.get("current_hp", 0)
+        hp_before = self.combat_hp_start
+        if hp_before > 0 and self.current_trajectory:
+            # 判断敌人难度
+            monsters = gs.get("combat_state", {}).get("monsters", [])
+            if not monsters:
+                monsters = []
+            difficulty = 1.0
+            # Boss 检测：monster id 包含已知 boss 名
+            _BOSS_IDS = {"slime_boss", "hexaghost", "guardian", "automaton", "collector",
+                         "champ", "awakened", "time_eater", "donu", "deca",
+                         "heart", "corrupt_heart", "the_heart"}
+            for m in monsters:
+                mid = m.get("id", "").lower().replace(" ", "_")
+                if any(bid in mid for bid in _BOSS_IDS):
+                    difficulty = 3.0
+                    break
+            # Elite 检测（如果不是 boss）：任意怪物 max_hp > 100
+            if difficulty < 3.0:
+                for m in monsters:
+                    if m.get("max_hp", 0) > 100:
+                        difficulty = 2.0
+                        break
+
+            hp_delta = (hp_after - hp_before) / 20.0  # 归一化：20HP = 1.0 reward unit
+            n_combats_back = 0
+            in_combat_chunk = True  # 当前位置是 combat 区域
+            for i in range(len(self.current_trajectory) - 1, -1, -1):
+                t = self.current_trajectory[i]
+                if t.decision_type == "combat":
+                    if not in_combat_chunk:
+                        # 进入了新的 combat 区域 → 跨过了一个 combat 边界
+                        n_combats_back += 1
+                        in_combat_chunk = True
+                    continue
+                else:
+                    in_combat_chunk = False
+
+                if t.decision_type == "draft":
+                    if n_combats_back > 5:
+                        break  # 衰减太小，停止扫描
+                    decay = 0.7 ** n_combats_back
+                    retroactive_reward = hp_delta * difficulty * decay
+                    t.reward += retroactive_reward
+                    card_id = t.extra.get("card_id", "?") if t.extra else "?"
+                    log(f"Draft retroactive: card={card_id} reward={retroactive_reward:.3f} "
+                        f"difficulty={difficulty} decay={decay:.3f}")
+
         self.in_combat = False
         self.prev_combat_snap = None
         self.combat_hp_value_start = 0.0
+        self.combat_hp_start = 0
         self.combat_turns = 0
         log(f"{'WIN' if won else 'LOSE'} combat")
 
@@ -2055,6 +2105,7 @@ class AgentV6:
         self.strategy_trajectory = []
         self.current_floor = 0
         self.combat_hp_value_start = 0.0
+        self.combat_hp_start = 0
         self.combat_turns = 0
 
         if len(self.trajectory_buffer) >= N_RUNS_PER_UPDATE and not getattr(self, 'suppress_ppo', False):
@@ -2129,6 +2180,7 @@ class AgentV6:
                 self.current_trajectory = []
                 self.current_floor = 0
                 self.combat_hp_value_start = 0.0
+                self.combat_hp_start = 0
                 self.combat_turns = 0
                 return "START ironclad 0"
             return "STATE"
@@ -2140,6 +2192,7 @@ class AgentV6:
                 hp = gs.get("current_hp", 0)
                 max_hp = max(gs.get("max_hp", 1), 1)
                 self.combat_hp_value_start = hp_value(hp, max_hp)
+                self.combat_hp_start = hp  # 绝对 HP，用于选牌反馈
                 self.combat_turns = 0
             combat_st = gs.get("combat_state", {})
             self.combat_turns = combat_st.get("turn", self.combat_turns)
