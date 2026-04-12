@@ -1041,11 +1041,17 @@ def ppo_update(model, optimizer, trajectories, entropy_coeff,
     if not all_transitions:
         return {}
 
-    advs = [t.advantage for t in all_transitions]
-    adv_mean = float(np.mean(advs))
-    adv_std = float(max(np.std(advs), 1e-8))
-    for t in all_transitions:
-        t.advantage = (t.advantage - adv_mean) / adv_std
+    # 按决策类型分组归一化 advantage，避免 combat 和 strategy 量纲差异
+    combat_trans = [t for t in all_transitions if t.decision_type == "combat"]
+    strategy_trans = [t for t in all_transitions if t.decision_type != "combat"]
+
+    for group in [combat_trans, strategy_trans]:
+        if len(group) > 1:
+            advs = [t.advantage for t in group]
+            mean_adv = sum(advs) / len(advs)
+            std_adv = (sum((a - mean_adv) ** 2 for a in advs) / len(advs)) ** 0.5 + 1e-8
+            for t in group:
+                t.advantage = (t.advantage - mean_adv) / std_adv
 
     if strategy_only and strategy_params is not None:
         update_params = list(strategy_params)
@@ -1073,7 +1079,13 @@ def ppo_update(model, optimizer, trajectories, entropy_coeff,
                 adv = torch.tensor(float(t.advantage), dtype=torch.float32, device=DEVICE)
                 clipped = torch.clamp(ratio, 1 - CLIP_RATIO, 1 + CLIP_RATIO)
                 policy_losses.append(-torch.min(ratio * adv, clipped * adv))
-                value_losses.append(F.mse_loss(new_value, torch.tensor(float(t.returns), dtype=torch.float32, device=DEVICE)))
+                # Clipped value loss
+                returns_t = torch.tensor(float(t.returns), dtype=torch.float32, device=DEVICE)
+                old_value_t = torch.tensor(float(t.value), dtype=torch.float32, device=DEVICE)
+                value_pred_clipped = old_value_t + torch.clamp(new_value - old_value_t, -CLIP_RATIO, CLIP_RATIO)
+                value_loss_unclipped = (new_value - returns_t) ** 2
+                value_loss_clipped = (value_pred_clipped - returns_t) ** 2
+                value_losses.append(0.5 * torch.max(value_loss_unclipped, value_loss_clipped))
                 entropies.append(entropy)
 
             policy_loss = torch.stack(policy_losses).mean()
@@ -2174,32 +2186,38 @@ class AgentV6:
 
         log(f"screen: {screen} | cmds: {available}")
 
-        # Anti-stuck — 加入能量和手牌数，避免战斗中正常出牌触发 stuck
-        energy = gs.get("combat_state", {}).get("player", {}).get("energy", "")
-        hand_size = len(gs.get("combat_state", {}).get("hand", []))
-        sig = f"{screen}|{'|'.join(sorted(available))}|e{energy}|h{hand_size}"
-        if sig == self._last_sig:
-            self._stuck += 1
-        else:
-            self._stuck = 0
-        self._last_sig = sig
+        # Anti-stuck — 战斗中禁用（combat_state 存在说明在战斗），只对非战斗画面生效
+        in_combat_now = bool(gs.get("combat_state"))
+        if not in_combat_now:
+            sig = f"{screen}|{'|'.join(sorted(available))}"
+            if sig == self._last_sig:
+                self._stuck += 1
+            else:
+                self._stuck = 0
+            self._last_sig = sig
 
-        if screen == self._last_screen:
-            self._screen_repeat += 1
-        else:
-            self._screen_repeat = 0
-        self._last_screen = screen
+            if screen == self._last_screen:
+                self._screen_repeat += 1
+            else:
+                self._screen_repeat = 0
+            self._last_screen = screen
 
-        if self._stuck > 3 or self._screen_repeat > 10:
-            log(f"Stuck (sig={self._stuck}, screen={self._screen_repeat})")
+            if self._stuck > 3 or self._screen_repeat > 10:
+                log(f"Stuck (sig={self._stuck}, screen={self._screen_repeat})")
+                self._stuck = 0
+                self._screen_repeat = 0
+                for c, s in [("proceed","PROCEED"),("skip","SKIP"),("confirm","CONFIRM"),
+                             ("cancel","CANCEL"),("leave","LEAVE"),("return","RETURN"),
+                             ("choose","CHOOSE 0"),("end","END")]:
+                    if c in available:
+                        return s
+                return "STATE"
+        else:
+            # 战斗中重置 stuck 计数，避免离开战斗时误触发
             self._stuck = 0
             self._screen_repeat = 0
-            for c, s in [("proceed","PROCEED"),("skip","SKIP"),("confirm","CONFIRM"),
-                         ("cancel","CANCEL"),("leave","LEAVE"),("return","RETURN"),
-                         ("choose","CHOOSE 0"),("end","END")]:
-                if c in available:
-                    return s
-            return "STATE"
+            self._last_sig = ""
+            self._last_screen = screen
 
         # Combat end detection
         if self.in_combat and "play" not in available and "end" not in available:
