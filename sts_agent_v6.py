@@ -115,18 +115,18 @@ CHOICE_OPTION_DIM = 40
 PATH_FEATURE_DIM = 16
 
 # PPO hyperparameters
-GAMMA = 0.999
+GAMMA = 0.98
 GAE_LAMBDA = 0.95
 CLIP_RATIO = 0.2
 VALUE_COEFF = 0.5
-ENTROPY_COEFF_START = 0.02
-ENTROPY_COEFF_END = 0.01
+ENTROPY_COEFF_START = 0.05
+ENTROPY_COEFF_END = 0.02
 ENTROPY_ANNEAL_RUNS = 5000
 LR = 2.5e-4
 MAX_GRAD_NORM = 0.5
 PPO_EPOCHS = 4
 MINIBATCH_SIZE = 64
-N_RUNS_PER_UPDATE = 4
+N_RUNS_PER_UPDATE = 16
 
 
 # ============================================================
@@ -794,7 +794,7 @@ class CombatHead(nn.Module):
             nn.ReLU(),
             nn.Linear(192, CTX_DIM),
         )
-        self.end_turn_key = nn.Parameter(torch.randn(CTX_DIM))
+        self.end_turn_key = nn.Parameter(torch.randn(CTX_DIM) * 0.01)  # 与手牌编码同量级的小随机初始化
         self.target_query = nn.Sequential(
             nn.Linear(SHARED_REPR_DIM + CTX_DIM, 192),
             nn.ReLU(),
@@ -1616,7 +1616,12 @@ class AgentV6:
         action = dist.sample().item()
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        reward = 0.0
+        # 基于稀有度的即时奖励，skip=0 让 agent 有选牌信号
+        if action == len(cards):
+            reward = 0.0  # skip
+        else:
+            rarity = cards[action].get("rarity", "COMMON").upper()
+            reward = {"COMMON": 0.1, "UNCOMMON": 0.3, "RARE": 0.5}.get(rarity, 0.1)
 
         state_data = {"tokens": _detach_tokens(tokens), "candidate_features": [f.detach().cpu() for f in candidate_feats]}
         self.current_trajectory.append(Transition(
@@ -1653,7 +1658,7 @@ class AgentV6:
         action = dist.sample().item()
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        reward = 0.0
+        reward = 0.1
         state_data = {"tokens": _detach_tokens(tokens), "candidate_features": [f.detach().cpu() for f in candidate_feats]}
         self.current_trajectory.append(Transition(
             "draft", state_data, (action,), log_prob, value.item(), reward
@@ -1690,7 +1695,7 @@ class AgentV6:
         dist = torch.distributions.Categorical(logits=logits)
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        reward = 0.0
+        reward = 0.1
         state_data = {"tokens": _detach_tokens(tokens), "candidate_features": [f.detach().cpu() for f in candidate_feats]}
         self.current_trajectory.append(Transition(
             "draft", state_data, (action,), log_prob, value.item(), reward
@@ -1786,7 +1791,8 @@ class AgentV6:
         action = dist.sample().item()
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        reward = 0.0
+        # 路径选择即时奖励：给非零信号，楼层奖励提供长期信号
+        reward = 0.1
 
         state_data = {"tokens": _detach_tokens(tokens), "node_features": [f.detach().cpu() for f in node_feats]}
         self.current_trajectory.append(Transition(
@@ -1826,7 +1832,14 @@ class AgentV6:
         action = dist.sample().item()
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        reward = 0.0
+        # 事件/休息/商店即时奖励：休息按回复比例，其余给基础信号
+        if choice_type == "rest" or choice_type == "campfire":
+            current_hp = gs.get("current_hp", 1)
+            max_hp = max(gs.get("max_hp", 1), 1)
+            heal_pct = min((max_hp - current_hp) / max_hp, 1.0)
+            reward = 0.1 * heal_pct  # 缺血越多休息越有价值
+        else:
+            reward = 0.1
 
         state_data = {"tokens": _detach_tokens(tokens), "option_encodings": [e.detach().cpu() for e in option_encs]}
         self.current_trajectory.append(Transition(
