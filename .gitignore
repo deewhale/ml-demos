@@ -38,3 +38,15 @@ sts_models/
 # Environment variables
 .env
 .env.*
+
+# Archived old versions (V3/V4/V5)
+archive/
+
+# Standalone demo files
+demos/
+
+# Utility scripts
+tools/
+
+# MNIST dataset (re-downloadable)
+data/MNIST/
