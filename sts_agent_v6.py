@@ -2143,8 +2143,10 @@ class AgentV6:
 
         log(f"screen: {screen} | cmds: {available}")
 
-        # Anti-stuck
-        sig = f"{screen}|{'|'.join(sorted(available))}"
+        # Anti-stuck — 加入能量和手牌数，避免战斗中正常出牌触发 stuck
+        energy = gs.get("combat_state", {}).get("player", {}).get("energy", "")
+        hand_size = len(gs.get("combat_state", {}).get("hand", []))
+        sig = f"{screen}|{'|'.join(sorted(available))}|e{energy}|h{hand_size}"
         if sig == self._last_sig:
             self._stuck += 1
         else:
