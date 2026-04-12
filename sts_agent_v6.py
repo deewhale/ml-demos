@@ -1241,6 +1241,12 @@ class AgentV6:
         self.combat_hp_start = 0  # 绝对 HP，用于选牌回溯反馈
         self.combat_turns = 0
 
+        # 回合级 batch reward 追踪
+        self.turn_buffer = []  # 当回合出牌 transitions 暂存
+        self.turn_damage_dealt = 0.0  # 当回合累计伤害
+        self.turn_kills = 0  # 当回合累计击杀
+        self.turn_hp_start = 0  # 回合开始时的 HP
+
         # Anti-stuck
         self._last_sig = ""
         self._stuck = 0
@@ -1524,45 +1530,44 @@ class AgentV6:
 
         total_log_prob = (card_log_prob + target_log_prob).item()
 
-        # Reward: 逐卡即时反馈（damage / block / kill / debuff / buff）
+        # --- 回合级 batch reward：逐卡只追踪 damage/kills，不给即时 reward ---
+        # 检测新回合开始：flush 上一回合的 turn_buffer
+        gs_combat = gs.get("combat_state", {})
+        current_turn = gs_combat.get("turn", self.combat_turns)
+        if self.turn_buffer and current_turn > self.combat_turns:
+            # 新回合开始，结算上一回合 reward
+            player_now = gs_combat.get("player", {})
+            current_hp = player_now.get("current_hp", gs.get("current_hp", 0))
+            hp_lost = max(self.turn_hp_start - current_hp, 0)
+            turn_reward = (self.turn_damage_dealt * 0.05
+                           + self.turn_kills * 1.0
+                           - hp_lost * 0.1)
+            n = len(self.turn_buffer)
+            per_card = turn_reward / n
+            for t in self.turn_buffer:
+                t.reward = per_card
+            self.current_trajectory.extend(self.turn_buffer)
+            self.turn_buffer = []
+            # 重置回合追踪
+            self.turn_damage_dealt = 0.0
+            self.turn_kills = 0
+            self.turn_hp_start = current_hp
+        self.combat_turns = current_turn
+
+        # 逐卡快照：追踪 damage 和 kills（不做即时 reward）
         new_snap = self._combat_snapshot(game_state)
         if self.prev_combat_snap and new_snap:
             old = self.prev_combat_snap
-            reward = 0.0
-
-            # 1. Damage dealt（cap at enemy HP to penalize overkill）
+            # 累计伤害
             total_hp_before = sum(old["enemy_hps"])
             total_hp_after = sum(new_snap["enemy_hps"])
             damage_dealt = max(total_hp_before - total_hp_after, 0)
-            reward += min(damage_dealt, total_hp_before) * 0.05
-
-            # 2. Block gained（attacking enemy → useful block 更高价值）
-            block_gained = max(new_snap["block"] - old["block"], 0)
-            if old["enemy_intending_attack"]:
-                useful_block = min(block_gained, old["expected_damage"])
-                reward += useful_block * 0.05
-            else:
-                reward += block_gained * 0.01
-
-            # 3. Kill bonus
+            self.turn_damage_dealt += min(damage_dealt, total_hp_before)
+            # 累计击杀
             kills = max(old["n_alive"] - new_snap["n_alive"], 0)
-            reward += kills * 1.0
-
-            # 4. Debuff applied（Vulnerable / Weak / Poison on enemies）
-            new_debuffs = max(new_snap["enemy_debuffs"] - old["enemy_debuffs"], 0)
-            reward += new_debuffs * 0.02
-
-            # 5. Buff gained（Strength / Dexterity on player）
-            new_buffs = max(new_snap["player_buffs"] - old["player_buffs"], 0)
-            reward += new_buffs * 0.02
-
-            # 6. HP lost penalty（if player took damage this step, e.g. Thorns / Blood cards）
-            hp_lost = max(old["hp"] - new_snap["hp"], 0)
-            reward -= hp_lost * 0.1
-
+            self.turn_kills += kills
             self.prev_combat_snap = new_snap
         else:
-            reward = 0.0
             if new_snap:
                 self.prev_combat_snap = new_snap
 
@@ -1574,10 +1579,12 @@ class AgentV6:
             "monster_mask": monster_mask.detach().cpu(),
             "needs_target": needs_target,
         }
-        self.current_trajectory.append(Transition(
+        # reward=0，等回合结束时统一分配
+        transition = Transition(
             "combat", state_data, (card_action, target_action),
-            total_log_prob, value.item(), reward
-        ))
+            total_log_prob, value.item(), 0.0
+        )
+        self.turn_buffer.append(transition)
 
         if card_action == END_TURN_ACTION:
             log(f"  END")
@@ -2009,6 +2016,22 @@ class AgentV6:
         gs = game_state.get("game_state", {})
         hp = gs.get("current_hp", 0)
 
+        # --- flush 最后一回合的 turn_buffer ---
+        if self.turn_buffer:
+            hp_lost = max(self.turn_hp_start - hp, 0)
+            turn_reward = (self.turn_damage_dealt * 0.05
+                           + self.turn_kills * 1.0
+                           - hp_lost * 0.1)
+            n = len(self.turn_buffer)
+            per_card = turn_reward / n
+            for t in self.turn_buffer:
+                t.reward = per_card
+            self.current_trajectory.extend(self.turn_buffer)
+            self.turn_buffer = []
+        self.turn_damage_dealt = 0.0
+        self.turn_kills = 0
+        self.turn_hp_start = 0
+
         if not won and hp == 0 and self.current_trajectory:
             for t in reversed(self.current_trajectory):
                 if t.decision_type == "combat":
@@ -2069,6 +2092,10 @@ class AgentV6:
         self.combat_hp_value_start = 0.0
         self.combat_hp_start = 0
         self.combat_turns = 0
+        self.turn_buffer = []
+        self.turn_damage_dealt = 0.0
+        self.turn_kills = 0
+        self.turn_hp_start = 0
         log(f"{'WIN' if won else 'LOSE'} combat")
 
     def on_floor_cleared(self):
@@ -2107,6 +2134,10 @@ class AgentV6:
         self.combat_hp_value_start = 0.0
         self.combat_hp_start = 0
         self.combat_turns = 0
+        self.turn_buffer = []
+        self.turn_damage_dealt = 0.0
+        self.turn_kills = 0
+        self.turn_hp_start = 0
 
         if len(self.trajectory_buffer) >= N_RUNS_PER_UPDATE and not getattr(self, 'suppress_ppo', False):
             log(f"PPO update: {len(self.trajectory_buffer)} runs")
@@ -2184,6 +2215,10 @@ class AgentV6:
                 self.combat_hp_value_start = 0.0
                 self.combat_hp_start = 0
                 self.combat_turns = 0
+                self.turn_buffer = []
+                self.turn_damage_dealt = 0.0
+                self.turn_kills = 0
+                self.turn_hp_start = 0
                 return "START ironclad 0"
             return "STATE"
 
@@ -2196,6 +2231,11 @@ class AgentV6:
                 self.combat_hp_value_start = hp_value(hp, max_hp)
                 self.combat_hp_start = hp  # 绝对 HP，用于选牌反馈
                 self.combat_turns = 0
+                # 回合级 reward 初始化
+                self.turn_buffer = []
+                self.turn_damage_dealt = 0.0
+                self.turn_kills = 0
+                self.turn_hp_start = hp
             combat_st = gs.get("combat_state", {})
             self.combat_turns = combat_st.get("turn", self.combat_turns)
             if self.prev_combat_snap is None:
