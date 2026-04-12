@@ -573,9 +573,8 @@ def cmd_to_action(cmd: str, actions):
                 if getattr(a, "card_idx", None) == card_idx:
                     if target_idx < 0 or getattr(a, "target_idx", -1) == target_idx:
                         return a
-        for a in actions:
-            if hasattr(a, "action_type") and a.action_type == "play_card":
-                return a
+        # 找不到匹配的卡牌动作，不要打错牌，返回 None 让游戏循环处理
+        return None
 
     if verb == "CHOOSE":
         choosable = [
@@ -713,6 +712,7 @@ def run_one_game(agent, seed, ascension=0, training=True, verbose=False):
                         potion_action = cmd_to_action(potion_cmd, actions)
                         if potion_action is not None:
                             runner.take_action(potion_action)
+                            actions = runner.get_available_actions()  # 药水执行后刷新动作列表
                             steps += 1
                             continue
                 except Exception as e:
@@ -741,7 +741,10 @@ def run_one_game(agent, seed, ascension=0, training=True, verbose=False):
 
             action = cmd_to_action(cmd, actions)
             if action is None:
-                action = actions[0]
+                # 命令无法匹配，回退到结束回合
+                action = next((a for a in actions if hasattr(a, 'action_type') and a.action_type == 'end_turn'), None)
+                if action is None:
+                    action = actions[0] if actions else None
 
             try:
                 runner.take_action(action)
