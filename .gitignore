@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.eggs/
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Ralph tasks
+tasks/
+
+# ML / PyTorch model weights
+*.pt
+*.pth
+sts_models/
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.*
