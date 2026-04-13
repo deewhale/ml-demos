@@ -33,7 +33,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 # 从 data 层导入统一编码
 from data.sts_data import (
@@ -1253,11 +1253,13 @@ class AgentV6:
         self.combat_hp_start = 0  # 绝对 HP，用于选牌回溯反馈
         self.combat_turns = 0
 
-        # 回合级 batch reward 追踪
+        # 逐牌 reward 追踪
         self.turn_buffer = []  # 当回合出牌 transitions 暂存
-        self.turn_damage_dealt = 0.0  # 当回合累计伤害
-        self.turn_kills = 0  # 当回合累计击杀
         self.turn_hp_start = 0  # 回合开始时的 HP
+        self._hand_before_play = Counter()   # 出牌前手牌
+        self._energy_before_play = 0         # 出牌前能量
+        self._cost_of_played_card = 0        # 打出的牌的费用
+        self._draw_credit_map = {}           # 抽到的牌 → turn_buffer 中源牌的 index
 
         # Anti-stuck
         self._last_sig = ""
@@ -1431,6 +1433,39 @@ class AgentV6:
             "n_alive": sum(1 for h in enemy_hps if h > 0),
         }
 
+    # --- Combat reward helpers ---
+
+    @staticmethod
+    def _get_hand_id_counter(hand):
+        """手牌 ID 计数器（处理同名牌）"""
+        return Counter(c.get("id", "unknown") for c in hand)
+
+    @staticmethod
+    def _unique_draw_key(card_id, existing_map):
+        """为重复 ID 生成唯一 key"""
+        for i in range(100):
+            key = f"{card_id}#{i}"
+            if key not in existing_map:
+                return key
+        return f"{card_id}#99"
+
+    @staticmethod
+    def _find_draw_key(card_id, draw_credit_map):
+        """在 map 中查找匹配的 card_id"""
+        for key in list(draw_credit_map.keys()):
+            if key.startswith(card_id + "#"):
+                return key
+        return None
+
+    @staticmethod
+    def _apply_draw_credit(turn_buffer):
+        """抽牌回传：被抽到的牌的 reward × 0.3 回传给抽牌源"""
+        for t in turn_buffer:
+            source_idx = t.extra.get("drawn_by_idx", None) if t.extra else None
+            if source_idx is not None and 0 <= source_idx < len(turn_buffer):
+                credit = t.reward * 0.3
+                turn_buffer[source_idx].reward += credit
+
     # --- Strategy-only (V5 compatible) Methods ---
     def compute_strategy_reward(self, old_hp_val, new_hp_val):
         """计算策略层 transition 的 reward"""
@@ -1542,8 +1577,7 @@ class AgentV6:
 
         total_log_prob = (card_log_prob + target_log_prob).item()
 
-        # --- 回合级 batch reward：逐卡只追踪 damage/kills，不给即时 reward ---
-        # 检测新回合开始：flush 上一回合的 turn_buffer
+        # --- 逐牌 reward：Phase A - 回合切换时 flush turn_buffer ---
         gs_combat = gs.get("combat_state", {})
         current_turn = gs_combat.get("turn", self.combat_turns)
         if self.turn_buffer and current_turn > self.combat_turns:
@@ -1551,38 +1585,96 @@ class AgentV6:
             player_now = gs_combat.get("player", {})
             current_hp = player_now.get("current_hp", gs.get("current_hp", 0))
             hp_lost = max(self.turn_hp_start - current_hp, 0)
-            turn_reward = (self.turn_damage_dealt * 0.05
-                           + self.turn_kills * 1.0
-                           - hp_lost * 0.1)
-            n = len(self.turn_buffer)
-            per_card = turn_reward / n
+
+            # 逐牌算分
             for t in self.turn_buffer:
-                t.reward = per_card
+                card_damage = t.extra.get("card_damage", 0) if t.extra else 0
+                card_block = t.extra.get("card_block", 0) if t.extra else 0
+                card_kills = t.extra.get("card_kills", 0) if t.extra else 0
+                energy_bonus = t.extra.get("energy_bonus", 0) if t.extra else 0
+                t.reward = card_damage * 0.05 + card_block * 0.05 + card_kills * 1.0 + energy_bonus
+
+            # 掉血均摊
+            n = len(self.turn_buffer)
+            if n > 0:
+                hp_penalty = hp_lost * 0.1 / n
+                for t in self.turn_buffer:
+                    t.reward -= hp_penalty
+
+            # 抽牌回传
+            self._apply_draw_credit(self.turn_buffer)
+
             self.current_trajectory.extend(self.turn_buffer)
             self.turn_buffer = []
-            # 重置回合追踪
-            self.turn_damage_dealt = 0.0
-            self.turn_kills = 0
+            self._draw_credit_map = {}
             self.turn_hp_start = current_hp
         self.combat_turns = current_turn
 
-        # 逐卡快照：追踪 damage 和 kills（不做即时 reward）
+        # --- Phase B - 计算上一张牌的效果（snapshot 差值）---
         new_snap = self._combat_snapshot(game_state)
-        if self.prev_combat_snap and new_snap:
+        if self.prev_combat_snap and new_snap and self.turn_buffer:
             old = self.prev_combat_snap
-            # 累计伤害
+            last_t = self.turn_buffer[-1]
+
+            # 伤害
             total_hp_before = sum(old["enemy_hps"])
             total_hp_after = sum(new_snap["enemy_hps"])
-            damage_dealt = max(total_hp_before - total_hp_after, 0)
-            self.turn_damage_dealt += min(damage_dealt, total_hp_before)
-            # 累计击杀
-            kills = max(old["n_alive"] - new_snap["n_alive"], 0)
-            self.turn_kills += kills
-            self.prev_combat_snap = new_snap
-        else:
-            if new_snap:
-                self.prev_combat_snap = new_snap
+            damage_dealt = min(max(total_hp_before - total_hp_after, 0), total_hp_before)
+            if last_t.extra is None:
+                last_t.extra = {}
+            last_t.extra["card_damage"] = damage_dealt
 
+            # 格挡
+            block_gained = max(new_snap["block"] - old["block"], 0)
+            last_t.extra["card_block"] = block_gained
+
+            # 击杀
+            kills = max(old["n_alive"] - new_snap["n_alive"], 0)
+            last_t.extra["card_kills"] = kills
+
+            # 能量生成
+            expected_energy = self._energy_before_play - self._cost_of_played_card
+            actual_energy = new_snap["energy"]
+            energy_gained = max(actual_energy - expected_energy, 0)
+            if energy_gained > 0:
+                last_t.extra["energy_bonus"] = energy_gained * 0.1
+
+            # 抽牌检测
+            current_hand = self._get_hand_id_counter(gs_combat.get("hand", []))
+            expected_hand = self._hand_before_play.copy()
+            played_id = last_t.extra.get("played_card_id")
+            if played_id and expected_hand[played_id] > 0:
+                expected_hand[played_id] -= 1
+                if expected_hand[played_id] <= 0:
+                    del expected_hand[played_id]
+            # 新牌 = 当前手牌 - 预期手牌
+            drawn = dict(current_hand)
+            for cid, count in expected_hand.items():
+                drawn[cid] = drawn.get(cid, 0) - count
+                if drawn[cid] <= 0:
+                    if cid in drawn:
+                        del drawn[cid]
+            source_idx = len(self.turn_buffer) - 1
+            for cid, count in drawn.items():
+                if count > 0:
+                    for _ in range(count):
+                        key = self._unique_draw_key(cid, self._draw_credit_map)
+                        self._draw_credit_map[key] = source_idx
+
+        if new_snap:
+            self.prev_combat_snap = new_snap
+
+        # --- Phase C - 记录出牌前状态 ---
+        self._hand_before_play = self._get_hand_id_counter(hand)
+        player_info = gs_combat.get("player", {})
+        self._energy_before_play = player_info.get("energy", 0)
+        if card_action < len(hand):
+            cost = hand[card_action].get("cost", 0)
+            self._cost_of_played_card = max(cost if cost is not None else 0, 0)
+        else:
+            self._cost_of_played_card = 0
+
+        # --- Phase D - 创建 transition ---
         state_data = {
             "tokens": _detach_tokens(tokens),
             "hand_encodings": hand_encodings.detach().cpu(),
@@ -1591,10 +1683,17 @@ class AgentV6:
             "monster_mask": monster_mask.detach().cpu(),
             "needs_target": needs_target,
         }
-        # reward=0，等回合结束时统一分配
+        extra = {}
+        if card_action < len(hand):
+            extra["played_card_id"] = hand[card_action].get("id", "unknown")
+            # 检查这张牌是否被别的牌抽到的
+            draw_key = self._find_draw_key(hand[card_action].get("id", ""), self._draw_credit_map)
+            if draw_key is not None:
+                extra["drawn_by_idx"] = self._draw_credit_map.pop(draw_key)
+
         transition = Transition(
             "combat", state_data, (card_action, target_action),
-            total_log_prob, value.item(), 0.0
+            total_log_prob, value.item(), 0.0, extra=extra
         )
         self.turn_buffer.append(transition)
 
@@ -1636,8 +1735,16 @@ class AgentV6:
         action = dist.sample().item()
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        # 选牌即时 reward 为 0，由战斗结果回溯反馈
-        reward = 0.0
+        # 选牌基础分：按牌面数值给分，上限 0.3
+        if action < len(cards):
+            card = cards[action]
+            dmg = max(card.get("damage", 0) or 0, 0)
+            blk = max(card.get("block", 0) or 0, 0)
+            cost = max(card.get("cost", 1) or 1, 1)
+            base_reward = min((dmg + blk) / cost * 0.05, 0.3)
+        else:
+            base_reward = 0.0
+        reward = base_reward
 
         extra = {"card_id": cards[action].get("id", "unknown")} if action < len(cards) else {"card_id": "skip"}
         state_data = {"tokens": _detach_tokens(tokens), "candidate_features": [f.detach().cpu() for f in candidate_feats]}
@@ -2030,19 +2137,41 @@ class AgentV6:
 
         # --- flush 最后一回合的 turn_buffer ---
         if self.turn_buffer:
-            hp_lost = max(self.turn_hp_start - hp, 0)
-            turn_reward = (self.turn_damage_dealt * 0.05
-                           + self.turn_kills * 1.0
-                           - hp_lost * 0.1)
-            n = len(self.turn_buffer)
-            per_card = turn_reward / n
+            # 先算最后一张牌的效果
+            new_snap = self._combat_snapshot(game_state)
+            if self.prev_combat_snap and new_snap and self.turn_buffer:
+                old = self.prev_combat_snap
+                last_t = self.turn_buffer[-1]
+                if last_t.extra is None:
+                    last_t.extra = {}
+                total_hp_before = sum(old["enemy_hps"])
+                total_hp_after = sum(new_snap["enemy_hps"])
+                damage_dealt = min(max(total_hp_before - total_hp_after, 0), total_hp_before)
+                last_t.extra["card_damage"] = damage_dealt
+                block_gained = max(new_snap["block"] - old["block"], 0)
+                last_t.extra["card_block"] = block_gained
+                kills = max(old["n_alive"] - new_snap["n_alive"], 0)
+                last_t.extra["card_kills"] = kills
+
+            # 逐牌算分
             for t in self.turn_buffer:
-                t.reward = per_card
+                card_damage = t.extra.get("card_damage", 0) if t.extra else 0
+                card_block = t.extra.get("card_block", 0) if t.extra else 0
+                card_kills = t.extra.get("card_kills", 0) if t.extra else 0
+                energy_bonus = t.extra.get("energy_bonus", 0) if t.extra else 0
+                t.reward = card_damage * 0.05 + card_block * 0.05 + card_kills * 1.0 + energy_bonus
+
+            # 掉血均摊
+            hp_lost = max(self.turn_hp_start - hp, 0)
+            n = len(self.turn_buffer)
+            if n > 0:
+                hp_penalty = hp_lost * 0.1 / n
+                for t in self.turn_buffer:
+                    t.reward -= hp_penalty
+
+            self._apply_draw_credit(self.turn_buffer)
             self.current_trajectory.extend(self.turn_buffer)
             self.turn_buffer = []
-        self.turn_damage_dealt = 0.0
-        self.turn_kills = 0
-        self.turn_hp_start = 0
 
         if not won and hp == 0 and self.current_trajectory:
             for t in reversed(self.current_trajectory):
@@ -2105,9 +2234,11 @@ class AgentV6:
         self.combat_hp_start = 0
         self.combat_turns = 0
         self.turn_buffer = []
-        self.turn_damage_dealt = 0.0
-        self.turn_kills = 0
         self.turn_hp_start = 0
+        self._hand_before_play = Counter()
+        self._energy_before_play = 0
+        self._cost_of_played_card = 0
+        self._draw_credit_map = {}
         log(f"{'WIN' if won else 'LOSE'} combat")
 
     def on_floor_cleared(self):
@@ -2147,9 +2278,11 @@ class AgentV6:
         self.combat_hp_start = 0
         self.combat_turns = 0
         self.turn_buffer = []
-        self.turn_damage_dealt = 0.0
-        self.turn_kills = 0
         self.turn_hp_start = 0
+        self._hand_before_play = Counter()
+        self._energy_before_play = 0
+        self._cost_of_played_card = 0
+        self._draw_credit_map = {}
 
         if len(self.trajectory_buffer) >= N_RUNS_PER_UPDATE and not getattr(self, 'suppress_ppo', False):
             log(f"PPO update: {len(self.trajectory_buffer)} runs")
@@ -2234,9 +2367,11 @@ class AgentV6:
                 self.combat_hp_start = 0
                 self.combat_turns = 0
                 self.turn_buffer = []
-                self.turn_damage_dealt = 0.0
-                self.turn_kills = 0
                 self.turn_hp_start = 0
+                self._hand_before_play = Counter()
+                self._energy_before_play = 0
+                self._cost_of_played_card = 0
+                self._draw_credit_map = {}
                 return "START ironclad 0"
             return "STATE"
 
@@ -2249,11 +2384,13 @@ class AgentV6:
                 self.combat_hp_value_start = hp_value(hp, max_hp)
                 self.combat_hp_start = hp  # 绝对 HP，用于选牌反馈
                 self.combat_turns = 0
-                # 回合级 reward 初始化
+                # 逐牌 reward 初始化
                 self.turn_buffer = []
-                self.turn_damage_dealt = 0.0
-                self.turn_kills = 0
                 self.turn_hp_start = hp
+                self._hand_before_play = Counter()
+                self._energy_before_play = 0
+                self._cost_of_played_card = 0
+                self._draw_credit_map = {}
             combat_st = gs.get("combat_state", {})
             self.combat_turns = combat_st.get("turn", self.combat_turns)
             if self.prev_combat_snap is None:
