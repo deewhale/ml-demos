@@ -1261,6 +1261,11 @@ class AgentV6:
         self._cost_of_played_card = 0        # 打出的牌的费用
         self._draw_credit_map = {}           # 抽到的牌 → turn_buffer 中源牌的 index
 
+        # Effect source pool（逐牌 buff/debuff 归因）
+        self._turn_effect_sources = []  # [(buffer_idx, effect_type, amount)] - 同回合内
+        self._pending_poison_tick = 0   # 上回合末尾敌人身上的毒总量（下回合开始时 tick）
+        self._poison_sources = []       # [(traj_idx, amount)] - 跨回合持久化
+
         # Anti-stuck
         self._last_sig = ""
         self._stuck = 0
@@ -1391,21 +1396,47 @@ class AgentV6:
         # 敌人状态
         enemy_hps = []
         enemy_debuffs = 0  # Vulnerable + Weak stacks on enemies
+        enemy_poison = []
+        enemy_weak = []
+        enemy_vulnerable = []
         for m in monsters:
             is_gone = m.get("is_gone", True)
             ehp = m.get("current_hp", 0) if not is_gone else 0
             enemy_hps.append(ehp)
+            m_poison = 0
+            m_weak = 0
+            m_vuln = 0
             for p in m.get("powers", []):
                 pid = p.get("id", "")
-                if pid in ("Vulnerable", "Weak", "Poison"):
-                    enemy_debuffs += abs(p.get("amount", 0))
+                amt = abs(p.get("amount", 0))
+                if pid == "Poison":
+                    enemy_debuffs += amt
+                    m_poison = amt
+                elif pid == "Weak":
+                    enemy_debuffs += amt
+                    m_weak = amt
+                elif pid == "Vulnerable":
+                    enemy_debuffs += amt
+                    m_vuln = amt
+            enemy_poison.append(m_poison)
+            enemy_weak.append(m_weak)
+            enemy_vulnerable.append(m_vuln)
 
         # 玩家 buff（Strength, Dexterity 等有益状态）
         player_buffs = 0
+        player_strength = 0
+        player_dexterity = 0
         for p in player.get("powers", []):
             pid = p.get("id", "")
-            if pid in ("Strength", "Dexterity", "Mantra", "Vigor"):
-                player_buffs += max(p.get("amount", 0), 0)
+            amt = max(p.get("amount", 0), 0)
+            if pid == "Strength":
+                player_strength = amt
+                player_buffs += amt
+            elif pid == "Dexterity":
+                player_dexterity = amt
+                player_buffs += amt
+            elif pid in ("Mantra", "Vigor"):
+                player_buffs += amt
 
         # 敌人 intent（用于评估 block 价值）
         expected_damage = 0
@@ -1428,6 +1459,11 @@ class AgentV6:
             "enemy_hps": enemy_hps,
             "enemy_debuffs": enemy_debuffs,
             "player_buffs": player_buffs,
+            "player_strength": player_strength,
+            "player_dexterity": player_dexterity,
+            "enemy_poison": enemy_poison,
+            "enemy_weak": enemy_weak,
+            "enemy_vulnerable": enemy_vulnerable,
             "expected_damage": expected_damage,
             "enemy_intending_attack": enemy_intending_attack,
             "n_alive": sum(1 for h in enemy_hps if h > 0),
@@ -1601,8 +1637,57 @@ class AgentV6:
                 for t in self.turn_buffer:
                     t.reward -= hp_penalty
 
+            # --- 跨回合 poison credit：上回合毒 tick 伤害归因到投毒源 ---
+            if self._pending_poison_tick > 0 and self._poison_sources:
+                total_sourced = sum(amt for _, amt in self._poison_sources)
+                if total_sourced > 0:
+                    for traj_idx, amt in self._poison_sources:
+                        if 0 <= traj_idx < len(self.current_trajectory):
+                            proportion = amt / total_sourced
+                            credit = self._pending_poison_tick * 0.05 * proportion * 0.3
+                            self.current_trajectory[traj_idx].reward += credit
+                self._pending_poison_tick = 0
+
+            # --- 同回合 buff/debuff credit ---
+            for buf_idx, effect_type, amount in self._turn_effect_sources:
+                if 0 <= buf_idx < len(self.turn_buffer):
+                    if effect_type == "strength":
+                        # Strength → 之后的攻击牌额外伤害
+                        for j in range(buf_idx + 1, len(self.turn_buffer)):
+                            if self.turn_buffer[j].extra and self.turn_buffer[j].extra.get("card_damage", 0) > 0:
+                                self.turn_buffer[buf_idx].reward += amount * 0.05 * 0.3
+                    elif effect_type == "dexterity":
+                        # Dexterity → 之后的技能牌额外格挡
+                        for j in range(buf_idx + 1, len(self.turn_buffer)):
+                            if self.turn_buffer[j].extra and self.turn_buffer[j].extra.get("card_block", 0) > 0:
+                                self.turn_buffer[buf_idx].reward += amount * 0.05 * 0.3
+                    elif effect_type == "vulnerable":
+                        # Vulnerable → 之后的攻击牌 50% 额外伤害
+                        for j in range(buf_idx + 1, len(self.turn_buffer)):
+                            if self.turn_buffer[j].extra:
+                                dmg = self.turn_buffer[j].extra.get("card_damage", 0)
+                                if dmg > 0:
+                                    self.turn_buffer[buf_idx].reward += dmg * 0.5 * 0.05 * 0.3
+                    elif effect_type == "weak":
+                        # Weak → 减少敌方攻击伤害 25%，给固定小额 credit
+                        self.turn_buffer[buf_idx].reward += amount * 0.1 * 0.3
+
             # 抽牌回传
             self._apply_draw_credit(self.turn_buffer)
+
+            # 将 poison sources 从 buffer index 转换为 trajectory index
+            base_idx = len(self.current_trajectory)
+            for buf_idx, etype, amount in self._turn_effect_sources:
+                if etype == "poison":
+                    self._poison_sources.append((base_idx + buf_idx, amount))
+
+            # 记录下一回合的 poison tick 预期值
+            new_snap_for_poison = self._combat_snapshot(game_state)
+            if new_snap_for_poison:
+                self._pending_poison_tick = sum(new_snap_for_poison.get("enemy_poison", []))
+
+            # 重置同回合效果源
+            self._turn_effect_sources = []
 
             self.current_trajectory.extend(self.turn_buffer)
             self.turn_buffer = []
@@ -1660,6 +1745,32 @@ class AgentV6:
                     for _ in range(count):
                         key = self._unique_draw_key(cid, self._draw_credit_map)
                         self._draw_credit_map[key] = source_idx
+
+            # Effect source detection: buff/debuff 变化归因到上一张牌
+            buf_idx = len(self.turn_buffer) - 1
+
+            str_delta = new_snap["player_strength"] - old["player_strength"]
+            if str_delta > 0:
+                self._turn_effect_sources.append((buf_idx, "strength", str_delta))
+
+            dex_delta = new_snap["player_dexterity"] - old["player_dexterity"]
+            if dex_delta > 0:
+                self._turn_effect_sources.append((buf_idx, "dexterity", dex_delta))
+
+            for ei in range(min(len(old["enemy_vulnerable"]), len(new_snap["enemy_vulnerable"]))):
+                v_delta = new_snap["enemy_vulnerable"][ei] - old["enemy_vulnerable"][ei]
+                if v_delta > 0:
+                    self._turn_effect_sources.append((buf_idx, "vulnerable", v_delta))
+
+            for ei in range(min(len(old["enemy_weak"]), len(new_snap["enemy_weak"]))):
+                w_delta = new_snap["enemy_weak"][ei] - old["enemy_weak"][ei]
+                if w_delta > 0:
+                    self._turn_effect_sources.append((buf_idx, "weak", w_delta))
+
+            for ei in range(min(len(old["enemy_poison"]), len(new_snap["enemy_poison"]))):
+                p_delta = new_snap["enemy_poison"][ei] - old["enemy_poison"][ei]
+                if p_delta > 0:
+                    self._turn_effect_sources.append((buf_idx, "poison", p_delta))
 
         if new_snap:
             self.prev_combat_snap = new_snap
@@ -1735,12 +1846,28 @@ class AgentV6:
         action = dist.sample().item()
         log_prob = dist.log_prob(torch.tensor(action, device=DEVICE)).item()
 
-        # 选牌基础分：按牌面数值给分，上限 0.3
+        # 选牌基础分：从 CARD_DATA 查找实际属性，按牌面数值给分，上限 0.3
         if action < len(cards):
             card = cards[action]
-            dmg = max(card.get("damage", 0) or 0, 0)
-            blk = max(card.get("block", 0) or 0, 0)
-            cost = max(card.get("cost", 1) or 1, 1)
+            card_id = card.get("id", "")
+            # 从 CARD_DATA 查找实际属性（draft 画面的 card 对象可能没有 damage/block）
+            card_vec = CARD_DATA.get(card_id)
+            if card_vec is None:
+                base_id = card_id.rsplit("+", 1)[0] if "+" in card_id else card_id
+                card_vec = CARD_DATA.get(base_id)
+            if card_vec is not None:
+                # CARD_DATA 存的是归一化后的 numpy 向量，需要反归一化
+                dmg_single = max(card_vec[_DIM_INDEX["damage_single"]] * 40.0, 0)
+                dmg_aoe = max(card_vec[_DIM_INDEX["damage_aoe"]] * 40.0, 0)
+                dmg = dmg_single + dmg_aoe
+                blk = max(card_vec[_DIM_INDEX["block_gain"]] * 30.0, 0)
+                cost_raw = card_vec[_DIM_INDEX["cost"]] * 4.0
+                cost = max(int(round(cost_raw)), 1) if cost_raw > 0 else 1
+            else:
+                # fallback: 从 card 对象读取
+                dmg = max(card.get("damage", 0) or 0, 0)
+                blk = max(card.get("block", 0) or 0, 0)
+                cost = max(card.get("cost", 1) or 1, 1)
             base_reward = min((dmg + blk) / cost * 0.05, 0.3)
         else:
             base_reward = 0.0
@@ -2169,9 +2296,44 @@ class AgentV6:
                 for t in self.turn_buffer:
                     t.reward -= hp_penalty
 
+            # 跨回合 poison credit
+            if self._pending_poison_tick > 0 and self._poison_sources:
+                total_sourced = sum(amt for _, amt in self._poison_sources)
+                if total_sourced > 0:
+                    for traj_idx, amt in self._poison_sources:
+                        if 0 <= traj_idx < len(self.current_trajectory):
+                            proportion = amt / total_sourced
+                            credit = self._pending_poison_tick * 0.05 * proportion * 0.3
+                            self.current_trajectory[traj_idx].reward += credit
+
+            # 同回合 buff/debuff credit
+            for buf_idx, effect_type, amount in self._turn_effect_sources:
+                if 0 <= buf_idx < len(self.turn_buffer):
+                    if effect_type == "strength":
+                        for j in range(buf_idx + 1, len(self.turn_buffer)):
+                            if self.turn_buffer[j].extra and self.turn_buffer[j].extra.get("card_damage", 0) > 0:
+                                self.turn_buffer[buf_idx].reward += amount * 0.05 * 0.3
+                    elif effect_type == "dexterity":
+                        for j in range(buf_idx + 1, len(self.turn_buffer)):
+                            if self.turn_buffer[j].extra and self.turn_buffer[j].extra.get("card_block", 0) > 0:
+                                self.turn_buffer[buf_idx].reward += amount * 0.05 * 0.3
+                    elif effect_type == "vulnerable":
+                        for j in range(buf_idx + 1, len(self.turn_buffer)):
+                            if self.turn_buffer[j].extra:
+                                dmg = self.turn_buffer[j].extra.get("card_damage", 0)
+                                if dmg > 0:
+                                    self.turn_buffer[buf_idx].reward += dmg * 0.5 * 0.05 * 0.3
+                    elif effect_type == "weak":
+                        self.turn_buffer[buf_idx].reward += amount * 0.1 * 0.3
+
             self._apply_draw_credit(self.turn_buffer)
             self.current_trajectory.extend(self.turn_buffer)
             self.turn_buffer = []
+
+        # 重置 effect source pool
+        self._turn_effect_sources = []
+        self._pending_poison_tick = 0
+        self._poison_sources = []
 
         if not won and hp == 0 and self.current_trajectory:
             for t in reversed(self.current_trajectory):
@@ -2239,6 +2401,9 @@ class AgentV6:
         self._energy_before_play = 0
         self._cost_of_played_card = 0
         self._draw_credit_map = {}
+        self._turn_effect_sources = []
+        self._pending_poison_tick = 0
+        self._poison_sources = []
         log(f"{'WIN' if won else 'LOSE'} combat")
 
     def on_floor_cleared(self):
@@ -2372,6 +2537,9 @@ class AgentV6:
                 self._energy_before_play = 0
                 self._cost_of_played_card = 0
                 self._draw_credit_map = {}
+                self._turn_effect_sources = []
+                self._pending_poison_tick = 0
+                self._poison_sources = []
                 return "START ironclad 0"
             return "STATE"
 
@@ -2391,6 +2559,9 @@ class AgentV6:
                 self._energy_before_play = 0
                 self._cost_of_played_card = 0
                 self._draw_credit_map = {}
+                self._turn_effect_sources = []
+                self._pending_poison_tick = 0
+                self._poison_sources = []
             combat_st = gs.get("combat_state", {})
             self.combat_turns = combat_st.get("turn", self.combat_turns)
             if self.prev_combat_snap is None:
