@@ -1620,11 +1620,12 @@ class AgentV6:
                 energy_bonus = t.extra.get("energy_bonus", 0) if t.extra else 0
                 t.reward = card_damage * 0.05 + card_block * 0.05 + card_kills * 1.0 + energy_bonus
 
-            # 掉血均摊
-            n = len(self.turn_buffer)
-            if n > 0:
-                hp_penalty = hp_lost * 0.1 / n
-                for t in self.turn_buffer:
+            # HP 惩罚只分给出牌的 transition，不给 END TURN
+            playable_cards = [t for t in self.turn_buffer if t.extra and t.extra.get("played_card_id")]
+            n_playable = len(playable_cards)
+            if n_playable > 0:
+                hp_penalty = hp_lost * 0.1 / n_playable
+                for t in playable_cards:
                     t.reward -= hp_penalty
 
             # --- 跨回合 poison credit：上回合毒 tick 伤害归因到投毒源 ---
@@ -1664,6 +1665,13 @@ class AgentV6:
 
             # 抽牌回传
             self._apply_draw_credit(self.turn_buffer)
+
+            # 回合内 baseline 减除：保留卡牌间相对差异，消除绝对正偏
+            if len(self.turn_buffer) > 1:
+                rewards = [t.reward for t in self.turn_buffer]
+                mean_reward = sum(rewards) / len(rewards)
+                for t in self.turn_buffer:
+                    t.reward -= mean_reward
 
             # 将 poison sources 从 buffer index 转换为 trajectory index
             base_idx = len(self.current_trajectory)
@@ -2278,12 +2286,13 @@ class AgentV6:
                 energy_bonus = t.extra.get("energy_bonus", 0) if t.extra else 0
                 t.reward = card_damage * 0.05 + card_block * 0.05 + card_kills * 1.0 + energy_bonus
 
-            # 掉血均摊
+            # HP 惩罚只分给出牌的 transition，不给 END TURN
             hp_lost = max(self.turn_hp_start - hp, 0)
-            n = len(self.turn_buffer)
-            if n > 0:
-                hp_penalty = hp_lost * 0.1 / n
-                for t in self.turn_buffer:
+            playable_cards = [t for t in self.turn_buffer if t.extra and t.extra.get("played_card_id")]
+            n_playable = len(playable_cards)
+            if n_playable > 0:
+                hp_penalty = hp_lost * 0.1 / n_playable
+                for t in playable_cards:
                     t.reward -= hp_penalty
 
             # 跨回合 poison credit
@@ -2317,6 +2326,14 @@ class AgentV6:
                         self.turn_buffer[buf_idx].reward += amount * 0.1 * 0.3
 
             self._apply_draw_credit(self.turn_buffer)
+
+            # 回合内 baseline 减除：保留卡牌间相对差异，消除绝对正偏
+            if len(self.turn_buffer) > 1:
+                rewards = [t.reward for t in self.turn_buffer]
+                mean_reward = sum(rewards) / len(rewards)
+                for t in self.turn_buffer:
+                    t.reward -= mean_reward
+
             self.current_trajectory.extend(self.turn_buffer)
             self.turn_buffer = []
 
@@ -2330,6 +2347,14 @@ class AgentV6:
                 if t.decision_type == "combat":
                     t.done = True
                     break
+
+        # 战斗完成奖励：根据 HP 保留率
+        max_hp = gs.get("max_hp", 0)
+        if won and hp > 0 and max_hp > 0:
+            hp_retained = hp / max_hp
+            combat_completion_reward = hp_retained * 0.5  # 满血 +0.5, 半血 +0.25
+            if self.current_trajectory:
+                self.current_trajectory[-1].reward += combat_completion_reward
 
         # --- 选牌回溯反馈：根据战斗 HP 变化更新之前的 draft 决策 ---
         hp_after = gs.get("current_hp", 0)
@@ -2408,7 +2433,7 @@ class AgentV6:
         if not self.strategy_only:
             self.runs += 1
 
-        terminal_r = 5.0 if won else -2.0
+        terminal_r = 10.0 if won else -3.0
         if self.current_trajectory:
             self.current_trajectory[-1].reward += terminal_r
             self.current_trajectory[-1].done = True
