@@ -1207,18 +1207,8 @@ def hp_value(hp, max_hp):
     return float(ratio ** 0.5)
 
 
-FLOOR_MILESTONES = {
-    3: 0.25, 6: 1.5, 10: 3.0, 13: 4.0, 15: 6.0,
-    16: 2.0, 17: 12.0,
-    25: 9.0,
-    33: 2.0, 34: 22.0,
-    50: 2.0, 51: 22.0,
-    55: 50.0,
-}
-
-
-def floor_milestone_reward(floor):
-    return float(FLOOR_MILESTONES.get(int(floor), 0.0))
+# FLOOR_MILESTONES 已移除 — 巨大的里程碑奖励(+12, +22, +50)导致 value function 不稳定
+# 进度信号已由 terminal reward 和逐卡 combat reward 覆盖
 
 
 # STEP_COST 已移除 — 逐卡即时反馈取代固定惩罚
@@ -2407,9 +2397,7 @@ class AgentV6:
         log(f"{'WIN' if won else 'LOSE'} combat")
 
     def on_floor_cleared(self):
-        reward = floor_milestone_reward(self.current_floor)
-        if reward > 0.0 and self.current_trajectory:
-            self.current_trajectory[-1].reward += reward
+        # 里程碑奖励已移除，仅更新楼层计数
         self.current_floor += 1
 
     def on_run_end(self, game_state):
@@ -2420,7 +2408,7 @@ class AgentV6:
         if not self.strategy_only:
             self.runs += 1
 
-        terminal_r = 50.0 if won else 0.0
+        terminal_r = 5.0 if won else -2.0
         if self.current_trajectory:
             self.current_trajectory[-1].reward += terminal_r
             self.current_trajectory[-1].done = True
