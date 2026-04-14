@@ -413,14 +413,8 @@ def analyze_and_report(game_result, diag, all_transitions, encoding_issues, enco
         warnings.append("No terminal transitions found (done=True missing)")
         out(f"  WARNING: No terminal transitions found")
 
-    # 楼层里程碑奖励
-    import sts_agent_v6 as v6
-    out(f"\n  Floor milestone rewards: {v6.FLOOR_MILESTONES}")
-    floor_r_transitions = [t for t in all_transitions if t.reward > 0.2 and t.decision_type != "combat"]
-    if floor_r_transitions:
-        out(f"  Transitions with floor milestone reward (>0.2, non-combat): {len(floor_r_transitions)}")
-    else:
-        out(f"  No obvious floor milestone rewards detected in strategy transitions")
+    # 楼层里程碑奖励（已移除，进度通过终端奖励体现）
+    out(f"\n  Floor milestone rewards: removed (progress via terminal reward only)")
 
     # ---- [POLICY BEHAVIOR] ----
     out("\n[POLICY BEHAVIOR]")
