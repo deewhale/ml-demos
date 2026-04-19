@@ -1,0 +1,502 @@
+{
+  "points": [
+    {
+      "name": "seed6_F5_SpikeSlimeL_T0",
+      "seed": 6,
+      "floor": 5,
+      "turn": 0,
+      "expected": "attack pressure over pure block (SpikeSlime_L 64 HP)"
+    },
+    {
+      "name": "seed6_F1_JawWorm_T0",
+      "seed": 6,
+      "floor": 1,
+      "turn": 0,
+      "expected": "open F1 easy combat, vuln + big attack"
+    },
+    {
+      "name": "seed13_F4_FiveSlimes_T0",
+      "seed": 13,
+      "floor": 4,
+      "turn": 0,
+      "expected": "5 small slimes, AoE opportunity"
+    },
+    {
+      "name": "seed10_F6_3xSentry_T0",
+      "seed": 10,
+      "floor": 6,
+      "turn": 0,
+      "expected": "3 Sentry elite, kill one fast to reduce DPS"
+    },
+    {
+      "name": "seed13_F6_Lagavulin_T0",
+      "seed": 13,
+      "floor": 6,
+      "turn": 0,
+      "expected": "sleeping Lagavulin, rush dmg while asleep"
+    },
+    {
+      "name": "seed1_F6_GremlinNob_T0",
+      "seed": 1,
+      "floor": 6,
+      "turn": 0,
+      "expected": "Nob punishes skills; favor attacks, avoid skill spam"
+    },
+    {
+      "name": "seed0_F1_Cultist_T0",
+      "seed": 0,
+      "floor": 1,
+      "turn": 0,
+      "expected": "F1 Cultist; kill before ritual stacks"
+    },
+    {
+      "name": "seed3_F5_SlaverRed_T0",
+      "seed": 3,
+      "floor": 5,
+      "turn": 0,
+      "expected": "SlaverRed, entangle threat \u2014 kill fast"
+    },
+    {
+      "name": "seed13_F8_Gremlins_T0",
+      "seed": 13,
+      "floor": 8,
+      "turn": 0,
+      "expected": "4 Gremlins, AoE or sequential kill"
+    },
+    {
+      "name": "seed15_F13_Lagavulin_T0",
+      "seed": 15,
+      "floor": 13,
+      "turn": 0,
+      "expected": "Lagavulin elite after Act 1 progression"
+    }
+  ],
+  "results": {
+    "seed6_F5_SpikeSlimeL_T0": {
+      "scores": [
+        [
+          "Vigilance -> Miracle -> EndTurn",
+          12.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 65,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "FearNoEvil",
+          "ClearTheMind",
+          "Wallop",
+          "Vigilance"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "SpikeSlime_L",
+            "hp": 64,
+            "max_hp": 64,
+            "statuses": {
+              "split": 1
+            }
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=5, target_idx=-1, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 0.36
+    },
+    "seed6_F1_JawWorm_T0": {
+      "scores": [
+        [
+          "Vigilance -> Miracle -> Vigilance -> Vigilance -> EndTurn",
+          -12830.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 79,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "Vigilance",
+          "Eruption",
+          "Defend_P",
+          "Defend_P"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "JawWorm",
+            "hp": 40,
+            "max_hp": 40,
+            "statuses": {}
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=2, target_idx=-1, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 0.03
+    },
+    "seed13_F4_FiveSlimes_T0": {
+      "scores": [
+        [
+          "Eruption -> CrushJoints -> Miracle -> Miracle -> EndTurn",
+          15568.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 78,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "ClearTheMind",
+          "CrushJoints",
+          "Vigilance",
+          "Eruption"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "AcidSlime_S",
+            "hp": 11,
+            "max_hp": 11,
+            "statuses": {}
+          },
+          {
+            "id": "SpikeSlime_S",
+            "hp": 12,
+            "max_hp": 12,
+            "statuses": {}
+          },
+          {
+            "id": "AcidSlime_S",
+            "hp": 9,
+            "max_hp": 9,
+            "statuses": {}
+          },
+          {
+            "id": "SpikeSlime_S",
+            "hp": 12,
+            "max_hp": 12,
+            "statuses": {}
+          },
+          {
+            "id": "AcidSlime_S",
+            "hp": 10,
+            "max_hp": 10,
+            "statuses": {}
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=5, target_idx=2, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 0.2
+    },
+    "seed10_F6_3xSentry_T0": {
+      "scores": [
+        [
+          "ClearTheMind -> WheelKick -> Miracle -> Doubt -> ReachHeaven -> EndTurn",
+          -52812.0
+        ],
+        [
+          "EndTurn",
+          -53260.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 61,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "WheelKick",
+          "ReachHeaven",
+          "Doubt",
+          "ClearTheMind"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "Sentry",
+            "hp": 41,
+            "max_hp": 41,
+            "statuses": {}
+          },
+          {
+            "id": "Sentry",
+            "hp": 41,
+            "max_hp": 41,
+            "statuses": {}
+          },
+          {
+            "id": "Sentry",
+            "hp": 38,
+            "max_hp": 38,
+            "statuses": {}
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=5, target_idx=-1, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 2.2
+    },
+    "seed13_F6_Lagavulin_T0": {
+      "scores": [
+        [
+          "ClearTheMind -> ClearTheMind -> Miracle -> Strike_P -> EndTurn",
+          743.0
+        ],
+        [
+          "EndTurn",
+          417.0
+        ],
+        [
+          "Perseverance -> EndTurn",
+          407.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 72,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "Perseverance",
+          "Tantrum",
+          "ClearTheMind",
+          "CrushJoints"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "Lagavulin",
+            "hp": 109,
+            "max_hp": 109,
+            "statuses": {
+              "metallicize": 8
+            }
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=4, target_idx=-1, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 2.8
+    },
+    "seed1_F6_GremlinNob_T0": {
+      "scores": [
+        [
+          "Miracle -> Protect -> Strike_P -> Defend_P -> EndTurn",
+          -25924.0
+        ],
+        [
+          "EndTurn",
+          -27404.0
+        ],
+        [
+          "Defend_P -> Normality -> EndTurn",
+          -27414.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 18,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "Defend_P",
+          "Normality",
+          "Protect",
+          "Nirvana"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "GremlinNob",
+            "hp": 82,
+            "max_hp": 82,
+            "statuses": {}
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=0, target_idx=-1, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 1.79
+    },
+    "seed0_F1_Cultist_T0": {
+      "scores": [
+        [
+          "Vigilance -> Miracle -> Vigilance -> Vigilance -> EndTurn",
+          -16928.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 79,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "Vigilance",
+          "Eruption",
+          "Defend_P",
+          "Defend_P"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "Cultist",
+            "hp": 54,
+            "max_hp": 54,
+            "statuses": {}
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=2, target_idx=-1, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 0.03
+    },
+    "seed3_F5_SlaverRed_T0": {
+      "scores": [
+        [
+          "Crescendo -> CutThroughFate -> SelectScryDiscard -> Miracle -> CutThroughFate -> EndTurn",
+          1215.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 56,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "Perseverance",
+          "CutThroughFate",
+          "LikeWater",
+          "Crescendo"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "SlaverRed",
+            "hp": 49,
+            "max_hp": 49,
+            "statuses": {}
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=5, target_idx=-1, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 0.49
+    },
+    "seed13_F8_Gremlins_T0": {
+      "scores": [
+        [
+          "CrushJoints -> Strike_P -> Tantrum -> Miracle -> Miracle -> EndTurn",
+          -21713.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 46,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "Perseverance",
+          "Tantrum",
+          "ClearTheMind",
+          "CrushJoints"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "GremlinTsundere",
+            "hp": 12,
+            "max_hp": 12,
+            "statuses": {}
+          },
+          {
+            "id": "GremlinFat",
+            "hp": 13,
+            "max_hp": 13,
+            "statuses": {}
+          },
+          {
+            "id": "GremlinWarrior",
+            "hp": 23,
+            "max_hp": 23,
+            "statuses": {
+              "angry": 1
+            }
+          },
+          {
+            "id": "GremlinTsundere",
+            "hp": 13,
+            "max_hp": 13,
+            "statuses": {}
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=5, target_idx=0, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 16.75
+    },
+    "seed15_F13_Lagavulin_T0": {
+      "scores": [
+        [
+          "EndTurn",
+          413.0
+        ],
+        [
+          "Miracle -> EndTurn",
+          403.0
+        ]
+      ],
+      "engine": {
+        "turn": 1,
+        "energy": 3,
+        "hp": 62,
+        "block": 0,
+        "hand": [
+          "Miracle",
+          "Strike_P",
+          "EmptyFist",
+          "Crescendo",
+          "Crescendo",
+          "SandsOfTime"
+        ],
+        "stance": "Neutral",
+        "enemies": [
+          {
+            "id": "Lagavulin",
+            "hp": 111,
+            "max_hp": 111,
+            "statuses": {
+              "metallicize": 8
+            }
+          }
+        ],
+        "player_statuses": {}
+      },
+      "chosen_action": "CombatAction(action_type='play_card', card_idx=0, target_idx=-1, potion_idx=-1, scry_discard_indices=())",
+      "_elapsed_s": 2.66
+    }
+  }
+}
