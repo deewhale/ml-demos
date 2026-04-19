@@ -1,0 +1,8 @@
+{"event": "floor_enter", "t": 0.001, "seed": 24, "floor": 0, "act": 1, "phase": "NEOW", "room_type": "START", "hp": 72, "max_hp": 72, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 0}
+{"event": "floor_enter", "t": 0.001, "seed": 24, "floor": 1, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 2}
+{"event": "combat_start", "t": 0.001, "seed": 24, "floor": 1, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "Cultist", "name": "Cultist", "hp": 49, "max_hp": 49, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 2}
+{"event": "combat_end", "t": 0.154, "seed": 24, "floor": 1, "hp": 74, "hp_lost": 5, "actions_taken": 23}
+{"event": "floor_enter", "t": 0.154, "seed": 24, "floor": 2, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 74, "max_hp": 79, "gold": 119, "deck_size": 11, "relics": ["PureWater"], "actions_taken": 26}
+{"event": "floor_enter", "t": 0.155, "seed": 24, "floor": 3, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 74, "max_hp": 79, "gold": 119, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 28}
+{"event": "combat_start", "t": 0.155, "seed": 24, "floor": 3, "act": 1, "room_type": "monster", "hp": 74, "max_hp": 79, "enemies": [{"id": "JawWorm", "name": "Jaw Worm", "hp": 41, "max_hp": 41, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 28}
+{"event": "game_end", "t": 0.632, "seed": 24, "floor": 3, "hp": 0, "won": false, "actions_taken": 103, "error": null}

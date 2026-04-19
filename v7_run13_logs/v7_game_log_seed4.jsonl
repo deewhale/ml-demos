@@ -1,0 +1,6 @@
+{"event": "floor_enter", "t": 0.001, "seed": 4, "floor": 0, "act": 1, "phase": "NEOW", "room_type": "START", "hp": 72, "max_hp": 72, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 0}
+{"event": "floor_enter", "t": 0.001, "seed": 4, "floor": 1, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 2}
+{"event": "combat_start", "t": 0.001, "seed": 4, "floor": 1, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "Cultist", "name": "Cultist", "hp": 50, "max_hp": 50, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 2}
+{"event": "combat_end", "t": 0.165, "seed": 4, "floor": 1, "hp": 74, "hp_lost": 5, "actions_taken": 23}
+{"event": "floor_enter", "t": 0.165, "seed": 4, "floor": 2, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 74, "max_hp": 79, "gold": 117, "deck_size": 11, "relics": ["PureWater"], "actions_taken": 26}
+{"event": "combat_start", "t": 0.166, "seed": 4, "floor": 2, "act": 1, "room_type": "elite", "hp": 74, "max_hp": 79, "enemies": [{"id": "Lagavulin", "name": "Lagavulin", "hp": 109, "max_hp": 109, "type": "ELITE"}], "deck_size": 11, "actions_taken": 28}

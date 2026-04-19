@@ -1,0 +1,11 @@
+{"event": "floor_enter", "t": 0.001, "seed": 16, "floor": 0, "act": 1, "phase": "NEOW", "room_type": "START", "hp": 72, "max_hp": 72, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 0}
+{"event": "floor_enter", "t": 0.001, "seed": 16, "floor": 1, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 2}
+{"event": "combat_start", "t": 0.001, "seed": 16, "floor": 1, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "Cultist", "name": "Cultist", "hp": 53, "max_hp": 53, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 2}
+{"event": "combat_end", "t": 0.157, "seed": 16, "floor": 1, "hp": 74, "hp_lost": 5, "actions_taken": 23}
+{"event": "floor_enter", "t": 0.164, "seed": 16, "floor": 2, "act": 1, "phase": "SHOP", "room_type": "SHOP", "hp": 74, "max_hp": 79, "gold": 119, "deck_size": 11, "relics": ["PureWater"], "actions_taken": 26}
+{"event": "floor_enter", "t": 0.164, "seed": 16, "floor": 3, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 74, "max_hp": 79, "gold": 44, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 29}
+{"event": "combat_start", "t": 0.164, "seed": 16, "floor": 3, "act": 1, "room_type": "monster", "hp": 74, "max_hp": 79, "enemies": [{"id": "SpikeSlime_S", "name": "Spike Slime (S)", "hp": 14, "max_hp": 14, "type": "NORMAL"}, {"id": "AcidSlime_S", "name": "Acid Slime (S)", "hp": 12, "max_hp": 12, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 29}
+{"event": "combat_end", "t": 0.174, "seed": 16, "floor": 3, "hp": 74, "hp_lost": 0, "actions_taken": 33}
+{"event": "floor_enter", "t": 0.174, "seed": 16, "floor": 4, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 74, "max_hp": 79, "gold": 59, "deck_size": 11, "relics": ["PureWater"], "actions_taken": 36}
+{"event": "combat_start", "t": 0.174, "seed": 16, "floor": 4, "act": 1, "room_type": "monster", "hp": 74, "max_hp": 79, "enemies": [{"id": "JawWorm", "name": "Jaw Worm", "hp": 40, "max_hp": 40, "type": "NORMAL"}], "deck_size": 11, "actions_taken": 36}
+{"event": "game_end", "t": 0.759, "seed": 16, "floor": 4, "hp": 0, "won": false, "actions_taken": 101, "error": null}

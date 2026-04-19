@@ -1,0 +1,15 @@
+{"event": "floor_enter", "t": 0.002, "seed": 10, "floor": 0, "act": 1, "phase": "NEOW", "room_type": "START", "hp": 72, "max_hp": 72, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 0}
+{"event": "floor_enter", "t": 0.003, "seed": 10, "floor": 1, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 2}
+{"event": "combat_start", "t": 0.003, "seed": 10, "floor": 1, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "Louse", "name": "Louse", "hp": 11, "max_hp": 11, "type": "NORMAL"}, {"id": "Louse", "name": "Louse", "hp": 12, "max_hp": 12, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 2}
+{"event": "combat_end", "t": 0.059, "seed": 10, "floor": 1, "hp": 79, "hp_lost": 0, "actions_taken": 8}
+{"event": "floor_enter", "t": 0.059, "seed": 10, "floor": 2, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 79, "max_hp": 79, "gold": 113, "deck_size": 11, "relics": ["PureWater"], "actions_taken": 11}
+{"event": "floor_enter", "t": 0.059, "seed": 10, "floor": 3, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 79, "max_hp": 79, "gold": 288, "deck_size": 12, "relics": ["PureWater"], "actions_taken": 13}
+{"event": "floor_enter", "t": 0.06, "seed": 10, "floor": 4, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 64, "max_hp": 79, "gold": 288, "deck_size": 12, "relics": ["PureWater"], "actions_taken": 15}
+{"event": "combat_start", "t": 0.06, "seed": 10, "floor": 4, "act": 1, "room_type": "monster", "hp": 64, "max_hp": 79, "enemies": [{"id": "Cultist", "name": "Cultist", "hp": 48, "max_hp": 48, "type": "NORMAL"}], "deck_size": 12, "actions_taken": 15}
+{"event": "combat_end", "t": 0.141, "seed": 10, "floor": 4, "hp": 64, "hp_lost": 0, "actions_taken": 27}
+{"event": "floor_enter", "t": 0.142, "seed": 10, "floor": 5, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 64, "max_hp": 79, "gold": 300, "deck_size": 13, "relics": ["PureWater"], "actions_taken": 30}
+{"event": "combat_start", "t": 0.142, "seed": 10, "floor": 5, "act": 1, "room_type": "monster", "hp": 64, "max_hp": 79, "enemies": [{"id": "JawWorm", "name": "Jaw Worm", "hp": 42, "max_hp": 42, "type": "NORMAL"}], "deck_size": 13, "actions_taken": 30}
+{"event": "combat_end", "t": 0.25, "seed": 10, "floor": 5, "hp": 61, "hp_lost": 3, "actions_taken": 49}
+{"event": "floor_enter", "t": 0.25, "seed": 10, "floor": 6, "act": 1, "phase": "COMBAT", "room_type": "ELITE", "hp": 61, "max_hp": 79, "gold": 317, "deck_size": 14, "relics": ["PureWater"], "actions_taken": 52}
+{"event": "combat_start", "t": 0.25, "seed": 10, "floor": 6, "act": 1, "room_type": "elite", "hp": 61, "max_hp": 79, "enemies": [{"id": "Sentry", "name": "Sentry", "hp": 41, "max_hp": 41, "type": "ELITE"}, {"id": "Sentry", "name": "Sentry", "hp": 41, "max_hp": 41, "type": "ELITE"}, {"id": "Sentry", "name": "Sentry", "hp": 38, "max_hp": 38, "type": "ELITE"}], "deck_size": 14, "actions_taken": 52}
+{"event": "game_end", "t": 6.628, "seed": 10, "floor": 6, "hp": 0, "won": false, "actions_taken": 66, "error": null}

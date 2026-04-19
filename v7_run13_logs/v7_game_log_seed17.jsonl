@@ -1,0 +1,15 @@
+{"event": "floor_enter", "t": 0.001, "seed": 17, "floor": 0, "act": 1, "phase": "NEOW", "room_type": "START", "hp": 72, "max_hp": 72, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 0}
+{"event": "floor_enter", "t": 0.002, "seed": 17, "floor": 1, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 2}
+{"event": "combat_start", "t": 0.002, "seed": 17, "floor": 1, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "JawWorm", "name": "Jaw Worm", "hp": 42, "max_hp": 42, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 2}
+{"event": "combat_end", "t": 0.168, "seed": 17, "floor": 1, "hp": 79, "hp_lost": 0, "actions_taken": 28}
+{"event": "floor_enter", "t": 0.169, "seed": 17, "floor": 2, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 79, "max_hp": 79, "gold": 113, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 31}
+{"event": "floor_enter", "t": 0.169, "seed": 17, "floor": 3, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 93, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 33}
+{"event": "combat_start", "t": 0.169, "seed": 17, "floor": 3, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "Louse", "name": "Louse", "hp": 15, "max_hp": 15, "type": "NORMAL"}, {"id": "Louse", "name": "Louse", "hp": 15, "max_hp": 15, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 33}
+{"event": "combat_end", "t": 0.237, "seed": 17, "floor": 3, "hp": 79, "hp_lost": 0, "actions_taken": 41}
+{"event": "floor_enter", "t": 0.237, "seed": 17, "floor": 4, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 108, "deck_size": 11, "relics": ["PureWater"], "actions_taken": 44}
+{"event": "combat_start", "t": 0.237, "seed": 17, "floor": 4, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "Cultist", "name": "Cultist", "hp": 51, "max_hp": 51, "type": "NORMAL"}], "deck_size": 11, "actions_taken": 44}
+{"event": "combat_end", "t": 0.334, "seed": 17, "floor": 4, "hp": 79, "hp_lost": 0, "actions_taken": 58}
+{"event": "floor_enter", "t": 0.334, "seed": 17, "floor": 5, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 79, "max_hp": 79, "gold": 128, "deck_size": 12, "relics": ["PureWater"], "actions_taken": 61}
+{"event": "combat_start", "t": 0.335, "seed": 17, "floor": 5, "act": 1, "room_type": "elite", "hp": 79, "max_hp": 79, "enemies": [{"id": "GremlinNob", "name": "Gremlin Nob", "hp": 82, "max_hp": 82, "type": "ELITE"}], "deck_size": 12, "actions_taken": 63}
+{"event": "combat_end", "t": 27.511, "seed": 17, "floor": 5, "hp": 10, "hp_lost": 69, "actions_taken": 101}
+{"event": "game_end", "t": 37.811, "seed": 17, "floor": 5, "hp": 0, "won": false, "actions_taken": 131, "error": null}

@@ -1,0 +1,4 @@
+{"event": "floor_enter", "t": 0.001, "seed": 18, "floor": 0, "act": 1, "phase": "NEOW", "room_type": "START", "hp": 72, "max_hp": 72, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 0}
+{"event": "floor_enter", "t": 0.001, "seed": 18, "floor": 1, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 2}
+{"event": "combat_start", "t": 0.001, "seed": 18, "floor": 1, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "JawWorm", "name": "Jaw Worm", "hp": 44, "max_hp": 44, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 2}
+{"event": "game_end", "t": 0.405, "seed": 18, "floor": 1, "hp": 0, "won": false, "actions_taken": 59, "error": null}
