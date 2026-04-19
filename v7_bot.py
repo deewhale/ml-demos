@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import sys
 import time
 from typing import Any, Dict, List, Optional, TextIO
@@ -334,12 +335,55 @@ class V7Bot:
 
         if phase == GamePhase.COMBAT:
             room_type = runner.current_room_type  # "monster" / "elite" / "boss"
-            a = self._adapter.pick_action(actions, runner, room_type=room_type)
+
+            # === Solver timeout fix ===
+            # Bug: TurnSolverAdapter._apply_room_type_budgets 只设置 inner solver,
+            # 没设 MultiTurnSolver.time_budget_ms (默认 30s). 又因为 pick_action
+            # 先调用 _get_turn_candidates(deadline=30s) 再 solve(30s), 单步 action
+            # 最多 60s, elite+boss 组合爆炸可 >90s.
+            # 修法: 把 multi_turn 外层预算强制拉到 cap_ms, 并用 SIGALRM 做硬超时保险.
+            _rt_key = (room_type or "monster").lower()
+            budgets = self._budgets.get(_rt_key)
+            cap_ms = budgets[2] if budgets else 3000.0
+            # 同步 multi_turn 的外层 deadline 与 cap_ms 一致
+            try:
+                self._adapter._multi_turn.time_budget_ms = float(cap_ms)
+            except AttributeError:
+                pass
+
+            # 硬超时保险 (SIGALRM, 主线程), 预算 +2s buffer
+            hard_timeout_s = max(1, int(cap_ms / 1000.0) + 2)
+            a = None
+            timed_out = False
+            old_handler = None
+
+            def _on_alarm(signum, frame):
+                raise TimeoutError(f"solver hard timeout {hard_timeout_s}s (room={_rt_key})")
+
+            try:
+                old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+                signal.alarm(hard_timeout_s)
+                a = self._adapter.pick_action(actions, runner, room_type=room_type)
+            except TimeoutError as te:
+                logger.warning("V7 solver hard-timeout: %s, fallback to defensive/first action", te)
+                timed_out = True
+                a = None
+            finally:
+                signal.alarm(0)
+                if old_handler is not None:
+                    signal.signal(signal.SIGALRM, old_handler)
+
             # 修法 A：solver 返回"必败"（最佳 score < _LOSS_THRESHOLD）
             # 且当前 HP > 0 时，走 defensive fallback 先苟活几回合
             fallback = self._defensive_fallback_if_losing(runner, actions)
             if fallback is not None:
                 return fallback
+            if a is None and timed_out:
+                # 超时 fallback: 优先 EndTurn / 第一个合法动作
+                for act in actions:
+                    if getattr(act, "action_type", None) == "end_turn":
+                        return act
+                return actions[0]
             return a if a is not None else actions[0]
 
         # 进入其他 phase 前 reset adapter cache
