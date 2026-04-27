@@ -1,22 +1,32 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
 *.eggs/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv/
 env/
 venv/
+.envrc
 
 # macOS
 .DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # Claude Code
 .claude/
@@ -27,10 +37,16 @@ tasks/
 # ML / PyTorch model weights
 *.pt
 *.pth
+*.ckpt
+*.safetensors
 sts_models/
 
-# Logs
+# Logs / training runs
 *.log
+v7_run*_logs/
+runs/
+wandb/
+mlruns/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -50,3 +66,7 @@ tools/
 
 # MNIST dataset (re-downloadable)
 data/MNIST/
+
+# Local work / scratch
+*.local
+scratch/
