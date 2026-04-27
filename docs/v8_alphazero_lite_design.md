@@ -240,9 +240,108 @@ L = L_policy + 0.5 · L_value + 0.01 · entropy
 
 ---
 
-## 7. 训练 Pipeline
+## 7. Dense Card Scoring（辅助特征）
 
-### 7.1 阶段划分
+### 7.1 动机
+
+V5 失败的核心是策略层（选卡 / 选路）只有局末胜负稀疏信号，跨 50+ 决策无法学习。V8 的主路线是 BC + value net 提供 dense supervision，但**仍可补一层"每张卡每场战斗的可解释分数"**作为辅助特征：
+
+- **NN 不用从零学卡牌价值**——用历史分数初始化
+- **可视化与调试**——训练完看分数排序是否符合直觉
+- **冷启动**——MVP 阶段无 NN 时纯分数已能做基本选卡决策
+
+这不是替代 NN value/policy，是补充。
+
+### 7.2 评分原则
+
+按**卡牌实际机制**计算贡献，不用统一比例。
+
+| 卡牌效果类型 | 评分公式 |
+|---|---|
+| 直接攻击（Strike, Bash, Heavy Blade） | `damage_dealt`（含打在 block 上的） |
+| 直接防御（Defend, Iron Wave 防御部分） | `damage_blocked`（cap at incoming）+ bonus if HP unchanged this turn |
+| 力量增益（Inflame, Demon Form, Flex） | `Σ (Δstrength × attack_multiplier × hits)` 对此 buff 生效后的所有攻击 |
+| 敏捷增益（Footwork, Watcher Pray） | `Σ (Δdex × block_card_count)` 对此 buff 生效后的所有防御 |
+| 抽牌（Dark Embrace, Battle Trance, Skim） | `Σ score(extra_card_played)` 对因此**额外**抽到并打出的卡 |
+| 易伤施加方（Bash, Sword Boomerang +Vuln 部分） | `0.5 × subsequent_damage_to_target_during_vuln` |
+| 虚弱施加方（Flash of Steel +Weak 等） | `0.25 × incoming_damage_prevented_due_to_weak` |
+| 脆弱施加方（罕见，敌方常用） | `0.25 × incoming_block_reduction_due_to_frail` |
+| 能量获得（Berserk, Ball Lightning） | `score(next_card_played) × proportion` |
+| 多段攻击（Twin Strike, Pummel） | 每段独立按直接攻击算分 |
+| 消耗类（Feed, Reaper 回血） | 包含 max_hp gain 或 heal 折算 HP 价值 |
+| 不可分类（Apotheosis, Madness） | 后处理：被改造卡的 score 增量归还原卡 |
+
+### 7.3 长尾压制
+
+Reaper infinite / Body Slam infinite / Whirlwind X 费爆发等局面会让单卡分数异常高，主导 deck-level 平均。需要：
+
+- `log(1 + raw_score)` 压尾
+- 或 winsorize at 95th percentile
+- 防止单局 outlier 影响卡牌价值评估
+
+### 7.4 累积与聚合
+
+- 每场战斗结束，把所有出过的卡的分数记入 `card_score_log`
+- 多局累积后，每张卡得到：
+    - `historical_avg_score`（平均贡献）
+    - `historical_play_count`（出现次数）
+    - `historical_score_var`（方差，高方差 = Discovery 这种随机产卡的卡）
+- deck-level 强度可由这些聚合（如 `mean(card_avg_scores)` weighted by play frequency）
+
+### 7.5 NN 输入扩展
+
+现有 token 序列每张卡的 token 维度增加 4-6 维：
+
+| 字段 | 含义 |
+|---|---|
+| historical_avg_score | 这张卡在当前 deck 上下文中的平均贡献 |
+| historical_play_count | 出现次数（低 count 时表示数据稀疏） |
+| historical_score_var | 分数方差（识别随机产卡） |
+| score_relative_rank | 在当前 deck 中的相对排名 |
+
+NN encoder 把这些和 57 维效果向量拼接，**不替换原编码**。
+
+### 7.6 冷启动用法
+
+MVP 阶段（NN 还没训好）时，可以用纯 card score 排序做选卡：
+
+```python
+def cold_start_draft(deck, candidates):
+    return max(candidates, key=lambda c: predicted_score(c, deck))
+```
+
+注意：score 受 deck 上下文影响，单看 raw score 排序不准。需要按 deck 类型条件化（strength deck 给 +str 加权，poison deck 给 poison 加权）。
+
+### 7.7 已知 limitation
+
+- **Synergy attribution 在复杂情况下不完美**：Shapley 值更准但计算昂贵
+- **随机产卡（Discovery, Havoc）方差大**：需要更多样本才稳定
+- **依赖战斗中能正确归因**：模拟器需要 expose 每张卡触发的具体效果链
+- 这是**辅助信号**，不是替代 NN value/policy
+
+### 7.8 实施工作量
+
+| 步骤 | 工作量 | 依赖 |
+|---|---|---|
+| 1. 战斗后 hook：扫描每张卡的效果链 | 1-2 天 | StSRLSolver 的 effect log |
+| 2. 评分公式实现（每类 1-2 行） | 1 天 | 步骤 1 |
+| 3. 累积存储 + token 维度扩展 | 0.5 天 | 步骤 2 |
+| 4. NN 训练接入新维度 | 0.5 天（已有 encoder） | 步骤 3 |
+
+总计约 3-4 天，可与 Stage A（teacher 移植）并行。
+
+### 7.9 与 §6（build 深度 tension）的关系
+
+§6 提到三个补丁（A 硬编码 build 类型 / B 分层模型 / C 数据扩增）。本节是**补丁 A 的精细化版本**：
+- 补丁 A 原方案是按 effect 维度自动分类 deck（strength/poison/exhaust/block）
+- 本节进一步给每张卡打分，比"是不是 strength deck"更细粒度
+- 两者可叠加使用
+
+---
+
+## 8. 训练 Pipeline
+
+### 8.1 阶段划分
 
 | Stage | 任务 | 预估工作量 | 预估机时 | DoD |
 |---|---|---|---|---|
@@ -256,7 +355,7 @@ L = L_policy + 0.5 · L_value + 0.01 · entropy
 
 **关键路径**：A → A' → B → C（约 2 周）。D 可与 A-C 并行。
 
-### 7.2 训练细节
+### 8.2 训练细节
 
 - **真 minibatch**（修复 pretrain_v6.py 的 grad accum 假 batch bug）
 - batch size 256
@@ -264,14 +363,14 @@ L = L_policy + 0.5 · L_value + 0.01 · entropy
 - Optimizer：AdamW, LR=1e-4
 - Scheduler：cosine decay
 
-### 7.3 Regression 接入
+### 8.3 Regression 接入
 
 V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 - 运行同样 10 点，对比 `chosen_action`
 - 变化 → 打印 diff，manual review（不自动 fail）
 - top-3 都不含原 chosen → 标 regression，阻断
 
-### 7.4 部署（Stage C）
+### 8.4 部署（Stage C）
 
 - 实现 `V8Evaluator` 类，hook 到 `TurnSolver.neural_eval`（turn_solver.py:354）
 - `policy_prior` 做 top-5 action 剪枝
@@ -280,16 +379,16 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 
 ---
 
-## 8. 人类点评闭环（Stage D）
+## 9. 人类点评闭环（Stage D）
 
-### 8.1 UI 技术栈
+### 9.1 UI 技术栈
 
 - FastAPI + 静态 HTML/CSS + vanilla JS
 - 本地 localhost 运行
 - 中文界面
 - < 300 行前端代码
 
-### 8.2 Active Learning 筛选
+### 9.2 Active Learning 筛选
 
 每局只 surface 关键决策（5-10 个点/局，10 局 = 50-100 点/批）：
 - Policy uncertainty: max(π) < 0.4
@@ -297,7 +396,7 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 - HP catastrophe precursor: 下 3 回合 HP 跌 > 30%
 - Rare rooms: Elite / Boss / Shop / 特殊事件
 
-### 8.3 交互形式
+### 9.3 交互形式
 
 **主：偏好对（Preference Pair）**
 - 展示当前 state、AI 选的 action、2-3 个 top-k 替选
@@ -307,7 +406,7 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 **辅：中文点评**
 - 用户写自然语言解释 → Claude API 解析为结构化信号
 
-### 8.4 数据扩展（Label Propagation）
+### 9.4 数据扩展（Label Propagation）
 
 - Claude API 读用户偏好对 + 点评
 - 扩展到同 state 其他 action 对、相似 state 的 action 对
@@ -315,11 +414,11 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 - 扩展 pair 降权（loss_weight=0.3）
 - 每轮抽样 20% 扩展 pair 让用户复核
 
-### 8.5 门槛
+### 9.5 门槛
 
 攒到 **300-500 条原始偏好对**（≈ 1000-2000 条含扩展）再启动 DPO。
 
-### 8.6 DPO 细节
+### 9.6 DPO 细节
 
 - Reference model：冻结的 BC-trained policy
 - Loss：`L_DPO = -log σ(β·(log π_θ(a_w|s) - log π_θ(a_l|s) - log π_ref(a_w|s) + log π_ref(a_l|s)))`
@@ -329,9 +428,9 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 
 ---
 
-## 9. 评估方案
+## 10. 评估方案
 
-### 9.1 三级指标
+### 10.1 三级指标
 
 | 层级 | 频率 | 内容 | 断路器 |
 |---|---|---|---|
@@ -339,7 +438,7 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 | Simulator | 每 checkpoint | 30 seed A0 Ironclad | 连续 2 次退化即回滚 |
 | Live game | 重大版本 | 3-5 局真实游戏 | 崩溃即回滚 |
 
-### 9.2 基线对比
+### 10.2 基线对比
 
 | 版本 | Avg Floor | Win Rate |
 |---|---|---|
@@ -352,7 +451,7 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 
 ---
 
-## 10. 风险登记
+## 11. 风险登记
 
 | 风险 | 可能性 | 影响 | 缓解 |
 |---|---|---|---|
@@ -369,7 +468,7 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 
 ---
 
-## 11. 开放决策
+## 12. 开放决策
 
 - [ ] Teacher 是否 ensemble（bottled_ai + V7）？当前决策：**只 bottled_ai**
 - [ ] Value target 软/硬标签？当前决策：**软 `floor/57`**
@@ -380,7 +479,7 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 
 ---
 
-## 12. 代码结构（实施时创建）
+## 13. 代码结构（实施时创建）
 
 | 文件 | 作用 | 状态 |
 |---|---|---|
@@ -397,7 +496,7 @@ V7 已有 `v7_regression.py`（10 决策点）。V8 加入 `neural_eval` 后：
 
 ---
 
-## 13. 与 Notion 文档关系
+## 14. 与 Notion 文档关系
 
 Notion「STS机器学习」是协作者入口，面向上手 + 进度跟踪。
 本文档（repo 内）是技术权威版本，面向实施细节。
