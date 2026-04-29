@@ -20,7 +20,8 @@ from collections import defaultdict
 # 路径设置
 BASE_DIR = Path(__file__).parent
 sys.path.insert(0, str(BASE_DIR))
-sys.path.insert(0, "STSRLSOLVER_PATH")
+from sts_paths import ensure_on_sys_path
+ensure_on_sys_path()
 
 # ============================================================
 # 输出同时写 stdout 和文件

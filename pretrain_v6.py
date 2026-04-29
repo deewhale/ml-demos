@@ -32,8 +32,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 from pathlib import Path
 
-sys.path.insert(0, "STSRLSOLVER_PATH")
-sys.path.insert(0, "REPO_ROOT")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sts_paths import ensure_on_sys_path
+ensure_on_sys_path()
 
 from packages.engine.game import GameRunner, GamePhase
 from packages.engine.content.cards import ALL_CARDS, CardType, CardRarity, CardTarget

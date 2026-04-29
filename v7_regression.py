@@ -27,8 +27,10 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-sys.path.insert(0, "REPO_ROOT/")
-sys.path.insert(0, "STSRLSOLVER_PATH")
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from sts_paths import ensure_on_sys_path
+ensure_on_sys_path()
 
 from v7_bot import V7Bot, SOLVER_BUDGETS
 from v7_evaluator import patch_turn_solver_eval

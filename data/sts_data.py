@@ -11,6 +11,7 @@ STS 数据提取模块 — 从 StSRLSolver 读取卡牌/遗物/药水定义，�
     DIM_NAMES — 维度名列表（调试用）
 """
 
+import os
 import sys
 import numpy as np
 from typing import Dict, Optional, Tuple
@@ -18,9 +19,12 @@ from typing import Dict, Optional, Tuple
 # ============================================================================
 # 将 StSRLSolver 加入 sys.path，以便 import 其内容模块
 # ============================================================================
-_SOLVER_ROOT = "STSRLSOLVER_PATH"
-if _SOLVER_ROOT not in sys.path:
-    sys.path.insert(0, _SOLVER_ROOT)
+# data/sts_data.py 在仓库根的 data/ 子目录里，需把仓库根加入 sys.path 才能 import sts_paths
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from sts_paths import ensure_on_sys_path
+ensure_on_sys_path()
 
 from packages.engine.content.cards import (
     ALL_CARDS, Card, CardType, CardRarity, CardTarget, CardColor,

@@ -17,7 +17,8 @@ import time
 from typing import Any, Dict, List, Optional, TextIO
 
 # 保证能 import StSRLSolver
-sys.path.insert(0, "STSRLSOLVER_PATH")
+from sts_paths import ensure_on_sys_path
+ensure_on_sys_path()
 
 from packages.engine.game import (
     GameRunner, GamePhase,
