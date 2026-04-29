@@ -41,3 +41,5 @@ Output: `v6_training_v3.log`
 - 模型是否能从输入中获取有效信息？
 - PPO 超参数是否合适？
 - 需要 curriculum learning？
+
+<!-- git smoke test 2026-04-29 -->
