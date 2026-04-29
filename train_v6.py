@@ -11,9 +11,9 @@ Key design:
   4. 统一效果编码（CARD_DATA/RELIC_DATA/POTION_DATA 查表）
 
 Usage:
-  cd STSRLSOLVER_PATH
-  uv run python3 REPO_ROOT/train_v6.py --from-scratch --test
-  uv run python3 REPO_ROOT/train_v6.py --n-games 500 --workers 4
+  cd $STSRLSOLVER_PATH
+  uv run python3 <repo>/train_v6.py --from-scratch --test
+  uv run python3 <repo>/train_v6.py --n-games 500 --workers 4
 """
 
 import sys

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 import traceback
 
-sys.path.insert(0, "REPO_ROOT/")
+# 兼容历史 worktree 路径：可通过 V7_BOT_PATH 注入额外的 import 目录
+_extra = os.environ.get("V7_BOT_PATH")
+if _extra:
+    sys.path.insert(0, _extra)
 
 from v7_bot import V7Bot
 

@@ -39,7 +39,7 @@
 
 ### 2.1 代码现状
 
-文件：`STSRLSOLVER_PATH/packages/training/turn_solver.py`（1342 行）
+文件：`$STSRLSOLVER_PATH/packages/training/turn_solver.py`（1342 行）
 
 **能跑的程度：8/10（可直接作为 V7 骨架）**
 
@@ -51,7 +51,7 @@
 - **搜索空间**：每回合搜索所有合法 action（出牌 / 使用药水 / Scry 丢弃），包含 EndTurn。
 - **Plan cache + tree reuse**：LRU 缓存 512 条计划，同状态秒回。
 - **Neural leaf eval 钩子**：已预留（`neural_eval` 参数），当前未使用。
-- **可跑脚本**：`REPO_ROOT/tools/test_solver_game.py`（Ironclad 端到端测试，打印 floor/HP/time；Watcher 未测）。
+- **可跑脚本**：`<repo>/tools/test_solver_game.py`（Ironclad 端到端测试，打印 floor/HP/time；Watcher 未测）。
 
 ### 2.2 当前评估函数（`_score_terminal`，turn_solver.py:262-363）
 

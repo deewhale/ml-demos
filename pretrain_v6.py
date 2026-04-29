@@ -8,15 +8,15 @@ Phase 2: 用 cross-entropy 训练 combat head（card + target 两阶段）
 Phase 3 (可选): 从 .run 文件预训练 draft/choice/path heads
 
 Usage:
-  cd STSRLSOLVER_PATH
+  cd $STSRLSOLVER_PATH
   # 一步到位：收集 + 训练
-  uv run python3 REPO_ROOT/pretrain_v6.py \
+  uv run python3 <repo>/pretrain_v6.py \
       --collect-games 200 --epochs 10 --save sts_models/pretrain_v6.pt
 
   # 分步执行
-  uv run python3 REPO_ROOT/pretrain_v6.py \
+  uv run python3 <repo>/pretrain_v6.py \
       --collect-only --n-games 200 --data-file combat_data.pkl
-  uv run python3 REPO_ROOT/pretrain_v6.py \
+  uv run python3 <repo>/pretrain_v6.py \
       --train-only --data-file combat_data.pkl --epochs 10 --save sts_models/pretrain_v6.pt
 """
 
