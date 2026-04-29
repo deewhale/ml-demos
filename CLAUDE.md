@@ -41,6 +41,12 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 - 日志：决策日志写 `.log` 文件，统计写 `_stats.log`
 - Device: 优先 MPS，fallback CPU
 
+## 路径规范（防信息泄漏）
+- 严禁在代码、注释、文档里硬编码 `/Users/<username>/...` 或 `~/Documents/code/github/...` 等本机/家目录绝对路径
+- 外部仓库引用走 `sts_paths.py` 的 env var + 仓库相对路径方案
+- 文档里写示例路径用 `<repo>` / `<your-clone-dir>` / `$STSRLSOLVER_PATH` 占位
+- pre-commit hook (.git/hooks/pre-commit) 会拦截违规 staged 改动；新 clone 后需手动启用
+
 ## 开发规范
 
 - 每个 demo 文件自包含，不超过 200 行

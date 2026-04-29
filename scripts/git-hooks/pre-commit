@@ -1,0 +1,13 @@
+#!/bin/sh
+# 阻止包含本机绝对路径或家目录路径的 staged 改动
+# 如需绕过：git commit --no-verify
+PATTERNS='/Users/[a-zA-Z][a-zA-Z0-9_-]*/|~/Documents/code/github/'
+HITS=$(git diff --cached -- ':!external/' | grep -E "^\+.*($PATTERNS)" || true)
+if [ -n "$HITS" ]; then
+  echo "ERROR: pre-commit blocked. Staged change contains absolute/home path:"
+  echo "$HITS" | head -20
+  echo ""
+  echo "Use sts_paths.ensure_on_sys_path() / placeholders. Bypass: git commit --no-verify"
+  exit 1
+fi
+exit 0
