@@ -37,13 +37,15 @@ def encode_state(record: Dict[str, Any]) -> torch.Tensor:
     把一条 JSONL 记录编码成固定长度 STATE_DIM 向量。
 
     布局（256 维）:
-      [0:8]    数值特征：hp/max_hp, block/max_hp, energy/10, turn/30, floor/57, act/3, draw_size/30, discard_size/30
-      [8:11]   每个 enemy（最多 3 个）的 hp/max_hp，缺位 padding 0
-      [11:14]  每个 enemy 的 block/50
-      [14:14+HASH_BUCKETS=270]  手牌 multi-hot（hash bucket 计数）
-
-    实际：8 + 3 + 3 + 256 = 270，截到 256 → 我们把数值塞进前面，hash 用前 242 个 bucket。
-    简单点：分段拼接然后 pad/truncate 到 STATE_DIM。
+      [0:8]    player 数值：hp_pct, block_pct, energy/10, turn/30, floor/57,
+               act/3, draw_size/30, discard_size/30
+      [8:14]   3 个 enemy 的 (hp_pct, block_pct)
+      [14:19]  bottled_ai 教师评估 5 个标量特征：
+                 battle_won, incoming_damage/30, player_hp_pct (=mirrors player.hp/max_hp),
+                 dead_monsters/3, total_monster_health/200
+               — 这些值由 bottled_ai ComparatorAssessment 直接给出，
+               是教师对当前局面的「Ironclad 视角」总结
+      [19:STATE_DIM]  剩余维度给 hand multi-hot（hash bucket 计数）
     """
     out: List[float] = []
 
@@ -59,7 +61,7 @@ def encode_state(record: Dict[str, Any]) -> torch.Tensor:
     out.append(float(record.get("draw_pile_size", 0)) / 30.0)
     out.append(float(record.get("discard_pile_size", 0)) / 30.0)
 
-    # ---- enemies（最多 3 个，每个 hp_pct + block） ----
+    # ---- enemies（最多 3 个，每个 hp_pct + block）（6 维） ----
     enemies = record.get("enemies", []) or []
     for i in range(MAX_ENEMIES):
         if i < len(enemies):
@@ -71,7 +73,19 @@ def encode_state(record: Dict[str, Any]) -> torch.Tensor:
             out.append(0.0)
             out.append(0.0)
 
-    # 当前累计 8 + 6 = 14 维。剩余 STATE_DIM - 14 = 242 维给 hand multi-hot。
+    # ---- bottled_ai 教师评估特征（5 维） ----
+    # 字段值由 v8_data_collector → ComparatorAssessment 写出。
+    # 缺失（采集阶段还没接通）时整段 0，模型仍可训练但失去教师信号。
+    ba = record.get("bottled_ai_assessment") or {}
+    ba_battle_won = 1.0 if ba.get("battle_won") else 0.0
+    ba_incoming = float(ba.get("incoming_damage", 0) or 0) / 30.0
+    # player_hp_pct 重复 player.hp/max_hp 但来自 bottled_ai 的口径，留作冗余信号
+    ba_player_hp = float(p.get("hp", 0)) / max_hp
+    ba_dead_mon = float(ba.get("dead_monsters", 0) or 0) / 3.0
+    ba_tmh = float(ba.get("total_monster_health", 0) or 0) / 200.0
+    out.extend([ba_battle_won, ba_incoming, ba_player_hp, ba_dead_mon, ba_tmh])
+
+    # 当前累计 8 + 6 + 5 = 19 维。剩余给 hand multi-hot。
     hand_buckets = STATE_DIM - len(out)
     hand_vec = [0.0] * hand_buckets
     for card_id in (record.get("hand") or [])[:MAX_HAND]:

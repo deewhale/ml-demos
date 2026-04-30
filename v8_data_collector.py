@@ -64,6 +64,124 @@ JSONL line schema (one decision per line):
 """
 
 
+def try_bottled_assessment(run_state, combat_state):
+    """构造 bottled_ai 评估 dict（best-effort）。返回 (assessment, error)。
+
+    被 V8CollectorBot 与 V8InferenceBot 共用：前者写 JSONL，后者
+    在 inference 时构造 record 给 model.encode_state 消费。
+    """
+    if not _BOTTLED_IMPORT_OK:
+        return None, f"import failed: {_BOTTLED_IMPORT_ERR}"
+
+    try:
+        relics_dict: Dict[str, int] = {}
+        for r in getattr(run_state, "relics", []) or []:
+            rid = getattr(r, "id", str(r))
+            relics_dict[rid] = relics_dict.get(rid, 0) + 1
+
+        try:
+            potions_list: List[str] = list(run_state.get_potions())
+        except Exception:  # noqa: BLE001
+            potions_list = []
+
+        adapter = BottledStateAdapter(
+            combat_state,
+            run_relics=relics_dict,
+            run_potions=potions_list,
+        )
+        cfg = ComparatorAssessmentConfig(
+            powers_we_like=POWERS_WE_LIKE,
+            powers_we_like_less=POWERS_WE_LIKE_LESS,
+            powers_we_dislike=POWERS_WE_DISLIKE,
+            cards_that_exit_wrath=CARDS_THAT_EXIT_WRATH,
+        )
+        ca = ComparatorAssessment(adapter, adapter, cfg)
+
+        assessment: Dict[str, Any] = {}
+        for name in (
+            "battle_won", "battle_lost", "incoming_damage", "energy",
+            "intangible", "dead_monsters", "lowest_true_health_monster",
+            "total_monster_health", "enemy_vulnerable", "enemy_weak",
+            "player_powers_good", "player_powers_bad", "bad_cards_exhausted",
+        ):
+            fn = getattr(ca, name, None)
+            if fn is None:
+                continue
+            try:
+                val = fn()
+                if isinstance(val, (bool, int, float, str)):
+                    assessment[name] = val
+                else:
+                    assessment[name] = str(val)
+            except Exception as inner:  # noqa: BLE001
+                assessment[name] = f"<err: {type(inner).__name__}: {inner}>"
+
+        return assessment, None
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
+
+
+def build_combat_record(
+    runner,
+    actions,
+    chosen_action,
+    seed: Any = None,
+) -> Dict[str, Any]:
+    """从 runner 的当前 COMBAT 状态构造一条 record（与 JSONL schema 一致）。
+
+    chosen_action 可为 None（inference 时还没选定）。
+    """
+    rs = runner.run_state
+    cc = runner.current_combat
+    state = cc.state
+
+    player = state.player
+    player_dict = {
+        "hp": getattr(player, "hp", 0),
+        "max_hp": getattr(player, "max_hp", 0),
+        "block": getattr(player, "block", 0),
+        "energy": getattr(state, "energy", 0),
+        "powers": dict(getattr(player, "statuses", {}) or {}),
+    }
+
+    enemies_list = []
+    for e in getattr(state, "enemies", []) or []:
+        enemies_list.append({
+            "id": getattr(e, "id", ""),
+            "hp": getattr(e, "hp", 0),
+            "max_hp": getattr(e, "max_hp", 0),
+            "block": getattr(e, "block", 0),
+            "powers": dict(getattr(e, "statuses", {}) or {}),
+        })
+
+    hand = list(getattr(state, "hand", []) or [])
+    draw_pile = getattr(state, "draw_pile", []) or []
+    discard_pile = getattr(state, "discard_pile", []) or []
+    exhaust_pile = getattr(state, "exhaust_pile", []) or []
+
+    turn = getattr(state, "turn", getattr(state, "_turn", 0))
+    bottled_assessment, bottled_error = try_bottled_assessment(rs, state)
+
+    rec = {
+        "seed": seed,
+        "floor": rs.floor,
+        "act": rs.act,
+        "turn": turn,
+        "player": player_dict,
+        "enemies": enemies_list,
+        "hand": hand,
+        "draw_pile_size": len(draw_pile),
+        "discard_pile_size": len(discard_pile),
+        "exhaust_pile_size": len(exhaust_pile),
+        "available_actions": [_action_to_str(a) for a in actions],
+        "chosen_action": _action_to_str(chosen_action) if chosen_action is not None else "",
+        "solver_scores": [],
+        "bottled_ai_assessment": bottled_assessment,
+        "bottled_ai_error": bottled_error,
+    }
+    return rec
+
+
 def _action_to_str(a: Any) -> str:
     """把 action 对象简化成可识别的字符串。"""
     if a is None:
@@ -163,129 +281,17 @@ class V8CollectorBot(V7Bot):
     # ------------------------------------------------------------------
 
     def _build_record(self, runner, actions, chosen_action) -> Dict[str, Any]:
-        rs = runner.run_state
-        cc = runner.current_combat
-        state = cc.state
-
-        # Player
-        player = state.player
-        player_dict = {
-            "hp": getattr(player, "hp", 0),
-            "max_hp": getattr(player, "max_hp", 0),
-            "block": getattr(player, "block", 0),
-            "energy": getattr(state, "energy", 0),
-            "powers": dict(getattr(player, "statuses", {}) or {}),
-        }
-
-        # Enemies
-        enemies_list = []
-        for e in getattr(state, "enemies", []) or []:
-            enemies_list.append({
-                "id": getattr(e, "id", ""),
-                "hp": getattr(e, "hp", 0),
-                "max_hp": getattr(e, "max_hp", 0),
-                "block": getattr(e, "block", 0),
-                "powers": dict(getattr(e, "statuses", {}) or {}),
-            })
-
-        # Hand / piles（CombatState.hand 是 List[str]）
-        hand = list(getattr(state, "hand", []) or [])
-        draw_pile = getattr(state, "draw_pile", []) or []
-        discard_pile = getattr(state, "discard_pile", []) or []
-        exhaust_pile = getattr(state, "exhaust_pile", []) or []
-
-        # Solver scores（V7Bot._adapter.last_solver_scores）
-        solver_scores = list(getattr(self._adapter, "last_solver_scores", []) or [])
-
-        # turn 数：CombatState 里 _turn 字段不一定有，用 0 兜底
-        turn = getattr(state, "turn", getattr(state, "_turn", 0))
-
-        # bottled_ai 评估（best-effort）
-        bottled_assessment, bottled_error = self._try_bottled_assessment(rs, state)
-        if bottled_error is not None:
+        rec = build_combat_record(runner, actions, chosen_action, seed=self._current_seed)
+        # 加上 solver_scores（仅 collector 有意义）
+        rec["solver_scores"] = list(
+            getattr(self._adapter, "last_solver_scores", []) or []
+        )
+        # 统计 bottled_ai 错误
+        if rec.get("bottled_ai_error") is not None:
             self.bottled_error_count += 1
             if self.first_bottled_error is None:
-                self.first_bottled_error = bottled_error
-
-        rec = {
-            "seed": self._current_seed,
-            "floor": rs.floor,
-            "act": rs.act,
-            "turn": turn,
-            "player": player_dict,
-            "enemies": enemies_list,
-            "hand": hand,
-            "draw_pile_size": len(draw_pile),
-            "discard_pile_size": len(discard_pile),
-            "exhaust_pile_size": len(exhaust_pile),
-            "available_actions": [_action_to_str(a) for a in actions],
-            "chosen_action": _action_to_str(chosen_action),
-            "solver_scores": solver_scores,
-            "bottled_ai_assessment": bottled_assessment,
-            "bottled_ai_error": bottled_error,
-        }
+                self.first_bottled_error = rec["bottled_ai_error"]
         return rec
 
-    # ------------------------------------------------------------------
-    # bottled_ai 适配器集成（best-effort，错误不阻塞）
-    # ------------------------------------------------------------------
 
-    def _try_bottled_assessment(self, run_state, combat_state):
-        if not _BOTTLED_IMPORT_OK:
-            return None, f"import failed: {_BOTTLED_IMPORT_ERR}"
-
-        try:
-            # run-level relics / potions
-            relics_dict: Dict[str, int] = {}
-            for r in getattr(run_state, "relics", []) or []:
-                rid = getattr(r, "id", str(r))
-                relics_dict[rid] = relics_dict.get(rid, 0) + 1
-
-            try:
-                potions_list: List[str] = list(run_state.get_potions())
-            except Exception:  # noqa: BLE001
-                potions_list = []
-
-            adapter = BottledStateAdapter(
-                combat_state,
-                run_relics=relics_dict,
-                run_potions=potions_list,
-            )
-
-            cfg = ComparatorAssessmentConfig(
-                powers_we_like=POWERS_WE_LIKE,
-                powers_we_like_less=POWERS_WE_LIKE_LESS,
-                powers_we_dislike=POWERS_WE_DISLIKE,
-                cards_that_exit_wrath=CARDS_THAT_EXIT_WRATH,
-            )
-
-            # original 通常是 turn 开始的 snapshot；smoke 阶段用同一个 adapter 占位
-            ca = ComparatorAssessment(adapter, adapter, cfg)
-
-            # 只调几个简单维度（不依赖 memory shim 的）
-            assessment: Dict[str, Any] = {}
-            for name in (
-                "battle_won", "battle_lost", "incoming_damage", "energy",
-                "intangible", "dead_monsters", "lowest_true_health_monster",
-                "total_monster_health", "enemy_vulnerable", "enemy_weak",
-                "player_powers_good", "player_powers_bad", "bad_cards_exhausted",
-            ):
-                fn = getattr(ca, name, None)
-                if fn is None:
-                    continue
-                try:
-                    val = fn()
-                    # 转 JSON-safe
-                    if isinstance(val, (bool, int, float, str)):
-                        assessment[name] = val
-                    else:
-                        assessment[name] = str(val)
-                except Exception as inner:  # noqa: BLE001
-                    assessment[name] = f"<err: {type(inner).__name__}: {inner}>"
-
-            return assessment, None
-        except Exception as e:  # noqa: BLE001
-            return None, f"{type(e).__name__}: {e}"
-
-
-__all__ = ["V8CollectorBot"]
+__all__ = ["V8CollectorBot", "build_combat_record", "try_bottled_assessment"]
