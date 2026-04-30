@@ -48,6 +48,10 @@ runs/
 wandb/
 mlruns/
 
+# V7/V8 bot 临时游戏日志（根目录跑出来的 per-seed jsonl）
+/v7_game_log_*.jsonl
+/v8_game_log_*.jsonl
+
 # Jupyter
 .ipynb_checkpoints/
 
