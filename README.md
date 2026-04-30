@@ -20,11 +20,57 @@
 - `demos/` — 教学 demo（MNIST、CartPole、简化 STS）
 - `tools/` — 工具脚本
 
-## 安装依赖
+## 环境依赖与 Setup
 
+### 系统要求
+- macOS / Linux（已在 macOS Darwin 25 验证）
+- Python 3.12+（Python 3.9 装不了 torch 2.10+）
+- git
+- 可选：gh CLI（管理 GitHub repo）
+
+### 一次性 Setup
+
+1. clone ml-demos（你已经在这里了）
+
+2. clone StSRLSolver 到 `external/StSRLSolver` 并 checkout 验证版本：
+   ```bash
+   git clone https://github.com/JackSwitzer/StSRLSolver.git external/StSRLSolver
+   cd external/StSRLSolver && git checkout e82f8296 && cd ../..
+   ```
+   注意：StSRLSolver 当前 master 已把 Python engine 移到 Rust，**不要 git pull / merge**，否则 packages/engine 会消失。
+
+3. 创建 venv 并安装依赖：
+   ```bash
+   python3.12 -m venv .venv
+   .venv/bin/pip install "gymnasium>=0.29.0" "numpy>=1.24.0" "torch>=2.10.0" "psutil>=7.2.2"
+   ```
+   实测可行版本：torch 2.11.0、numpy 2.4.4、gymnasium 1.3.0、psutil 7.2.2
+
+4. 启用 pre-commit hook（防绝对路径泄漏）：
+   ```bash
+   bash scripts/setup_hooks.sh
+   ```
+
+5. 验证：
+   ```bash
+   .venv/bin/python -c "from sts_paths import ensure_on_sys_path; ensure_on_sys_path(); from packages.engine.game import GameRunner; print('ok')"
+   .venv/bin/python run_v7.py --n-games 1 --seeds 42
+   ```
+
+### StSRLSolver 路径配置
+
+`sts_paths.py` 按以下顺序解析 StSRLSolver 路径：
+1. 环境变量 `STSRLSOLVER_PATH`（如已设置）
+2. 否则用 `<ml-demos>/external/StSRLSolver`
+
+如果你 clone 到了别的位置：
 ```bash
-pip3 install numpy torch torchvision gymnasium matplotlib
+export STSRLSOLVER_PATH=/path/to/StSRLSolver
 ```
+
+### 不需要装的依赖
+
+StSRLSolver 的 `pyproject.toml` 还列了 mlx / fastapi / uvicorn / websockets，V7/V8 当前用不到，**不要装**。
 
 ## 杀戮尖塔 AI Agent
 
