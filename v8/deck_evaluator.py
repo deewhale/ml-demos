@@ -17,8 +17,12 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import logging
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 
@@ -52,6 +56,80 @@ _DECK_EVAL_CACHE: Dict[str, Dict[str, float]] = {}
 # 真 hit/miss 计数：smoke / 训练监控用，看 cache 是否真 work
 _CACHE_HITS: int = 0
 _CACHE_MISSES: int = 0
+
+
+# ----- 并行执行（cache miss 路径内）-----
+# 4 个 enemy × 3 sim = 12 个独立 sim，每个 sim 有自己的 engine / RNG / state，
+# 互相之间无共享可变状态，是 embarrassingly parallel。
+# macOS + MPS + fork() 已知有问题（torch / metal 在 fork 后状态损坏），所以强制 spawn。
+# 池大小：min(12, cpu_count - 1)，给主进程留 1 核。
+# 池只创建一次（lazy），atexit 注册关闭。
+_PARALLEL_ENABLED: bool = os.environ.get("V8_DECK_EVALUATOR_PARALLEL", "1") != "0"
+_POOL: Optional[ProcessPoolExecutor] = None
+
+
+def _get_pool() -> Optional[ProcessPoolExecutor]:
+    """懒创建 spawn-context process pool。disable 时返回 None。"""
+    global _POOL
+    if not _PARALLEL_ENABLED:
+        return None
+    if _POOL is None:
+        max_workers = min(12, max(1, (os.cpu_count() or 2) - 1))
+        ctx = multiprocessing.get_context("spawn")
+        _POOL = ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx)
+        logger.info(
+            "deck_evaluator: created spawn ProcessPoolExecutor max_workers=%d",
+            max_workers,
+        )
+    return _POOL
+
+
+def _shutdown_pool() -> None:
+    """atexit 关闭 pool。"""
+    global _POOL
+    if _POOL is not None:
+        try:
+            _POOL.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # noqa: BLE001
+            pass
+        _POOL = None
+
+
+atexit.register(_shutdown_pool)
+
+
+def _simulate_combat_worker(
+    enemy_id: str,
+    deck: List[Dict],
+    relics: List[str],
+    hp: int,
+    max_hp: int,
+    act: int,
+    seed: int,
+) -> Optional[Dict[str, float]]:
+    """子进程入口：单 (enemy, sim_idx) → outcome dict。
+
+    顶层函数（pickleable）。失败返回 None，主进程过滤掉（等价于原来 try/except 后的 continue）。
+    每个子进程首次调用时会触发 _ensure_solver_imports 懒加载。
+    """
+    try:
+        return _simulate_combat(
+            enemy_id=enemy_id,
+            deck=deck,
+            relics=relics,
+            hp=hp,
+            max_hp=max_hp,
+            act=act,
+            seed=seed,
+        )
+    except Exception as e:  # noqa: BLE001
+        # 子进程里 logger 不一定回流到主进程，记进程内 log 即可；
+        # 主进程见 None 时记 warning（与原 sequential 行为对齐）。
+        logger.warning(
+            "worker _simulate_combat failed (enemy=%s seed=%d): %s: %s",
+            enemy_id, seed, type(e).__name__, e,
+        )
+        return None
 
 
 def _deck_hash(
@@ -118,29 +196,76 @@ def evaluate_deck(
     }
     n_runs = 0
 
-    for enemy_id in enemy_pool:
-        for sim_idx in range(SIMS_PER_ENEMY):
-            try:
-                outcome = _simulate_combat(
-                    enemy_id=enemy_id,
-                    deck=deck,
-                    relics=relics,
-                    hp=hp,
-                    max_hp=max_hp,
-                    act=act,
-                    seed=sim_idx,
+    # 12 个独立 sim 任务列表（4 enemy × 3 sim），每个 sim 互不干扰
+    tasks: List[Tuple[str, int]] = [
+        (enemy_id, sim_idx)
+        for enemy_id in enemy_pool
+        for sim_idx in range(SIMS_PER_ENEMY)
+    ]
+
+    pool = _get_pool()
+    outcomes: List[Optional[Dict[str, float]]] = []
+
+    if pool is not None:
+        # 并行：spawn 子进程跑 12 个 sim
+        # 注意：deck/relics 是 list[dict]/list[str]，pickleable；HP/act/seed 都是 int
+        try:
+            futures = [
+                pool.submit(
+                    _simulate_combat_worker,
+                    enemy_id, deck, relics, hp, max_hp, act, sim_idx,
                 )
+                for enemy_id, sim_idx in tasks
+            ]
+            for fut in futures:
+                try:
+                    outcomes.append(fut.result())
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "evaluate_deck pool future failed: %s: %s",
+                        type(e).__name__, e,
+                    )
+                    outcomes.append(None)
+        except Exception as e:  # noqa: BLE001
+            # 池整体崩了（不应发生，但 fallback 到 sequential 让训练不挂）
+            logger.warning(
+                "evaluate_deck parallel dispatch failed (%s: %s); falling back to sequential",
+                type(e).__name__, e,
+            )
+            outcomes = []
+            for enemy_id, sim_idx in tasks:
+                try:
+                    outcomes.append(_simulate_combat(
+                        enemy_id=enemy_id, deck=deck, relics=relics,
+                        hp=hp, max_hp=max_hp, act=act, seed=sim_idx,
+                    ))
+                except Exception as e2:  # noqa: BLE001
+                    logger.warning(
+                        "evaluate_deck sim failed (enemy=%s): %s: %s",
+                        enemy_id, type(e2).__name__, e2,
+                    )
+                    outcomes.append(None)
+    else:
+        # 顺序：与历史行为完全一致（debug / V8_DECK_EVALUATOR_PARALLEL=0）
+        for enemy_id, sim_idx in tasks:
+            try:
+                outcomes.append(_simulate_combat(
+                    enemy_id=enemy_id, deck=deck, relics=relics,
+                    hp=hp, max_hp=max_hp, act=act, seed=sim_idx,
+                ))
             except Exception as e:  # noqa: BLE001
-                # 评估失败不让训练挂；记 warning，本次 sim 跳过
                 logger.warning(
                     "evaluate_deck sim failed (enemy=%s): %s: %s",
                     enemy_id, type(e).__name__, e,
                 )
-                continue
+                outcomes.append(None)
 
-            for k in accum:
-                accum[k] += outcome[k]
-            n_runs += 1
+    for outcome in outcomes:
+        if outcome is None:
+            continue
+        for k in accum:
+            accum[k] += outcome[k]
+        n_runs += 1
 
     if n_runs == 0:
         # 所有 sim 全失败：fallback 到全 0（让 caller 知道评估失效）
