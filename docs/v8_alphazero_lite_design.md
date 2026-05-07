@@ -1,4 +1,4 @@
-# V8 设计：AlphaZero-lite + bottled_ai teacher + 人类点评 fine-tune
+# [存疑] V8 设计：AlphaZero-lite + bottled_ai teacher + 人类点评 fine-tune
 
 **版本**：v1 草案
 **日期**：2026-04-24

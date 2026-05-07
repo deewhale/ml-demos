@@ -1,8 +1,0 @@
-{"event": "floor_enter", "t": 0.001, "seed": 11, "floor": 0, "act": 1, "phase": "NEOW", "room_type": "START", "hp": 72, "max_hp": 72, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 0}
-{"event": "floor_enter", "t": 0.001, "seed": 11, "floor": 1, "act": 1, "phase": "COMBAT", "room_type": "MONSTER", "hp": 79, "max_hp": 79, "gold": 99, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 2}
-{"event": "combat_start", "t": 0.001, "seed": 11, "floor": 1, "act": 1, "room_type": "monster", "hp": 79, "max_hp": 79, "enemies": [{"id": "SpikeSlime_S", "name": "Spike Slime (S)", "hp": 13, "max_hp": 13, "type": "NORMAL"}, {"id": "AcidSlime_S", "name": "Acid Slime (S)", "hp": 9, "max_hp": 9, "type": "NORMAL"}], "deck_size": 10, "actions_taken": 2}
-{"event": "combat_end", "t": 0.06, "seed": 11, "floor": 1, "hp": 79, "hp_lost": 0, "actions_taken": 9}
-{"event": "floor_enter", "t": 0.06, "seed": 11, "floor": 2, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 79, "max_hp": 79, "gold": 112, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 12}
-{"event": "floor_enter", "t": 0.06, "seed": 11, "floor": 3, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 79, "max_hp": 79, "gold": 72, "deck_size": 10, "relics": ["PureWater"], "actions_taken": 14}
-{"event": "floor_enter", "t": 0.06, "seed": 11, "floor": 4, "act": 1, "phase": "EVENT", "room_type": "EVENT", "hp": 79, "max_hp": 79, "gold": 72, "deck_size": 9, "relics": ["PureWater"], "actions_taken": 16}
-{"event": "combat_start", "t": 0.06, "seed": 11, "floor": 4, "act": 1, "room_type": "elite", "hp": 79, "max_hp": 79, "enemies": [{"id": "Lagavulin", "name": "Lagavulin", "hp": 111, "max_hp": 111, "type": "ELITE"}], "deck_size": 9, "actions_taken": 19}

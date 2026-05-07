@@ -6,11 +6,14 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 项目结构
 
-### 活跃代码（V6）
-- `sts_agent_v6.py` — V6 agent（统一效果编码 + Transformer + PPO，所有决策头）
-- `train_v6.py` — V6 训练管线（多进程 + StSRLSolver 模拟器）
-- `pretrain_v6.py` — V6 预训练（TurnSolver 教师 + behavior cloning）
-- `data/sts_data.py` — STS 数据提取（卡牌/遗物/药水统一效果向量）
+### 活跃代码（V8 → 推 RL）
+- `v8_bot.py` — 战斗内 search infra（GameRunner + TurnSolver + phase dispatch）。
+  元决策原本调 `v8_strategy.*`，BC 路线 archive 后已替换为 `_StratStub`，
+  调用元决策 dispatch 会抛 NotImplementedError，**待 RL 重构时换成 RL policy**。
+- `v8_data_collector.py` — 元决策点采集（JSONL schema 设计可参考）。
+  注意：本文件 import v8_strategy / v8_teacher_eval / v8_battle_state_adapter，
+  这些模块已 archive，**当前 import 会失败**，RL 重构时再视情况删/改。
+- `data/sts_data.py` — STS 数据提取（V6 遗留，可能复用）
 
 ### 文档
 - `docs/v6_training_log.md` — V6 训练日志
@@ -31,13 +34,14 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 - Apple Silicon MPS 训练（multinomial sampling 回退 CPU）
 - StSRLSolver 模拟器加速训练
 - Communication Mod (ModTheSpire) 用于真实游戏集成
+- bottled_ai 启发式规则作为行为克隆的数据源
 
 ## 编码约定
 
 - 注释和文档使用中文
-- 特征编码：统一效果向量（从游戏数据提取真实效果），不硬编码游戏知识
-- 卡牌/遗物/药水：统一效果编码，逐卡 token + 可学习 ID 嵌入
-- 模型结构：shared encoder → task-specific heads → 每个 head 独立 value function
+- 特征编码：字符串（卡/遗物/动作）→ MD5 hash → embedding 查表（vocab 2048, dim 64），无严格词表
+- 标量特征：8 维（hp%, max_hp, gold, floor, act, deck_size, relics_size, potions_size）+ phase one-hot
+- 模型结构：set encoder（mean-pool）+ pointer-network 动作打分，单 head 输出 logits
 - 日志：决策日志写 `.log` 文件，统计写 `_stats.log`
 - Device: 优先 MPS，fallback CPU
 
@@ -56,8 +60,18 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-- V6: 统一效果编码 + per-card reward，初版已完成，待训练验证
-- V3-V5: 已归档至 archive/ 和 docs/archive/，详见 docs/v6_architecture_review.md
+<!-- last-verified: 2026-05-06 -->
+- 2026-05-06: V8 BC（启发式 teacher）路线证明撞天花板（0/30 beat boss），
+  已 archive 到 `archive/v8_bc_pivot/`。下一步推 RL（战斗内搜索 + 战斗外纯 model RL with dense reward shaping）。
+- V8 BC 路线已 archive 的产物：`v8_strategy.py` / `v8_evaluator.py` /
+  `v8_inference_bot.py` / `v8_model.py` / `v8_trainer.py` / `v8_teacher_*.py` /
+  `v8_battle_state_adapter.py` / `scripts/v8_{collect_*,eval,sweep,train_value}.py` /
+  `data/v8_*` / `sts_models/v8_{meta,value_head,smoke}_*.pt`。
+- 保留：`v8_bot.py`（战斗内 search infra，元决策待 RL 重构）+
+  `v8_data_collector.py`（schema 参考，当前因 import 已 archive 模块而无法直接 import）。
+- 路线演进：V3-V5 (DQN/早期 PPO) → V6 (PPO+Transformer) → V7 (搜索+启发式，未完成) → V8 (监督学习, 已 archive) → V9 RL（待开始）
+- V6/V7 已归档，详见 docs/v6_architecture_review.md
+- **维护规则**：每次切换大版本（如 V8→V9）必须同步更新「当前状态」和「活跃代码」段，刷新 last-verified 日期，与代码改动一起 commit。
 
 ## 子 Agent 协作规范
 

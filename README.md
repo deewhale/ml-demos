@@ -4,19 +4,23 @@
 
 ## 项目结构
 
-### 活跃代码（V6）
-- `sts_agent_v6.py` — V6 agent（统一效果编码 + Transformer + PPO）
-- `train_v6.py` — V6 训练管线（多进程 + StSRLSolver 模拟器）
-- `pretrain_v6.py` — V6 预训练（TurnSolver 教师 + behavior cloning）
-- `data/sts_data.py` — STS 数据提取（卡牌/遗物/药水统一效果向量）
+### 活跃代码（V8）
+- `v8_model.py` — V8 模型（pointer-network 选卡 / 选目标，无 PPO）
+- `v8_trainer.py` — V8 训练管线（行为克隆 / 监督学习）
+- `v8_data_collector.py` — bottled_ai 启发式 teacher 数据采集
+- `v8_teacher_ironclad.py` — 移植自 bottled_ai 的 Ironclad 启发式策略
+- `v8_inference_bot.py` — V8 推理 bot（接 StSRLSolver）
+- `data/sts_data.py` — STS 数据提取（卡牌/遗物/药水统一效果向量，沿用自 V6）
 
 ### 文档
-- `docs/v6_training_log.md` — V6 训练日志
-- `docs/v6_architecture_review.md` — V3→V6 架构演进回顾
-- `docs/archive/` — 旧版本设计文档（V3-V5）
+- `docs/v8_training_log.md` — V8 训练日志
+- `docs/v8_sweep_log.md` — V8 参数 sweep 记录
+- `docs/v8_alphazero_lite_design.md` — V8 早期设计草案（部分已与现役实现漂移，仅供参考）
+- `docs/v6_training_log.md`、`docs/v6_architecture_review.md` — V6 历史训练日志和架构演进回顾
+- `docs/archive/` — 更早版本设计文档（V3-V5）
 
 ### 归档
-- `archive/` — 旧版本代码（V3 DQN, V4 PPO+Transformer, V5 TurnSolver）
+- `archive/` — 已删除的早期代码（V3 DQN, V4 PPO+Transformer, V5 TurnSolver）；V6/V7 源文件随 V8 切换已从 working tree 删除，可在历史 commit 中查看
 - `demos/` — 教学 demo（MNIST、CartPole、简化 STS）
 - `tools/` — 工具脚本
 
@@ -54,7 +58,7 @@
 5. 验证：
    ```bash
    .venv/bin/python -c "from sts_paths import ensure_on_sys_path; ensure_on_sys_path(); from packages.engine.game import GameRunner; print('ok')"
-   .venv/bin/python run_v7.py --n-games 1 --seeds 42
+   # V8 端到端 smoke：采集一局 + 训一个 batch（具体脚本以仓库中 scripts/v8_*.py 为准）
    ```
 
 ### StSRLSolver 路径配置
@@ -70,7 +74,7 @@ export STSRLSOLVER_PATH=/path/to/StSRLSolver
 
 ### 不需要装的依赖
 
-StSRLSolver 的 `pyproject.toml` 还列了 mlx / fastapi / uvicorn / websockets，V7/V8 当前用不到，**不要装**。
+StSRLSolver 的 `pyproject.toml` 还列了 mlx / fastapi / uvicorn / websockets，V8 当前用不到，**不要装**。
 
 ## 杀戮尖塔 AI Agent
 
@@ -78,10 +82,9 @@ StSRLSolver 的 `pyproject.toml` 还列了 mlx / fastapi / uvicorn / websockets�
 
 ### 设计理念
 
-- 统一效果编码：从游戏数据提取卡牌/遗物/药水的真实效果向量
-- Transformer + PPO：共享编码器，多任务决策头（战斗/选牌/选路/事件）
-- Per-card reward：每张打出的卡牌获得独立奖励信号
-- 架构演进：V3 (DQN) → V4 (PPO+Transformer) → V5 (Solver) → V6 (统一效果编码)
+- 统一效果编码：从游戏数据提取卡牌/遗物/药水的真实效果向量（V6 起沿用至 V8）
+- 当前 V8 路线：行为克隆 + pointer-network，bottled_ai 启发式策略当数据 teacher，第一阶段聚焦 Ironclad
+- 架构演进：V3 (DQN) → V4 (PPO+Transformer) → V5 (TurnSolver+Agent) → V6 (统一效果编码+PPO) → V7 (搜索+手调 lex 评估器) → V8 (行为克隆 + pointer-network + bottled_ai teacher)
 
 ### 配置
 
