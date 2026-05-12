@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from collections import Counter, deque
+from typing import Any, Deque, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 # 保证能 import StSRLSolver
 from sts_paths import ensure_on_sys_path
@@ -199,6 +200,73 @@ def _build_state_from_runner(runner: GameRunner) -> V8State:
 
 
 # =============================================================================
+# 诊断辅助：action 描述 / 战斗内状态提取
+# =============================================================================
+
+
+def _safe_action_repr(action: Any) -> str:
+    """把任意 GameAction 转成一行紧凑字符串（guard_cap / 诊断日志用）。
+    保持短：单词数 ≤ 4，便于一行塞 5 个 recent actions。"""
+    if action is None:
+        return "None"
+    try:
+        cls_name = type(action).__name__
+        # CombatAction 有 action_type + card_id / target_index
+        atype = getattr(action, "action_type", None)
+        if atype is not None:
+            parts = [str(atype)]
+            cid = getattr(action, "card_id", None)
+            if cid:
+                parts.append(str(cid))
+            tgt = getattr(action, "target_index", None)
+            if tgt is not None and tgt != -1:
+                parts.append(f"t{tgt}")
+            return f"{cls_name}:{'|'.join(parts)}"
+        # MAP / Path 有 dst
+        dst = getattr(action, "dst_x", None)
+        if dst is not None:
+            return f"{cls_name}:dst={dst}"
+        return cls_name
+    except Exception:  # noqa: BLE001
+        return type(action).__name__
+
+
+def _combat_enemies_brief(runner: GameRunner) -> List[Dict[str, Any]]:
+    """从 runner.current_combat 提取存活敌人简要信息（name + hp/max_hp）。"""
+    out: List[Dict[str, Any]] = []
+    cc = getattr(runner, "current_combat", None)
+    if cc is None:
+        return out
+    st = getattr(cc, "state", None)
+    if st is None:
+        return out
+    for e in getattr(st, "enemies", []) or []:
+        if getattr(e, "hp", 0) <= 0:
+            continue
+        out.append({
+            "id": getattr(e, "id", "") or e.__class__.__name__,
+            "hp": int(getattr(e, "hp", 0) or 0),
+            "max_hp": int(getattr(e, "max_hp", 0) or 0),
+        })
+    return out
+
+
+def _combat_pile_sizes(runner: GameRunner) -> Tuple[int, int, int]:
+    """返回 (hand_size, draw_size, discard_size)；不在 combat 时全 0。"""
+    cc = getattr(runner, "current_combat", None)
+    if cc is None:
+        return (0, 0, 0)
+    st = getattr(cc, "state", None)
+    if st is None:
+        return (0, 0, 0)
+    return (
+        len(getattr(st, "hand", []) or []),
+        len(getattr(st, "draw_pile", []) or []),
+        len(getattr(st, "discard_pile", []) or []),
+    )
+
+
+# =============================================================================
 # 节点 reward 简单 detect
 # =============================================================================
 
@@ -319,9 +387,55 @@ class V8Env:
         self._last_seed: Optional[int] = None
         self._last_act_for_cache: int = 1
 
+        # 诊断字段（guard_cap / [combat] 日志用）
+        self._episode_idx: Optional[int] = None  # 外部 trainer 通过 set_episode 注入
+        self._last_action_repr: str = ""         # 最后一次 take_action 的 action 描述
+        self._recent_actions: Deque[str] = deque(maxlen=5)
+        # 战斗进入/退出 tracking
+        self._in_combat: bool = False
+        self._combat_enter_hp: int = 0
+        self._combat_enter_max_hp: int = 0
+        self._combat_enter_floor: int = 0
+        self._combat_enter_turn_actions: int = 0  # 进入 combat 时 _actions_taken 值
+
+        # [floor] 日志：每次 floor 变化时打一次（含所有 room 类型）
+        self._last_logged_floor: int = -1
+
+        # [deck] 日志：elite/boss 战斗胜利 + reward 处理完后打一次
+        # 设值时机：_log_combat_exit(reason='victory')，当 room=elite/boss
+        # 清值时机：_advance_to_meta_decision 推完落点是 MAP_NAVIGATION 时
+        self._pending_deck_room: Optional[str] = None
+
+        # [event] 日志状态：用于 enter / phase_transition / exit 三段日志
+        # _last_event_phase 仅在 phase=EVENT + event_state 非 None 时为 EventPhase 名字字符串
+        # _last_event_id 同上；用于 exit 日志事后补当时的 id（current_event_state 已被清）
+        # _event_enter_max_hp / _event_enter_relics_count：进入 EVENT phase 时的快照（exit diff 用）
+        self._last_event_phase: Optional[str] = None
+        self._last_event_id: Optional[str] = None
+        self._event_enter_max_hp: int = 0
+        self._event_enter_relics_count: int = 0
+
+        # 性能 / 调用计数（per-episode；trainer 读 delta）
+        self.eval_deck_calls: int = 0      # evaluate_deck 调用次数
+        self.eval_deck_time_sec: float = 0.0
+        self.env_step_time_sec: float = 0.0  # env.step 累计耗时（不含 caller）
+        self.combat_search_calls: int = 0  # combat turn 调用 adapter.pick_action 次数
+
     # ---------------------------------------------------------------------
     # Public API
     # ---------------------------------------------------------------------
+
+    def set_episode(self, episode_idx: int) -> None:
+        """trainer 在 collect_rollout 前注入 episode 编号，guard_cap / [combat] 日志用。"""
+        self._episode_idx = int(episode_idx)
+
+    def reset_perf_counters(self) -> None:
+        """trainer 每集开始前调用，清空 per-episode 计数器（cache hits/misses 由
+        deck_evaluator 自己的全局 counter 统计，这里只清 env 内部累计）。"""
+        self.eval_deck_calls = 0
+        self.eval_deck_time_sec = 0.0
+        self.env_step_time_sec = 0.0
+        self.combat_search_calls = 0
 
     def reset(self, seed: int) -> V8State:
         """开始新局，推进到第一个元决策点（NEOW）。
@@ -357,6 +471,23 @@ class V8Env:
         self._last_seed = seed
         self._last_act_for_cache = self._runner.run_state.act
 
+        # 诊断状态
+        self._last_action_repr = ""
+        self._recent_actions.clear()
+        self._in_combat = False
+        self._combat_enter_hp = 0
+        self._combat_enter_max_hp = 0
+        self._combat_enter_floor = 0
+        self._combat_enter_turn_actions = 0
+        self._last_logged_floor = -1
+        self._pending_deck_room = None
+        self._last_event_phase = None
+        self._last_event_id = None
+        self._event_enter_max_hp = 0
+        self._event_enter_relics_count = 0
+        # perf 计数器在 reset 也清一遍（兼容 trainer 没调 reset_perf_counters 的情况）
+        self.reset_perf_counters()
+
         # 推进到第一个元决策 phase（NEOW 一般直接就是；保险起见 advance）
         self._advance_to_meta_decision()
 
@@ -364,6 +495,7 @@ class V8Env:
         state = _build_state_from_runner(self._runner)
 
         # 开局 deck 已知 → 首次 evaluate_deck
+        ed_t0 = time.time()
         try:
             ds = evaluate_deck(
                 deck=state.deck,
@@ -378,6 +510,8 @@ class V8Env:
             logger.warning("initial evaluate_deck failed: %s: %s", type(e).__name__, e)
             state.deck_strength = None
             self._prev_deck_strength = None
+        self.eval_deck_calls += 1
+        self.eval_deck_time_sec += time.time() - ed_t0
 
         self._current_state = state
         self._prev_state = state
@@ -397,6 +531,7 @@ class V8Env:
         if self._runner is None or self._current_state is None:
             raise RuntimeError("V8Env: must call reset() before step()")
 
+        step_t0 = time.time()
         info: Dict[str, Any] = {
             "step_count": self._step_count,
             "battle_happened": False,
@@ -416,7 +551,9 @@ class V8Env:
         # 取当前可执行 actions（GameAction 对象 list）
         engine_actions = self._runner.get_available_actions()
         if not engine_actions:
-            # 没合法 action：游戏卡死 / 结束
+            # 没合法 action：游戏卡死 / 结束 → 强制 terminal，让上层不要再 step
+            if not self._runner.game_over:
+                self._force_terminate_run(reason="step_no_actions")
             done = True
             reward = compute_final_reward(
                 game_won=bool(self._runner.game_won),
@@ -424,6 +561,7 @@ class V8Env:
             )
             info["phase_after"] = self._current_state.phase
             info["error"] = "no_available_actions"
+            self.env_step_time_sec += time.time() - step_t0
             return self._current_state, reward, done, info
 
         # 把 idx 转成具体 action
@@ -435,6 +573,13 @@ class V8Env:
             )
             action_idx = 0
         chosen_action = engine_actions[action_idx]
+
+        # 记录 last_action（诊断 guard_cap 用）
+        self._last_action_repr = _safe_action_repr(chosen_action)
+        self._recent_actions.append(self._last_action_repr)
+
+        # 诊断：如果是 EventAction，打 [event] choice 日志（纯观察）。
+        self._log_event_choice(chosen_action)
 
         # 执行 action
         ok = self._runner.take_action(chosen_action)
@@ -468,6 +613,7 @@ class V8Env:
         # 内部 cache 命中重复 case，开销可控。
         next_deck_strength: Optional[Dict[str, float]] = self._prev_deck_strength
         if not self._runner.game_over:
+            ed_t0 = time.time()
             try:
                 next_deck_strength = evaluate_deck(
                     deck=next_state.deck,
@@ -481,6 +627,8 @@ class V8Env:
             except Exception as e:  # noqa: BLE001
                 logger.warning("post-step evaluate_deck failed: %s: %s", type(e).__name__, e)
                 next_state.deck_strength = self._prev_deck_strength
+            self.eval_deck_calls += 1
+            self.eval_deck_time_sec += time.time() - ed_t0
 
         # node_reward detect
         node_reward = _detect_node_reward(
@@ -517,6 +665,9 @@ class V8Env:
                 "V8Env.step: hit max_steps_per_episode=%d, force done",
                 self.max_steps_per_episode,
             )
+            # 强制把 runner 标 terminal，防止万一上层不读 done 又调一次 step
+            if not self._runner.game_over:
+                self._force_terminate_run(reason="max_steps_exceeded")
             done = True
             info["error"] = "max_steps_exceeded"
 
@@ -526,6 +677,7 @@ class V8Env:
         self._current_state = next_state
 
         info["phase_after"] = next_state.phase
+        self.env_step_time_sec += time.time() - step_t0
         return next_state, float(step_reward), done, info
 
     def get_available_actions(self) -> List[str]:
@@ -574,16 +726,30 @@ class V8Env:
         guard = 0
         guard_cap = self.max_steps_per_episode * 4  # internal step 比 RL step 多
 
-        while not self._runner.game_over and guard < guard_cap:
+        while not self._runner.game_over and guard < guard_cap:  # noqa: PLR0915
             guard += 1
             phase = self._runner.phase
 
+            # 诊断：floor 变化日志（每次 floor 跳变都打一次，不管是哪种 room）
+            # 放在最前面：MAP→COMBAT 中间 floor 已 +1，combat enter 之前先打
+            self._maybe_log_floor()
+            # 诊断：事件状态日志（enter / phase_transition / exit）。
+            # 纯观察：检测 phase + current_event_state 变化，不改任何 control flow。
+            self._maybe_log_event_state()
+
             # 已到元决策 phase → 停下，让外部 model 选
             if phase in _META_PHASES:
+                # 如果之前在 combat，说明刚 victory 离开（这里 phase 已切到 reward / map）
+                if self._in_combat:
+                    self._log_combat_exit(reason="victory")
+                # 诊断：reward 处理完后的 deck 快照（victory 后 phase 落 MAP 时打）
+                self._maybe_log_deck()
                 return battle_happened
 
             # 进入 COMBAT 内部 turn loop
             if phase == GamePhase.COMBAT:
+                if not self._in_combat:
+                    self._log_combat_enter()
                 battle_happened = True
                 self._run_combat_turn()
                 # 战斗推完后回到 while 头继续判断 phase
@@ -591,6 +757,11 @@ class V8Env:
 
             # RUN_COMPLETE：游戏结束
             if phase == GamePhase.RUN_COMPLETE:
+                if self._in_combat:
+                    # combat 中游戏直接结束 → 一般是 defeat
+                    self._log_combat_exit(
+                        reason="defeat" if not self._runner.game_won else "victory"
+                    )
                 return battle_happened
 
             # 其他 phase（不应到这里）：取第一个合法 action 推进
@@ -600,15 +771,421 @@ class V8Env:
                     "V8Env._advance: no actions available at phase=%s, abort",
                     phase.name,
                 )
+                # 卡死了：没合法 action → 强制结束，避免上层把 episode 当 not done 又跑一遍
+                self._force_terminate_run(reason=f"no_actions_at_{phase.name}")
                 return battle_happened
+            self._last_action_repr = _safe_action_repr(actions[0])
+            self._recent_actions.append(self._last_action_repr)
             self._runner.take_action(actions[0])
             self._actions_taken += 1
 
-        if guard >= guard_cap:
-            logger.warning(
-                "V8Env._advance: hit guard_cap=%d, force return", guard_cap,
+        # while 退出时如果还在 combat 但 game_over（defeat 或最终 victory），补打 exit
+        if self._in_combat and self._runner.game_over:
+            self._log_combat_exit(
+                reason="victory" if self._runner.game_won else "defeat"
             )
+
+        if guard >= guard_cap:
+            # 关键修复：guard_cap 触发说明这局已经卡死（一般卡在 COMBAT 里 solver
+            # 反复出同一动作 / runner state corrupt）。如果只是 return 而不标 terminal，
+            # 上层 env.step 会读 runner.game_over == False，trainer.collect_rollout
+            # 不退出，下一次 step 又会再次进入 _advance_to_meta_decision，再次卡死，
+            # 形成无限循环（曾导致训练 ep=664 卡 hours 反复刷 guard_cap warning）。
+            self._log_guard_cap(battle_happened=battle_happened, guard_cap=guard_cap)
+            self._force_terminate_run(reason="guard_cap")
         return battle_happened
+
+    # ---------------------------------------------------------------------
+    # Internal: 诊断日志
+    # ---------------------------------------------------------------------
+
+    def _log_combat_enter(self) -> None:
+        """[combat] enter 日志（每场战斗起始打一次）。"""
+        assert self._runner is not None
+        rs = self._runner.run_state
+        enemies = _combat_enemies_brief(self._runner)
+        names = [e["id"] for e in enemies]
+        self._in_combat = True
+        self._combat_enter_hp = int(getattr(rs, "current_hp", 0) or 0)
+        self._combat_enter_max_hp = int(getattr(rs, "max_hp", 0) or 0)
+        self._combat_enter_floor = int(getattr(rs, "floor", 0) or 0)
+        self._combat_enter_turn_actions = self._actions_taken
+        try:
+            room_type = self._runner.current_room_type or "monster"
+        except Exception:  # noqa: BLE001
+            room_type = "?"
+        deck_size = len(getattr(rs, "deck", []) or [])
+        logger.info(
+            "[combat] enter ep=%s floor=%d act=%d room=%s enemies=%s deck_size=%d hp=%d/%d",
+            self._episode_idx, self._combat_enter_floor,
+            int(getattr(rs, "act", 1) or 1),
+            room_type, names, deck_size,
+            self._combat_enter_hp, self._combat_enter_max_hp,
+        )
+
+    def _log_combat_exit(self, *, reason: str) -> None:
+        """[combat] exit 日志（战斗结束触发）。
+
+        副作用：胜利且 room=elite/boss 时，置 self._pending_deck_room
+        让 _advance_to_meta_decision 在 reward 处理完落到 MAP 时补打 [deck]。
+        """
+        assert self._runner is not None
+        rs = self._runner.run_state
+        hp_after = int(getattr(rs, "current_hp", 0) or 0)
+        turn_actions = self._actions_taken - self._combat_enter_turn_actions
+        logger.info(
+            "[combat] exit ep=%s reason=%s floor=%d hp_before=%d hp_after=%d turn_actions=%d",
+            self._episode_idx, reason, self._combat_enter_floor,
+            self._combat_enter_hp, hp_after, turn_actions,
+        )
+        # 胜利 + elite/boss → 准备 [deck] 日志（等 reward 处理完）
+        if reason == "victory":
+            try:
+                rt = self._runner.current_room_type
+            except Exception:  # noqa: BLE001
+                rt = None
+            rt_str = (rt or "").lower() if isinstance(rt, str) else \
+                (getattr(rt, "name", "") or "").lower()
+            if rt_str in ("elite", "boss"):
+                self._pending_deck_room = rt_str
+        self._in_combat = False
+
+    def _current_room_type_str(self) -> str:
+        """把 runner.get_current_room_type() / current_room_type 归一成
+        'monster' / 'elite' / 'boss' / 'rest' / 'shop' / 'event' / 'treasure' / 'unknown'。
+
+        优先用 get_current_room_type()（返回 RoomType enum，覆盖所有节点类型），
+        否则 fallback 到 current_room_type（只在 combat 时设 monster/elite/boss）。
+        NEOW（floor=0，map_position 在 start）返回 'unknown'。
+        """
+        assert self._runner is not None
+        # 先 try 地图上的 RoomType enum（覆盖 REST/SHOP/EVENT/TREASURE）
+        rt_enum = None
+        try:
+            getter = getattr(self._runner, "get_current_room_type", None)
+            if getter is not None:
+                rt_enum = getter()
+        except Exception:  # noqa: BLE001
+            rt_enum = None
+        if rt_enum is not None:
+            name = getattr(rt_enum, "name", str(rt_enum))
+            return self._normalize_room_name(name)
+        # fallback 到 combat 内置的 current_room_type 字符串（combat 中才设值）
+        try:
+            rt = self._runner.current_room_type
+        except Exception:  # noqa: BLE001
+            rt = None
+        # NEOW / 初始位置：current_room_type 默认 'monster' 是误导，
+        # 这里只有 phase=COMBAT 时才信任它
+        if self._runner.phase == GamePhase.COMBAT:
+            if isinstance(rt, str) and rt:
+                return self._normalize_room_name(rt)
+            if rt is not None:
+                return self._normalize_room_name(getattr(rt, "name", str(rt)))
+        return "unknown"
+
+    @staticmethod
+    def _normalize_room_name(raw: str) -> str:
+        """把任意 room 名归一成小写规范字符串。"""
+        s = (raw or "").lower()
+        mapping = {
+            "monster": "monster",
+            "elite": "elite",
+            "boss": "boss",
+            "rest": "rest",
+            "campfire": "rest",
+            "shop": "shop",
+            "event": "event",
+            "question": "event",
+            "?": "event",
+            "treasure": "treasure",
+            "t": "treasure",
+            "true_victory": "boss",
+        }
+        return mapping.get(s, "unknown")
+
+    def _maybe_log_floor(self) -> None:
+        """如果 runner.floor 变了，打一行 [floor] 日志。"""
+        assert self._runner is not None
+        rs = self._runner.run_state
+        cur_floor = int(getattr(rs, "floor", 0) or 0)
+        if cur_floor == self._last_logged_floor:
+            return
+        room = self._current_room_type_str()
+        hp = int(getattr(rs, "current_hp", 0) or 0)
+        max_hp = int(getattr(rs, "max_hp", 0) or 0)
+        act = int(getattr(rs, "act", 1) or 1)
+        logger.info(
+            "[floor] ep=%s floor=%d act=%d hp=%d/%d room=%s",
+            self._episode_idx, cur_floor, act, hp, max_hp, room,
+        )
+        self._last_logged_floor = cur_floor
+
+    def _maybe_log_deck(self) -> None:
+        """如果有 pending elite/boss victory，且现在落在 MAP_NAVIGATION（reward 已处理完），
+        打一行 [deck] 日志并清 pending。"""
+        assert self._runner is not None
+        if self._pending_deck_room is None:
+            return
+        if self._runner.phase != GamePhase.MAP_NAVIGATION:
+            return
+        rs = self._runner.run_state
+        # 按 (card_id, upgraded) 计数
+        counter: Counter = Counter()
+        for c in getattr(rs, "deck", []) or []:
+            cid = getattr(c, "id", None) or ""
+            upgraded = bool(getattr(c, "upgraded", False))
+            display = f"{cid}+1" if upgraded else cid
+            counter[display] += 1
+        # 排序：count 降序，name 字典序升序
+        cards_parts = [
+            f"{name}*{cnt}"
+            for name, cnt in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        relics_ids: List[str] = []
+        for r in getattr(rs, "relics", []) or []:
+            rid = getattr(r, "id", None) or str(r)
+            relics_ids.append(rid)
+        logger.info(
+            "[deck] ep=%s floor=%d room=%s cards=%s relics=%s",
+            self._episode_idx,
+            int(getattr(rs, "floor", 0) or 0),
+            self._pending_deck_room,
+            " ".join(cards_parts) if cards_parts else "-",
+            ",".join(relics_ids) if relics_ids else "-",
+        )
+        self._pending_deck_room = None
+
+    def _maybe_log_event_state(self) -> None:
+        """事件状态日志（enter / phase_transition / exit）。
+
+        策略：
+        - 当前 phase=EVENT 且 event_state 非 None：
+            - 若之前不在 EVENT，打 [event] enter
+            - 若之前在 EVENT 但 phase 字符串变了，打 [event] phase_transition
+        - 当前 phase != EVENT 或 event_state 为 None：
+            - 若之前在 EVENT，打 [event] exit
+        通过 self._last_event_phase / self._last_event_id 实例字段做去重，
+        保证状态不变时不重复打日志。
+
+        全部 introspection 用 try/except 兜底，缺/改字段不影响训练。
+        """
+        if self._runner is None:
+            return
+        try:
+            cur_phase = self._runner.phase
+            cur_event_state = getattr(self._runner, "current_event_state", None)
+            in_event = (
+                cur_phase == GamePhase.EVENT
+                and cur_event_state is not None
+            )
+
+            if in_event:
+                event_id = str(getattr(cur_event_state, "event_id", "?") or "?")
+                ep = getattr(cur_event_state, "phase", None)
+                event_phase_str = (
+                    getattr(ep, "name", str(ep)) if ep is not None else "?"
+                )
+                # 状态没变 → 不打
+                if (
+                    self._last_event_phase == event_phase_str
+                    and self._last_event_id == event_id
+                ):
+                    return
+                # 收集 choices（防御性，调用 runner 的高层 API）
+                choices_repr: List[str] = []
+                try:
+                    eh = getattr(self._runner, "event_handler", None)
+                    if eh is not None:
+                        choice_list = eh.get_available_choices(
+                            cur_event_state, self._runner.run_state
+                        )
+                        for ch in choice_list:
+                            idx = getattr(ch, "index", "?")
+                            text = getattr(ch, "text", "") or getattr(ch, "name", "")
+                            choices_repr.append(f"{idx}:{text}")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[event] choices introspection failed: %s: %s",
+                        type(e).__name__, e,
+                    )
+
+                rs = self._runner.run_state
+                if self._last_event_phase is None or self._last_event_id != event_id:
+                    # enter（要么之前不在 event，要么 event_id 跳变了）
+                    logger.info(
+                        "[event] enter ep=%s floor=%d act=%d event_id=%s "
+                        "event_phase=%s choices=[%s]",
+                        self._episode_idx,
+                        int(getattr(rs, "floor", 0) or 0),
+                        int(getattr(rs, "act", 1) or 1),
+                        event_id,
+                        event_phase_str,
+                        ", ".join(choices_repr),
+                    )
+                    # 记录 enter 快照（exit 时算 diff 用）
+                    self._event_enter_max_hp = int(getattr(rs, "max_hp", 0) or 0)
+                    self._event_enter_relics_count = len(
+                        getattr(rs, "relics", []) or []
+                    )
+                else:
+                    # phase_transition（同一 event 内，phase enum 变了）
+                    logger.info(
+                        "[event] phase_transition ep=%s floor=%d event_id=%s "
+                        "from=%s to=%s",
+                        self._episode_idx,
+                        int(getattr(rs, "floor", 0) or 0),
+                        event_id,
+                        self._last_event_phase,
+                        event_phase_str,
+                    )
+                self._last_event_phase = event_phase_str
+                self._last_event_id = event_id
+            else:
+                # 不在 EVENT phase：如果之前在，补 exit
+                if self._last_event_phase is not None:
+                    rs = self._runner.run_state
+                    cur_phase_name = getattr(cur_phase, "name", str(cur_phase))
+                    # exit reason：根据 cur_phase 推测
+                    if cur_phase == GamePhase.COMBAT:
+                        reason = "combat_started"
+                    elif cur_phase == GamePhase.RUN_COMPLETE:
+                        reason = "run_complete"
+                    else:
+                        reason = f"resolved->{cur_phase_name}"
+                    hp_now = int(getattr(rs, "current_hp", 0) or 0)
+                    max_hp_now = int(getattr(rs, "max_hp", 0) or 0)
+                    deck_size = len(getattr(rs, "deck", []) or [])
+                    relics_count = len(getattr(rs, "relics", []) or [])
+                    logger.info(
+                        "[event] exit ep=%s floor=%d event_id=%s reason=%s "
+                        "max_hp_now=%d hp_now=%d/%d deck_size=%d relics_count=%d",
+                        self._episode_idx,
+                        int(getattr(rs, "floor", 0) or 0),
+                        self._last_event_id,
+                        reason,
+                        max_hp_now,
+                        hp_now,
+                        max_hp_now,
+                        deck_size,
+                        relics_count,
+                    )
+                    self._last_event_phase = None
+                    self._last_event_id = None
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[event] _maybe_log_event_state failed: %s: %s",
+                type(e).__name__, e,
+            )
+
+    def _log_event_choice(self, action: Any) -> None:
+        """[event] choice 日志：env.step 处理 EventAction 时调一次。
+
+        仅在 action 是 EventAction 时打；choice_text 从 runner.event_handler
+        当前 available_choices 里按 index 查（防御性）。
+        """
+        if not isinstance(action, EventAction):
+            return
+        if self._runner is None:
+            return
+        try:
+            rs = self._runner.run_state
+            choice_idx = int(getattr(action, "choice_index", -1))
+            cur_event_state = getattr(self._runner, "current_event_state", None)
+            event_id = "?"
+            event_phase_str = "?"
+            choice_text = ""
+            if cur_event_state is not None:
+                event_id = str(getattr(cur_event_state, "event_id", "?") or "?")
+                ep = getattr(cur_event_state, "phase", None)
+                event_phase_str = (
+                    getattr(ep, "name", str(ep)) if ep is not None else "?"
+                )
+                try:
+                    eh = getattr(self._runner, "event_handler", None)
+                    if eh is not None:
+                        choice_list = eh.get_available_choices(
+                            cur_event_state, self._runner.run_state
+                        )
+                        for ch in choice_list:
+                            if getattr(ch, "index", None) == choice_idx:
+                                choice_text = (
+                                    getattr(ch, "text", "")
+                                    or getattr(ch, "name", "")
+                                )
+                                break
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[event] choice text lookup failed: %s: %s",
+                        type(e).__name__, e,
+                    )
+            logger.info(
+                "[event] choice ep=%s floor=%d choice_idx=%d choice_text=%s "
+                "event_id=%s event_phase=%s",
+                self._episode_idx,
+                int(getattr(rs, "floor", 0) or 0),
+                choice_idx,
+                choice_text,
+                event_id,
+                event_phase_str,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[event] _log_event_choice failed: %s: %s",
+                type(e).__name__, e,
+            )
+
+    def _log_guard_cap(self, *, battle_happened: bool, guard_cap: int) -> None:
+        """guard_cap 触发时打详细诊断日志（key=value 单行，便于 grep）。"""
+        assert self._runner is not None
+        rs = self._runner.run_state
+        cur_phase = self._runner.phase
+        phase_name = getattr(cur_phase, "name", str(cur_phase))
+        # 当前位置 (map_position)
+        mp = getattr(rs, "map_position", None)
+        map_x = getattr(mp, "x", -1) if mp is not None else -1
+        map_y = getattr(mp, "y", -1) if mp is not None else -1
+
+        # combat-specific 字段（不在 combat 时给 0）
+        in_combat = cur_phase == GamePhase.COMBAT or self._in_combat
+        enemies = _combat_enemies_brief(self._runner) if in_combat else []
+        hand_size, draw_size, discard_size = (
+            _combat_pile_sizes(self._runner) if in_combat else (0, 0, 0)
+        )
+
+        logger.warning(
+            "[guard_cap] ep=%s step=%d guard_cap=%d phase=%s floor=%s act=%s "
+            "map=(%s,%s) hp=%s/%s in_combat=%s enemies=%s "
+            "hand=%d draw=%d discard=%d battle_happened=%s actions_taken=%d "
+            "last_action=%s recent=%s FORCE_TERMINATE",
+            self._episode_idx, self._step_count, guard_cap, phase_name,
+            getattr(rs, "floor", "?"), getattr(rs, "act", "?"),
+            map_x, map_y,
+            getattr(rs, "current_hp", "?"), getattr(rs, "max_hp", "?"),
+            in_combat, enemies,
+            hand_size, draw_size, discard_size,
+            battle_happened, self._actions_taken,
+            self._last_action_repr, list(self._recent_actions),
+        )
+
+    def _force_terminate_run(self, *, reason: str) -> None:
+        """强制把当前 run 标成 terminal（loss）。
+
+        上层 step() 会读 runner.game_over → done=True，trainer 走完正常的
+        end-of-episode 流程（compute_final_reward / 关闭 env / 下一 episode）。
+        """
+        assert self._runner is not None
+        try:
+            self._runner.game_over = True
+            self._runner.game_won = False
+            self._runner.phase = GamePhase.RUN_COMPLETE
+        except Exception as e:  # noqa: BLE001
+            # 兜底：即便 runner 内部状态异常无法赋值，也要让 done=True，靠
+            # env.step 自己的 _runner.game_over 读取分支兜底
+            logger.warning(
+                "V8Env._force_terminate_run(reason=%s): set attrs failed: %s: %s",
+                reason, type(e).__name__, e,
+            )
 
     def _run_combat_turn(self) -> None:
         """战斗内：调 TurnSolver 选一个 CombatAction 执行。
@@ -640,6 +1217,7 @@ class V8Env:
         # 直接调 adapter（不接 SIGALRM；smoke 阶段足够，hard timeout 在 RL trainer 阶段
         # 视情况再补，避免 env 本身带太多副作用）
         action: Optional[Any] = None
+        self.combat_search_calls += 1
         try:
             action = self._adapter.pick_action(actions, self._runner, room_type=room_type)
         except Exception as e:  # noqa: BLE001
@@ -658,10 +1236,14 @@ class V8Env:
                 actions[0],
             )
 
+        self._last_action_repr = _safe_action_repr(action)
+        self._recent_actions.append(self._last_action_repr)
         ok = self._runner.take_action(action)
         self._actions_taken += 1
         if not ok:
             # 失败：强制取第一个 fallback
+            self._last_action_repr = _safe_action_repr(actions[0])
+            self._recent_actions.append(self._last_action_repr)
             self._runner.take_action(actions[0])
             self._actions_taken += 1
 

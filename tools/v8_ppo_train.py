@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from datetime import datetime
@@ -33,12 +34,48 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+
+# ============================================================
+# Graceful shutdown：SIGINT 第一次软停（保存后退出），第二次硬退出
+# ============================================================
+
+# 模块级 flag：信号 handler 写、main loop 读
+_STOP_REQUESTED: bool = False
+_SIGINT_COUNT: int = 0
+
+
+def _install_sigint_handler() -> None:
+    """注册 SIGINT handler。
+    - 第 1 次 Ctrl+C：设 _STOP_REQUESTED，main loop 跑完当前 batch + 保存 final ckpt + 写 summary 后退出
+    - 第 2 次 Ctrl+C：立即 os._exit(130)（假定卡在某处无法软停）
+    """
+    def _handler(signum, frame):  # noqa: ARG001
+        global _STOP_REQUESTED, _SIGINT_COUNT
+        _SIGINT_COUNT += 1
+        if _SIGINT_COUNT == 1:
+            _STOP_REQUESTED = True
+            # 直接 print（不走 logger，因为有些场合 logger 可能正卡在 flush）
+            print(
+                "\n[SIGINT] Ctrl+C received; will save final checkpoint + summary "
+                "and exit after current batch finishes. Press Ctrl+C again to hard exit.",
+                flush=True,
+            )
+        else:
+            print(
+                f"\n[SIGINT x{_SIGINT_COUNT}] hard exit (state may be lost).",
+                flush=True,
+            )
+            os._exit(130)
+
+    signal.signal(signal.SIGINT, _handler)
+
 # 保证从仓库根可 import v8.*
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from v8.combat_net_wrapper import V8CombatNetWrapper
+from v8.deck_evaluator import get_cache_stats as get_deck_cache_stats
 from v8.env import V8Env
 from v8.model import V8Model
 from v8.trainer import RolloutStep, V8PPOTrainer
@@ -241,6 +278,9 @@ def main() -> None:
     if args.smoke:
         apply_smoke_overrides(args)
 
+    # 安装 SIGINT handler（必须在 heavy import / 训练循环开始前）
+    _install_sigint_handler()
+
     device = select_device(args.device)
     logger.info("device=%s", device)
 
@@ -283,11 +323,71 @@ def main() -> None:
     num_episodes_done = 0
     t_start = time.time()
 
+    # ----- milestone trackers（修复以前 % freq == 0 与 batch_size 不整除导致永不触发的 bug）-----
+    # 旧逻辑：num_episodes_done % checkpoint_frequency == 0
+    #   batch_size=32 / freq=500 → LCM=4000，1000 局训练永远 fire 不了
+    # 新逻辑：num_episodes_done // freq 越过上一里程碑就 fire
+    last_ckpt_milestone = 0
+    last_eval_milestone = 0
+
+    # ----- 5h 墙钟 ckpt：episode-based ckpt 万一失效（bug / 进程僵死）也能保底 -----
+    wall_ckpt_interval_sec = 5 * 3600  # 5 hours
+    last_wall_ckpt_time = time.time()
+
     logger.info(
-        "PPO 训练开始: num_episodes=%d batch_size=%d lr=%.2e eval_freq=%d ckpt_freq=%d",
+        "PPO 训练开始: num_episodes=%d batch_size=%d lr=%.2e eval_freq=%d ckpt_freq=%d "
+        "wall_ckpt_interval=%ds (~%.1fh)",
         args.num_episodes, args.batch_size, args.lr,
         args.eval_frequency, args.checkpoint_frequency,
+        wall_ckpt_interval_sec, wall_ckpt_interval_sec / 3600.0,
     )
+
+    # ----- 退出原因（供最终 summary 标识，区分正常完成 vs SIGINT 软停）-----
+    exit_reason = "completed"
+
+    def _make_final_summary_payload() -> Dict[str, Any]:
+        return {
+            "phase": "B_ppo_rl",
+            "args": vars(args),
+            "episodes_done": num_episodes_done,
+            "elapsed_sec": time.time() - t_start,
+            "train_log_tail": train_log[-10:],
+            "eval_history": eval_history,
+            "wrapper_total_calls": wrapper.call_count,
+            "wrapper_avg_value": wrapper.avg_value,
+            "exit_reason": exit_reason,
+        }
+
+    def _save_final_checkpoint_and_summary() -> None:
+        """统一保存 final ckpt + summary（正常完成 / SIGINT 软停都走这条路径）。"""
+        final_ckpt_local = output_dir / "v8_ppo_final.pt"
+        try:
+            trainer.save_checkpoint(
+                str(final_ckpt_local),
+                metadata={
+                    "phase": "B_ppo_rl_final",
+                    "episodes_done": num_episodes_done,
+                    "phase_a_meta": phase_a_meta,
+                    "elapsed_sec": time.time() - t_start,
+                    "exit_reason": exit_reason,
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "final ckpt save failed: %s: %s", type(e).__name__, e,
+            )
+        try:
+            with open(output_dir / "v8_ppo_summary.json", "w") as f:
+                json.dump(_make_final_summary_payload(), f, indent=2, default=str, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "summary write failed: %s: %s", type(e).__name__, e,
+            )
+        logger.info(
+            "训练结束 reason=%s episodes=%d 总耗时=%.1fs final_ckpt=%s wrapper_calls=%d",
+            exit_reason, num_episodes_done, time.time() - t_start,
+            final_ckpt_local, wrapper.call_count,
+        )
 
     while num_episodes_done < args.num_episodes:
         # ---- 收 batch_size 个 rollout ----
@@ -296,9 +396,25 @@ def main() -> None:
         batch_target = min(args.batch_size, args.num_episodes - num_episodes_done)
         prev_call_count = wrapper.call_count
 
+        # ---- 性能累计（[perf] 行用）----
+        batch_env_step_sec = 0.0
+        batch_collect_fwd_sec = 0.0
+        batch_eval_deck_sec = 0.0
+        batch_eval_deck_calls = 0
+        batch_search_calls = 0
+        # deck_evaluator 全局 cache 计数 delta
+        prev_cache = get_deck_cache_stats()
+        prev_cache_hits = int(prev_cache.get("hits", 0) or 0)
+        prev_cache_misses = int(prev_cache.get("misses", 0) or 0)
+
         for k in range(batch_target):
             ep_idx = num_episodes_done + k
             ep_t0 = time.time()
+            # 把 episode 编号告诉 env，guard_cap / [combat] 日志带上
+            try:
+                env.set_episode(ep_idx)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 rollout = trainer.collect_rollout(env, seed=ep_idx, deterministic=False)
             except Exception as e:  # noqa: BLE001
@@ -320,6 +436,19 @@ def main() -> None:
             beat_boss = bool(runner.game_won) if runner else False
             ep_secs = time.time() - ep_t0
 
+            # 拿 per-episode 性能 / 调用计数
+            rstats = getattr(trainer, "last_rollout_stats", {}) or {}
+            ep_fwd = float(rstats.get("forward_time_sec", 0.0))
+            ep_env_step = float(rstats.get("env_step_time_sec", 0.0))
+            ep_eval_deck_sec = float(rstats.get("eval_deck_time_sec", 0.0))
+            ep_eval_deck_calls = int(rstats.get("eval_deck_calls", 0))
+            ep_search_calls = int(rstats.get("combat_search_calls", 0))
+            batch_collect_fwd_sec += ep_fwd
+            batch_env_step_sec += ep_env_step
+            batch_eval_deck_sec += ep_eval_deck_sec
+            batch_eval_deck_calls += ep_eval_deck_calls
+            batch_search_calls += ep_search_calls
+
             batch_rollouts.extend(rollout)
             batch_meta.append({
                 "ep": ep_idx,
@@ -332,9 +461,11 @@ def main() -> None:
             })
             # ---- 每局 heartbeat：silent 跑步是不可接受的 ----
             logger.info(
-                "[heartbeat] ep=%d steps=%d secs=%.1f reward=%.3f floor=%d act=%d beat_boss=%s",
+                "[heartbeat] ep=%d steps=%d secs=%.1f reward=%.3f floor=%d act=%d beat_boss=%s "
+                "search_calls=%d eval_deck_calls=%d",
                 ep_idx, len(rollout), ep_secs, ep_reward,
                 final_floor, final_act, beat_boss,
+                ep_search_calls, ep_eval_deck_calls,
             )
             try:
                 env.close()
@@ -385,78 +516,130 @@ def main() -> None:
             wrapper_calls_in_batch, upd_secs,
         )
 
-        # ---- Eval ----
-        if args.eval_frequency > 0 and num_episodes_done % args.eval_frequency == 0:
-            eval_t0 = time.time()
-            # eval 用大 seed offset，跟训练 seed 不冲突
-            eval_metrics = run_eval(
-                trainer, env,
-                num_seeds=args.eval_seeds,
-                seed_offset=10_000 + num_episodes_done,
-            )
-            eval_metrics["episodes_done"] = num_episodes_done
-            eval_metrics["secs"] = time.time() - eval_t0
-            eval_history.append(eval_metrics)
+        # ---- [perf] 性能分解（debug 用：定位是 CPU search / MPS forward / deck_eval 哪个 bottleneck）----
+        upd_stats = getattr(trainer, "last_update_stats", {}) or {}
+        upd_fwd_sec = float(upd_stats.get("update_forward_sec", 0.0))
+        upd_total_sec = float(upd_stats.get("update_total_sec", upd_secs))
+        # deck_evaluator cache hit/miss delta（本 batch 期间新增的 hits/misses）
+        cur_cache = get_deck_cache_stats()
+        cur_cache_hits = int(cur_cache.get("hits", 0) or 0)
+        cur_cache_misses = int(cur_cache.get("misses", 0) or 0)
+        d_cache_hits = cur_cache_hits - prev_cache_hits
+        d_cache_misses = cur_cache_misses - prev_cache_misses
+        batch_ep_total_sec = sum(m["secs"] for m in batch_meta)
+        logger.info(
+            "[perf] ep=%d batch_total=%.1fs collect_ep_sum=%.1fs env_step=%.1fs "
+            "collect_fwd=%.1fs eval_deck=%.1fs(%d calls) search_calls=%d "
+            "ppo_update=%.2fs(fwd=%.2fs) deck_cache_delta=hit%d/miss%d",
+            num_episodes_done,
+            batch_ep_total_sec + upd_total_sec,
+            batch_ep_total_sec,
+            batch_env_step_sec,
+            batch_collect_fwd_sec,
+            batch_eval_deck_sec, batch_eval_deck_calls,
+            batch_search_calls,
+            upd_total_sec, upd_fwd_sec,
+            d_cache_hits, d_cache_misses,
+        )
+
+        # ---- Eval（修复：里程碑递进，不靠 % freq == 0）----
+        if args.eval_frequency > 0:
+            cur_eval_milestone = num_episodes_done // args.eval_frequency
+            if cur_eval_milestone > last_eval_milestone:
+                last_eval_milestone = cur_eval_milestone
+                eval_t0 = time.time()
+                # eval 用大 seed offset，跟训练 seed 不冲突
+                eval_metrics = run_eval(
+                    trainer, env,
+                    num_seeds=args.eval_seeds,
+                    seed_offset=10_000 + num_episodes_done,
+                )
+                eval_metrics["episodes_done"] = num_episodes_done
+                eval_metrics["secs"] = time.time() - eval_t0
+                eval_history.append(eval_metrics)
+                logger.info(
+                    "[eval@ep=%d] reached_boss=%.2f beat_boss=%.2f floor_mean=%.1f (%.1fs)",
+                    num_episodes_done, eval_metrics["reached_boss_rate"],
+                    eval_metrics["beat_boss_rate"], eval_metrics["floor_mean"],
+                    eval_metrics["secs"],
+                )
+
+        # ---- Checkpoint（修复：里程碑递进，不靠 % freq == 0）----
+        if args.checkpoint_frequency > 0:
+            cur_ckpt_milestone = num_episodes_done // args.checkpoint_frequency
+            if cur_ckpt_milestone > last_ckpt_milestone:
+                last_ckpt_milestone = cur_ckpt_milestone
+                ckpt_path = output_dir / f"v8_ppo_ep{num_episodes_done}.pt"
+                trainer.save_checkpoint(
+                    str(ckpt_path),
+                    metadata={
+                        "phase": "B_ppo_rl",
+                        "episodes_done": num_episodes_done,
+                        "lr": args.lr,
+                        "batch_size": args.batch_size,
+                        "phase_a_meta": phase_a_meta,
+                        "elapsed_sec": time.time() - t_start,
+                    },
+                )
+                save_metadata_json(
+                    str(output_dir / f"v8_ppo_ep{num_episodes_done}.json"),
+                    num_episodes_so_far=num_episodes_done,
+                    eval_history=eval_history,
+                    extra={"args": vars(args)},
+                )
+                logger.info("已保存 checkpoint: %s", ckpt_path)
+
+        # ---- 5h 墙钟 ckpt（用户硬性要求：episode-ckpt 失效也得有保底）----
+        now = time.time()
+        if now - last_wall_ckpt_time >= wall_ckpt_interval_sec:
+            wall_runtime_h = (now - t_start) / 3600.0
+            ts_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+            wall_ckpt_path = output_dir / f"v8_ppo_wall_{ts_tag}.pt"
+            try:
+                trainer.save_checkpoint(
+                    str(wall_ckpt_path),
+                    metadata={
+                        "phase": "B_ppo_rl_wall",
+                        "episodes_done": num_episodes_done,
+                        "lr": args.lr,
+                        "batch_size": args.batch_size,
+                        "phase_a_meta": phase_a_meta,
+                        "elapsed_sec": now - t_start,
+                        "wall_runtime_hours": wall_runtime_h,
+                        "wall_ckpt_timestamp": ts_tag,
+                    },
+                )
+                save_metadata_json(
+                    str(output_dir / f"v8_ppo_wall_{ts_tag}.json"),
+                    num_episodes_so_far=num_episodes_done,
+                    eval_history=eval_history,
+                    extra={
+                        "args": vars(args),
+                        "wall_runtime_hours": wall_runtime_h,
+                        "kind": "wall_ckpt",
+                    },
+                )
+                logger.info(
+                    "[wall-ckpt] saved at runtime=%.2fh path=%s",
+                    wall_runtime_h, wall_ckpt_path,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "wall-clock ckpt save failed: %s: %s", type(e).__name__, e,
+                )
+            last_wall_ckpt_time = time.time()
+
+        # ---- SIGINT 软停：当前 batch 已结束，存盘 + 退出 ----
+        if _STOP_REQUESTED:
+            exit_reason = "sigint"
             logger.info(
-                "[eval@ep=%d] reached_boss=%.2f beat_boss=%.2f floor_mean=%.1f (%.1fs)",
-                num_episodes_done, eval_metrics["reached_boss_rate"],
-                eval_metrics["beat_boss_rate"], eval_metrics["floor_mean"],
-                eval_metrics["secs"],
+                "[SIGINT] stop_requested=True after batch ep=%d → saving and exiting",
+                num_episodes_done,
             )
+            break
 
-        # ---- Checkpoint ----
-        if (
-            args.checkpoint_frequency > 0
-            and num_episodes_done % args.checkpoint_frequency == 0
-        ):
-            ckpt_path = output_dir / f"v8_ppo_ep{num_episodes_done}.pt"
-            trainer.save_checkpoint(
-                str(ckpt_path),
-                metadata={
-                    "phase": "B_ppo_rl",
-                    "episodes_done": num_episodes_done,
-                    "lr": args.lr,
-                    "batch_size": args.batch_size,
-                    "phase_a_meta": phase_a_meta,
-                    "elapsed_sec": time.time() - t_start,
-                },
-            )
-            save_metadata_json(
-                str(output_dir / f"v8_ppo_ep{num_episodes_done}.json"),
-                num_episodes_so_far=num_episodes_done,
-                eval_history=eval_history,
-                extra={"args": vars(args)},
-            )
-            logger.info("已保存 checkpoint: %s", ckpt_path)
-
-    # ---- 最终 ckpt + summary ----
-    final_ckpt = output_dir / "v8_ppo_final.pt"
-    trainer.save_checkpoint(
-        str(final_ckpt),
-        metadata={
-            "phase": "B_ppo_rl_final",
-            "episodes_done": num_episodes_done,
-            "phase_a_meta": phase_a_meta,
-            "elapsed_sec": time.time() - t_start,
-        },
-    )
-    summary = {
-        "phase": "B_ppo_rl",
-        "args": vars(args),
-        "episodes_done": num_episodes_done,
-        "elapsed_sec": time.time() - t_start,
-        "train_log_tail": train_log[-10:],
-        "eval_history": eval_history,
-        "wrapper_total_calls": wrapper.call_count,
-        "wrapper_avg_value": wrapper.avg_value,
-    }
-    with open(output_dir / "v8_ppo_summary.json", "w") as f:
-        json.dump(summary, f, indent=2, default=str, ensure_ascii=False)
-
-    logger.info(
-        "训练完成 episodes=%d 总耗时=%.1fs final_ckpt=%s wrapper_calls=%d",
-        num_episodes_done, time.time() - t_start, final_ckpt, wrapper.call_count,
-    )
+    # ---- 最终 ckpt + summary（统一走 _save_final_checkpoint_and_summary）----
+    _save_final_checkpoint_and_summary()
 
 
 if __name__ == "__main__":

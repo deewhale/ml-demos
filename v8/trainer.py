@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -116,6 +117,10 @@ class V8PPOTrainer:
         self.entropy_coef = float(entropy_coef)
         self.max_grad_norm = float(max_grad_norm)
 
+        # 性能 / 调用计数（每次 collect_rollout / update 后填充，trainer driver 读）
+        self.last_rollout_stats: Dict[str, float] = {}
+        self.last_update_stats: Dict[str, float] = {}
+
     # ---------------------------------------------------------
     # Rollout collection
     # ---------------------------------------------------------
@@ -148,6 +153,13 @@ class V8PPOTrainer:
 
         rollout: List[RolloutStep] = []
 
+        # ---- 性能 / 调用计数 ----
+        # 让 env 在 reset 前清 per-episode 计数；reset 内部也会清，但显式更稳
+        if hasattr(env, "reset_perf_counters"):
+            env.reset_perf_counters()
+        forward_time_sec = 0.0
+        env_step_time_sec = 0.0
+
         state = env.reset(seed=seed)
 
         step_idx = 0
@@ -162,7 +174,9 @@ class V8PPOTrainer:
                 break
 
             # forward
+            fwd_t0 = time.time()
             out = self.model(state, actions)
+            forward_time_sec += time.time() - fwd_t0
             logits = out["logits"]            # [n_options]
             value = out["value"]              # scalar tensor
             n_options = logits.shape[0]
@@ -198,7 +212,9 @@ class V8PPOTrainer:
             value_scalar = float(value.item()) if value.dim() == 0 else float(value.flatten()[0].item())
 
             # 调用 env.step（这一步可能内部跑战斗 + post-battle evaluate）
+            es_t0 = time.time()
             next_state, reward, done, info = env.step(action_idx)
+            env_step_time_sec += time.time() - es_t0
 
             rollout.append(
                 RolloutStep(
@@ -222,6 +238,15 @@ class V8PPOTrainer:
         if was_training:
             self.model.train()
 
+        # 暴露给 trainer driver 做 [perf] / [heartbeat] 日志
+        self.last_rollout_stats = {
+            "forward_time_sec": forward_time_sec,
+            "env_step_time_sec": env_step_time_sec,
+            "eval_deck_calls": float(getattr(env, "eval_deck_calls", 0)),
+            "eval_deck_time_sec": float(getattr(env, "eval_deck_time_sec", 0.0)),
+            "combat_search_calls": float(getattr(env, "combat_search_calls", 0)),
+            "n_steps": float(len(rollout)),
+        }
         return rollout
 
     # ---------------------------------------------------------
@@ -300,6 +325,11 @@ class V8PPOTrainer:
         如果之后需要 minibatch，把整批跑改成 chunked 即可。
         """
         if not rollout:
+            self.last_update_stats = {
+                "update_total_sec": 0.0,
+                "update_forward_sec": 0.0,
+                "update_n_forwards": 0.0,
+            }
             return {
                 "policy_loss": 0.0,
                 "value_loss": 0.0,
@@ -310,6 +340,9 @@ class V8PPOTrainer:
                 "n_steps": 0,
             }
 
+        update_t0 = time.time()
+        update_forward_sec = 0.0
+        update_n_forwards = 0
         self.model.train()
 
         # 1. advantages / returns
@@ -345,7 +378,10 @@ class V8PPOTrainer:
             clip_fracs = []
 
             for t, step in enumerate(rollout):
+                fwd_t0 = time.time()
                 out = self.model(step.state, step.available_actions)
+                update_forward_sec += time.time() - fwd_t0
+                update_n_forwards += 1
                 logits = out["logits"]
                 value = out["value"]
 
@@ -436,6 +472,12 @@ class V8PPOTrainer:
             for k in list(metrics_accum.keys()):
                 metrics_accum[k] /= n_updates
         metrics_accum["n_steps"] = float(len(rollout))
+
+        self.last_update_stats = {
+            "update_total_sec": time.time() - update_t0,
+            "update_forward_sec": update_forward_sec,
+            "update_n_forwards": float(update_n_forwards),
+        }
         return metrics_accum
 
     # ---------------------------------------------------------

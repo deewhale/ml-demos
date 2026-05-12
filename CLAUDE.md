@@ -6,14 +6,41 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 项目结构
 
-### 活跃代码（V8 → 推 RL）
-- `v8_bot.py` — 战斗内 search infra（GameRunner + TurnSolver + phase dispatch）。
-  元决策原本调 `v8_strategy.*`，BC 路线 archive 后已替换为 `_StratStub`，
-  调用元决策 dispatch 会抛 NotImplementedError，**待 RL 重构时换成 RL policy**。
-- `v8_data_collector.py` — 元决策点采集（JSONL schema 设计可参考）。
-  注意：本文件 import v8_strategy / v8_teacher_eval / v8_battle_state_adapter，
-  这些模块已 archive，**当前 import 会失败**，RL 重构时再视情况删/改。
-- `data/sts_data.py` — STS 数据提取（V6 遗留，可能复用）
+### 活跃代码（V8 RL，训练中）
+- `v8/env.py` — V8Env gym wrapper（封装 StSRLSolver runner）。负责元决策阶段
+  （MAP / REWARD / CARD_REWARD / EVENT / ...）的状态/动作编码，并通过 search-net
+  wrapper 驱动战斗。约 1100 行，含大量诊断日志（见下方「诊断日志」）。
+- `v8/trainer.py` — V8PPOTrainer（PPO + clip + GAE + entropy bonus）。
+  通过 env 收集 rollout，按 `eval_frequency` 周期跑确定性 eval。
+- `v8/model.py` — V8Model（set-encoder + pointer-net actor + value head）。
+- `v8/combat_net_wrapper.py` — 把 V8Model 桥接到 StSRLSolver 的 combat_net hook，
+  供战斗内搜索调用；BC combat head 权重从 `sts_models/v8_combat_head_v1.pt` 加载（Phase A 产物）。
+- `v8/deck_evaluator.py` — 战后牌组评分，9 worker ProcessPoolExecutor 并行模拟。
+- `v8/reward.py` — step reward shaping（game_won / floor_progress / 战斗结果 / 牌组质量 delta）。
+- `tools/v8_ppo_train.py` — 训练入口。常用参数：`--num_episodes` `--batch_size`
+  `--checkpoint_frequency` `--eval_frequency` `--output_dir` `--smoke`。
+- `data/sts_data.py` — STS 数据提取（V6 遗留，可能复用）。
+- 归档但保留参考：`v8_bot.py`（战斗内 search infra，元决策 dispatch 已被 V8 RL 取代）、
+  `v8_data_collector.py`（JSONL schema 参考，import 已 archive 模块所以无法直接运行）。
+
+### 诊断日志（V8 RL 训练 / eval 输出，可 grep）
+
+- `[startup]` / `[heartbeat]` — episode 级：ep#, steps, secs, reward, floor, beat_boss,
+  search_calls, eval_deck_calls
+- `[combat] enter|exit` — 每场战斗：ep, floor, act, room, enemies, hp before/after, turn_actions
+- `[floor]` — 每次楼层变化：ep, floor, act, hp, room 类型（monster/elite/boss/rest/shop/event/treasure）
+- `[deck]` — elite/boss 胜利 + reward 处理后：完整牌组（Counter，带升级标记如 Flex+1）+ 遗物
+- `[perf]` — 每次 PPO update：batch_total, env_step, collect_fwd, eval_deck (calls/time),
+  ppo_update (time/fwd), deck cache hit/miss
+- `[guard_cap]` — env 内部 phase-transition loop 命中上限（20000 internal step）时触发，
+  FORCE_TERMINATE 并附诊断 context（phase / floor / act / enemies 等）。
+- `[event] enter` — 首次进入 EVENT phase 时打一次：ep, floor, act, event_id, phase, 可见 choices。
+- `[event] choice` — env.step 处理 EventAction 时打一次：ep, floor, choice_idx, choice_text,
+  事件前后 hp / gold / deck_size 等。
+- `[event] phase_transition` — 同一事件内 phase 字符串变化（多 phase 事件）时打一次：
+  ep, floor, event_id, old phase → new phase, 新 choices。
+- `[event] exit` — 离开 EVENT phase 时打一次：ep, floor, event_id, reason（事件正常结束 /
+  进入战斗 / 等），出门时的 hp / gold / deck_size。
 
 ### 文档
 - `docs/v6_training_log.md` — V6 训练日志
@@ -60,18 +87,53 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-06 -->
+<!-- last-verified: 2026-05-12 -->
+- 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
+  BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
+  RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
+  启动，~3.5h / 60 ep 后人为停掉以排查 deterministic eval 死循环（见下方「已知 bug」）。
 - 2026-05-06: V8 BC（启发式 teacher）路线证明撞天花板（0/30 beat boss），
-  已 archive 到 `archive/v8_bc_pivot/`。下一步推 RL（战斗内搜索 + 战斗外纯 model RL with dense reward shaping）。
+  已 archive 到 `archive/v8_bc_pivot/`。
 - V8 BC 路线已 archive 的产物：`v8_strategy.py` / `v8_evaluator.py` /
-  `v8_inference_bot.py` / `v8_model.py` / `v8_trainer.py` / `v8_teacher_*.py` /
+  `v8_inference_bot.py` / 旧 `v8_model.py` / 旧 `v8_trainer.py` / `v8_teacher_*.py` /
   `v8_battle_state_adapter.py` / `scripts/v8_{collect_*,eval,sweep,train_value}.py` /
   `data/v8_*` / `sts_models/v8_{meta,value_head,smoke}_*.pt`。
-- 保留：`v8_bot.py`（战斗内 search infra，元决策待 RL 重构）+
-  `v8_data_collector.py`（schema 参考，当前因 import 已 archive 模块而无法直接 import）。
-- 路线演进：V3-V5 (DQN/早期 PPO) → V6 (PPO+Transformer) → V7 (搜索+启发式，未完成) → V8 (监督学习, 已 archive) → V9 RL（待开始）
+  （注意：V8 RL 新模块在 `v8/` 包内，与已 archive 的旧 `v8_*.py` 文件不冲突。）
+- 路线演进：V3-V5 (DQN/早期 PPO) → V6 (PPO+Transformer) → V7 (搜索+启发式，未完成)
+  → V8 BC (监督学习, 已 archive) → **V8 RL (当前阶段)**。
 - V6/V7 已归档，详见 docs/v6_architecture_review.md
-- **维护规则**：每次切换大版本（如 V8→V9）必须同步更新「当前状态」和「活跃代码」段，刷新 last-verified 日期，与代码改动一起 commit。
+- **维护规则**：每次切换大版本（如 V8→V9）或大阶段（如 V8 BC→V8 RL）必须同步更新
+  「当前状态」和「活跃代码」段，刷新 last-verified 日期，与代码改动一起 commit。
+
+### V8 RL 训练日志
+
+- **trial100** (`sts_models/v8_ppo_trial100/`) — 100 ep 验证跑完成。
+  23 boss kill / 100 ep（23% boss rate）；按 batch 拆 28% / 19% / 16% / 75%，
+  最后一个 batch 75% 是噪声尖刺，不能当趋势看。证明 pipeline 闭环可跑。
+- **long_v1** (`sts_models/v8_ppo_long_v1/`) — 1500 ep 长跑，于 2026-05-12 10:08 启动，
+  约 3.5h / 60 ep 后人为停掉，调查 deterministic eval 死循环 bug。
+- 2026-05-11 添加全套结构化诊断日志（`[startup]` / `[combat]` / `[floor]` / `[deck]` /
+  `[perf]` / `[guard_cap]` / `[heartbeat]`），见上方「诊断日志」段。
+- 2026-05-12 deterministic eval 死循环根因定位：StSRLSolver Python engine
+  `_get_mysterious_sphere_choices` 没有按 `event_state.phase` 过滤可选 choices，
+  导致 argmax 反复选同一个 event-action，事件不会推进、phase 不会切换。
+  Sampling 模式因为有随机性所以不卡。注意 StSRLSolver 上游已经在 2026-04-21
+  通过 PR #136/#137 彻底废弃整个 Python engine，迁到 Rust，我们 checkout 还停留在
+  legacy Python 代码。
+- 2026-05-12 同日为 env 加 event-level 诊断日志（`[event] enter` / `[event] choice` /
+  `[event] phase_transition` / `[event] exit`），方便日后精确定位 event-state bug。
+  早先尝试过的 `[floor_stall]` 检测器（连续 N step 无楼层变化兜底终止）当天已被 revert，
+  不在当前代码里。
+- 已知 quirk（不阻塞，留档）：`[guard_cap]` 触发于 `phase=COMBAT enemies=[]`
+  （事件触发战斗后偶发），约 4-5% episode 命中，FORCE_TERMINATE 兜底干净。
+
+### 已知 bug / 限制
+
+- **StSRLSolver Python engine 事件 phase filter bug**：我们 pinned 在 commit
+  e82f8296 的 Python engine 在部分事件的 phase filter 上有 bug，至少
+  `_get_mysterious_sphere_choices` 漏了 phase 过滤，导致 deterministic eval 时
+  argmax 可能在该事件死循环。StSRLSolver 上游 PR #136/#137（2026-04-21）已彻底
+  删除该 Python engine，转 Rust。修复方向待定。
 
 ## 子 Agent 协作规范
 
