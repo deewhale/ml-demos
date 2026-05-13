@@ -87,7 +87,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-12 -->
+<!-- last-verified: 2026-05-13 -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -110,8 +110,16 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 - **trial100** (`sts_models/v8_ppo_trial100/`) — 100 ep 验证跑完成。
   23 boss kill / 100 ep（23% boss rate）；按 batch 拆 28% / 19% / 16% / 75%，
   最后一个 batch 75% 是噪声尖刺，不能当趋势看。证明 pipeline 闭环可跑。
-- **long_v1** (`sts_models/v8_ppo_long_v1/`) — 1500 ep 长跑，于 2026-05-12 10:08 启动，
-  约 3.5h / 60 ep 后人为停掉，调查 deterministic eval 死循环 bug。
+- **`long_v1`**: 100 ep 训练，2026-05-12 启动后 ~60 ep 时人为停掉调查
+  deterministic-eval bug，已弃用 (ckpt 在 `sts_models/v8_ppo_long_v1/v8_ppo_ep32.pt`)。
+- **`long_v2`**: 2026-05-12 22:00 启动的 128 ep 训练，在 ep=42 因 deterministic-eval
+  卡在 Mysterious Sphere event 循环（之前只 fix 了 menu，没 fix handler），
+  ep=32 ckpt 保留，整个 run 弃用。
+- **`long_v2b`**: 2026-05-12 23:17 启动的 128 ep 训练（applied 完整 fix）。
+  截至 2026-05-13 10:19 ckpt ep=96 已落（含 ep=32/64/96 + 1 个 wall_ckpt），
+  batch 4 进行中（ep=125/128）。trend 显示 RL **在真学**：act 1 boss 通过率从
+  batch 1 的 28% 涨到 batch 4 的 64%，avg_reward 从 +0.1 涨到 +28.9。
+  Ckpt 路径 `sts_models/v8_ppo_long_v2b/`。
 - 2026-05-11 添加全套结构化诊断日志（`[startup]` / `[combat]` / `[floor]` / `[deck]` /
   `[perf]` / `[guard_cap]` / `[heartbeat]`），见上方「诊断日志」段。
 - 2026-05-12 deterministic eval 死循环根因定位：StSRLSolver Python engine
@@ -129,11 +137,30 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ### 已知 bug / 限制
 
-- **StSRLSolver Python engine 事件 phase filter bug**：我们 pinned 在 commit
-  e82f8296 的 Python engine 在部分事件的 phase filter 上有 bug，至少
-  `_get_mysterious_sphere_choices` 漏了 phase 过滤，导致 deterministic eval 时
-  argmax 可能在该事件死循环。StSRLSolver 上游 PR #136/#137（2026-04-21）已彻底
-  删除该 Python engine，转 Rust。修复方向待定。
+- **StSRLSolver Python engine `_get_mysterious_sphere_choices` 和
+  `_handle_mysterious_sphere` 缺 phase filter**（2026-05-12 发现，已在
+  `external/StSRLSolver/` 分支 `fix/mysterious-sphere-phase-filter` 修复，
+  commits `11b15c7a` + `f8006f30`）。上游已弃用整个 Python engine
+  （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
+  **事实上我们 own 这个 fork**。
+
+## 运行中的训练进程（2026-05-13 状态快照）
+
+如新会话被 ScheduleWakeup 唤醒来 monitor，按以下信息接手：
+
+- **进程**：v2b 训练在 nohup 下运行，父 PID 68304（python 子进程在父 PID 下）
+- **日志文件**：`/tmp/v8_ppo_long_v2b.log` 全程 append；`/tmp/v8_ppo_long_v2b.exit` 在训练结束时出现
+- **Output 目录**：`sts_models/v8_ppo_long_v2b/`，ckpt 文件 ep=32/64/96 + wall + 最终 ep=128 + final
+- **参数**：num_episodes=128 batch_size=32 ckpt_freq=32 eval_freq=100
+- **预期完成**：~12:30-13:30（剩 ~3 ep + PPO + 30 seeds 完整 game eval）
+- **下一步**：训练完成后跑 metrics 分析（用户已授权，但说"等这一批完再做"）。下批训练参数 user 已定：每次 128 或 512 ep，ckpt_freq=32
+
+接手 monitor 的检查清单（一行 bash 看全貌）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_long_v2b/`
+- 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_long_v2b.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_long_v2b.log | tail -1`
+- 训练结束信号：`cat /tmp/v8_ppo_long_v2b.exit 2>&1`
 
 ## 子 Agent 协作规范
 
