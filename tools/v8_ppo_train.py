@@ -165,12 +165,28 @@ def run_eval(
 ) -> Dict[str, Any]:
     """跑 num_seeds 局 deterministic eval（no_grad）。
 
-    指标：reached_boss_rate / beat_boss_rate / floor_mean / avg_episode_steps。
+    指标：
+    - reached_boss_rate：摸到 act1 boss 房（floor>=16 或 final_act>=2）
+    - act1_boss_beat_rate：穿过 act1 boss（final_act>=2）
+    - act2_boss_beat_rate：穿过 act2 boss（final_act>=3）
+    - won_game_rate：通关（runner.game_won）
+    - floor_mean / floor_max / avg_steps
+    - boss_reach_counts / boss_kill_counts：act1 boss 维度 per-boss 统计
+      （act 切换会覆盖 runner._boss_name，所以 act1 击杀的 boss 名无法在 episode 末尾
+      可靠归属——这里仅在 final_act==1 且 final_floor>=16 时按 _boss_name 计 reach，
+      kill 维度对应 boss 计 0；总 act1 击杀数走 act1_boss_beat_rate）
+
+    保留旧字段 beat_boss_rate = act1_boss_beat_rate（deprecated，下游迁移完毕后删）。
     """
     floors: List[int] = []
     reached_boss = 0
-    beat_boss = 0
+    act1_beat = 0
+    act2_beat = 0
+    won_game = 0
     total_steps = 0
+    # per-boss act1 维度：见 docstring，仅 final_act==1 且 reach 时填
+    boss_reach_counts: Dict[str, int] = {}
+    boss_kill_counts: Dict[str, int] = {}
 
     for i in range(num_seeds):
         seed = seed_offset + i
@@ -189,10 +205,12 @@ def run_eval(
             final_floor = int(getattr(runner.run_state, "floor", 0) or 0)
             final_act = int(getattr(runner.run_state, "act", 1) or 1)
             game_won = bool(runner.game_won)
+            boss_name = str(getattr(runner, "_boss_name", "") or "")
         else:
             final_floor = int(getattr(last.state, "floor", 0) or 0)
             final_act = int(getattr(last.state, "act", 1) or 1)
             game_won = False
+            boss_name = ""
 
         floors.append(final_floor)
         total_steps += len(rollout)
@@ -200,21 +218,40 @@ def run_eval(
         if final_floor >= 16 or final_act >= 2:
             reached_boss += 1
         if game_won or final_act >= 2:
-            beat_boss += 1
+            act1_beat += 1
+        if game_won or final_act >= 3:
+            act2_beat += 1
+        if game_won:
+            won_game += 1
+
+        # per-boss：只在 final_act==1 且摸到 boss 房（floor>=16）时归属。
+        # final_act>=2 时 _boss_name 已被切到 act2 boss，无法可靠回溯 act1 boss 名。
+        if final_act == 1 and final_floor >= 16 and boss_name:
+            boss_reach_counts[boss_name] = boss_reach_counts.get(boss_name, 0) + 1
+            # 摸到没击杀：kill 计 0（确保 key 存在便于 log 输出 X/Y 形式）
+            boss_kill_counts.setdefault(boss_name, 0)
+
         try:
             env.close()
         except Exception:  # noqa: BLE001
             pass
 
     n = max(1, len(floors))
+    act1_beat_rate = act1_beat / num_seeds
     return {
         "num_seeds": num_seeds,
         "completed": len(floors),
         "reached_boss_rate": reached_boss / num_seeds,
-        "beat_boss_rate": beat_boss / num_seeds,
+        "act1_boss_beat_rate": act1_beat_rate,
+        "act2_boss_beat_rate": act2_beat / num_seeds,
+        "won_game_rate": won_game / num_seeds,
+        # deprecated, use act1_boss_beat_rate
+        "beat_boss_rate": act1_beat_rate,
         "floor_mean": sum(floors) / n if floors else 0.0,
         "floor_max": max(floors) if floors else 0,
         "avg_steps": total_steps / n if floors else 0.0,
+        "boss_reach_counts": boss_reach_counts,
+        "boss_kill_counts": boss_kill_counts,
     }
 
 
@@ -558,11 +595,27 @@ def main() -> None:
                 eval_metrics["secs"] = time.time() - eval_t0
                 eval_history.append(eval_metrics)
                 logger.info(
-                    "[eval@ep=%d] reached_boss=%.2f beat_boss=%.2f floor_mean=%.1f (%.1fs)",
+                    "[eval@ep=%d] reached_a1_boss=%.2f a1_boss_beat=%.2f a2_boss_beat=%.2f "
+                    "won_game=%.2f floor_mean=%.1f (%.1fs)",
                     num_episodes_done, eval_metrics["reached_boss_rate"],
-                    eval_metrics["beat_boss_rate"], eval_metrics["floor_mean"],
+                    eval_metrics["act1_boss_beat_rate"], eval_metrics["act2_boss_beat_rate"],
+                    eval_metrics["won_game_rate"], eval_metrics["floor_mean"],
                     eval_metrics["secs"],
                 )
+                # per-boss reach / kill 分布（仅 act1，act 切换后 _boss_name 被覆盖，
+                # 故 kill 列无法按 boss 归属，恒为 0；reach 列反映"卡在哪个 boss"分布）
+                _reach = eval_metrics.get("boss_reach_counts", {}) or {}
+                _kill = eval_metrics.get("boss_kill_counts", {}) or {}
+                if _reach or _kill:
+                    _names = sorted(set(_reach.keys()) | set(_kill.keys()))
+                    _parts = [
+                        f"{name}={_kill.get(name, 0)}/{_reach.get(name, 0)}"
+                        for name in _names
+                    ]
+                    logger.info(
+                        "[eval@ep=%d] boss_kills: %s",
+                        num_episodes_done, ", ".join(_parts),
+                    )
 
         # ---- Checkpoint（修复：里程碑递进，不靠 % freq == 0）----
         if args.checkpoint_frequency > 0:

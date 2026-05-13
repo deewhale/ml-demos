@@ -27,7 +27,7 @@ state + available_actions list，输出选择 idx）。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 
 if TYPE_CHECKING:
@@ -77,20 +77,195 @@ class V8Action:
 # action 描述构造（GameAction → str）
 # =========================================================================
 
-def _format_engine_action(action: Any) -> str:
+def _card_instance_label(card: Any) -> str:
+    """`CardInstance` / `Card` → 紧凑可读名（带 + 标记升级）。
+
+    用 id（稳定字符串）而非 display name，避免本地化 / 大小写抖动。
+    """
+    if card is None:
+        return "?"
+    cid = getattr(card, "id", None) or getattr(card, "name", None) or "?"
+    upgraded = bool(getattr(card, "upgraded", False))
+    # SearingBlow 用 misc_value 表示升级次数（同 CardInstance.__repr__）
+    misc = int(getattr(card, "misc_value", 0) or 0)
+    if cid == "SearingBlow" and misc > 0:
+        return f"{cid}+{misc}"
+    return f"{cid}+" if upgraded else str(cid)
+
+
+def _relic_label(relic: Any) -> str:
+    if relic is None:
+        return "?"
+    return str(getattr(relic, "id", None) or getattr(relic, "name", None) or "?")
+
+
+def _potion_label(potion: Any) -> str:
+    if potion is None:
+        return "?"
+    return str(getattr(potion, "id", None) or getattr(potion, "name", None) or "?")
+
+
+def _reward_card_content(runner: Any, choice_index: int) -> str:
+    """RewardAction(reward_type='card', choice_index=encoded) → 候选卡 id。
+
+    encoded = card_reward_idx * 100 + card_index（见 engine/game.py 第 2709 行）。
+    runner.current_rewards.card_rewards[card_reward_idx].cards[card_index] 是 Card 对象。
+    """
+    rewards = getattr(runner, "current_rewards", None)
+    if rewards is None:
+        return "?"
+    card_rewards = getattr(rewards, "card_rewards", None) or []
+    cr_idx = int(choice_index) // 100
+    c_idx = int(choice_index) % 100
+    if cr_idx < 0 or cr_idx >= len(card_rewards):
+        return "?"
+    cards = getattr(card_rewards[cr_idx], "cards", None) or []
+    if c_idx < 0 or c_idx >= len(cards):
+        return "?"
+    return _card_instance_label(cards[c_idx])
+
+
+def _reward_relic_content(runner: Any, choice_index: int) -> str:
+    """RewardAction(reward_type='relic', choice_index=reward_index) → relic id。
+
+    choice_index 0 = current_rewards.relic, 1 = current_rewards.second_relic。
+    """
+    rewards = getattr(runner, "current_rewards", None)
+    if rewards is None:
+        return "?"
+    if int(choice_index) == 0:
+        rr = getattr(rewards, "relic", None)
+    elif int(choice_index) == 1:
+        rr = getattr(rewards, "second_relic", None)
+    else:
+        return "?"
+    if rr is None:
+        return "?"
+    return _relic_label(getattr(rr, "relic", None))
+
+
+def _event_choice_content(runner: Any, choice_index: int) -> Tuple[str, str]:
+    """EventAction(choice_index) → (event_id, choice_name)。
+
+    用 event_handler.get_available_choices 查 EventChoice.index == choice_index 的项。
+    """
+    ev_state = getattr(runner, "current_event_state", None)
+    eh = getattr(runner, "event_handler", None)
+    rs = getattr(runner, "run_state", None)
+    if ev_state is None or eh is None or rs is None:
+        return ("?", "?")
+    event_id = str(getattr(ev_state, "event_id", "?") or "?")
+    try:
+        choices = eh.get_available_choices(ev_state, rs)
+    except Exception:  # noqa: BLE001
+        return (event_id, "?")
+    for ch in choices or []:
+        if int(getattr(ch, "index", -1)) == int(choice_index):
+            # name 是内部稳定名（更适合 hash），text 是 UI 文案
+            return (event_id, str(getattr(ch, "name", None) or getattr(ch, "text", None) or "?"))
+    return (event_id, "?")
+
+
+def _shop_item_content(runner: Any, action_type: str, item_index: int) -> str:
+    """ShopAction(action_type, item_index) → 内容标识。
+
+    - buy_colored_card / buy_colorless_card / buy_card / buy_relic / buy_potion:
+      用 slot_index 在对应列表里找。
+    - remove_card: item_index 是 deck 中 card_idx，去 run_state.deck 找。
+    - leave: 无内容。
+    """
+    if action_type == "leave":
+        return ""
+    shop = getattr(runner, "current_shop", None)
+    rs = getattr(runner, "run_state", None)
+
+    def _find_by_slot(items: Any, slot: int, attr_name: str) -> Optional[Any]:
+        if not items:
+            return None
+        for it in items:
+            if int(getattr(it, "slot_index", -1)) == slot:
+                return getattr(it, attr_name, None)
+        return None
+
+    idx = int(item_index)
+    if shop is not None:
+        if action_type in ("buy_colored_card", "buy_card"):
+            card = _find_by_slot(getattr(shop, "colored_cards", None), idx, "card")
+            if card is None:
+                # 兜底：当 buy_card 时也搜 colorless
+                card = _find_by_slot(getattr(shop, "colorless_cards", None), idx, "card")
+            return _card_instance_label(card) if card is not None else "?"
+        if action_type == "buy_colorless_card":
+            card = _find_by_slot(getattr(shop, "colorless_cards", None), idx, "card")
+            return _card_instance_label(card) if card is not None else "?"
+        if action_type == "buy_relic":
+            relic = _find_by_slot(getattr(shop, "relics", None), idx, "relic")
+            return _relic_label(relic) if relic is not None else "?"
+        if action_type == "buy_potion":
+            potion = _find_by_slot(getattr(shop, "potions", None), idx, "potion")
+            return _potion_label(potion) if potion is not None else "?"
+
+    if action_type == "remove_card":
+        # item_index 是 deck card_idx
+        deck = getattr(rs, "deck", None) if rs is not None else None
+        if deck is not None and 0 <= idx < len(deck):
+            return _card_instance_label(deck[idx])
+        return "?"
+
+    return "?"
+
+
+def _rest_card_content(runner: Any, action_type: str, card_index: int) -> str:
+    """RestAction(action_type, card_index) → 卡 id（仅 upgrade / toke 等带 card 时）。"""
+    if int(card_index) < 0:
+        return ""
+    rs = getattr(runner, "run_state", None)
+    deck = getattr(rs, "deck", None) if rs is not None else None
+    if deck is None or int(card_index) >= len(deck):
+        return "?"
+    return _card_instance_label(deck[int(card_index)])
+
+
+def _boss_relic_content(runner: Any, relic_index: int) -> str:
+    """BossRewardAction(relic_index) → relic id。"""
+    if int(relic_index) < 0:
+        return "skip"
+    rewards = getattr(runner, "current_rewards", None)
+    if rewards is None:
+        return "?"
+    br = getattr(rewards, "boss_relics", None)
+    if br is None:
+        return "?"
+    relics = getattr(br, "relics", None) or []
+    if int(relic_index) >= len(relics):
+        return "?"
+    return _relic_label(relics[int(relic_index)])
+
+
+def _format_engine_action(action: Any, runner: Optional[Any] = None) -> str:
     """把 StSRLSolver GameAction 对象转成可读字符串。
 
-    各 action 类型来自 packages/engine/game.py：
+    给 `runner` 时会把候选内容（卡名 / event choice name / shop item id 等）注入
+    token 字符串里，让同一 choice 序号但不同内容能 hash 到不同 embedding（修复 mode collapse）。
+
+    各 action 类型来自 packages/engine/game.py（带 runner 时新增内容字段）：
         PathAction(node_index)                 → "MAP:node=<i>"
         NeowAction(choice_index)               → "NEOW:choice=<i>"
         CombatAction(action_type, ...)         → "COMBAT:<type>(card=<i>,target=<j>,potion=<k>)"
-        RewardAction(reward_type, choice_index)→ "REWARD:<type>:choice=<i>"
-        EventAction(choice_index)              → "EVENT:choice=<i>"
-        ShopAction(action_type, item_index)    → "SHOP:<type>:item=<i>"
-        RestAction(action_type, card_index)    → "REST:<type>(card=<i>)"
+        RewardAction(reward_type='card', i)    → "REWARD:card:<card_id>:choice=<i>"
+        RewardAction(reward_type='skip_card',i)→ "REWARD:skip_card:choice=<i>"  # 内容无关
+        RewardAction(reward_type='relic', i)   → "REWARD:relic:<relic_id>:choice=<i>"
+        RewardAction(其他, i)                  → "REWARD:<type>:choice=<i>"
+        EventAction(choice_index)              → "EVENT:<event_id>:<choice_name>:choice=<i>"
+        ShopAction(buy_xxx, item_index)        → "SHOP:<type>:<item_id>:item=<i>"
+        ShopAction(remove_card, item_index)    → "SHOP:remove_card:<card_id>:item=<i>"
+        ShopAction(leave, ...)                 → "SHOP:leave"
+        RestAction(rest, ...)                  → "REST:rest"
+        RestAction(upgrade/toke, card_index)   → "REST:<type>:<card_id>(card=<i>)"
         TreasureAction(action_type)            → "TREASURE:<type>"
-        BossRewardAction(relic_index)          → "BOSS:relic=<i>"
+        BossRewardAction(relic_index)          → "BOSS:<relic_id>:relic=<i>"
 
+    没给 runner 时退化为旧版（只编序号），保证 fallback / 单测能跑。
     用 duck typing（不 import GameAction 类型）以避免硬依赖 sys.path。
     """
     cls = type(action).__name__
@@ -110,17 +285,47 @@ def _format_engine_action(action: Any) -> str:
             f"target={g('target_idx', -1)},potion={g('potion_idx', -1)})"
         )
     if cls == "RewardAction":
-        return f"REWARD:{g('reward_type', '?')}:choice={g('choice_index', -1)}"
+        rtype = g("reward_type", "?")
+        cidx = g("choice_index", -1)
+        if runner is not None:
+            if rtype == "card":
+                content = _reward_card_content(runner, cidx)
+                return f"REWARD:card:{content}:choice={cidx}"
+            if rtype == "relic":
+                content = _reward_relic_content(runner, cidx)
+                return f"REWARD:relic:{content}:choice={cidx}"
+        return f"REWARD:{rtype}:choice={cidx}"
     if cls == "EventAction":
-        return f"EVENT:choice={g('choice_index', -1)}"
+        cidx = g("choice_index", -1)
+        if runner is not None:
+            event_id, choice_name = _event_choice_content(runner, cidx)
+            return f"EVENT:{event_id}:{choice_name}:choice={cidx}"
+        return f"EVENT:choice={cidx}"
     if cls == "ShopAction":
-        return f"SHOP:{g('action_type', '?')}:item={g('item_index', -1)}"
+        atype = g("action_type", "?")
+        iidx = g("item_index", -1)
+        if runner is not None:
+            content = _shop_item_content(runner, atype, iidx)
+            if atype == "leave":
+                return "SHOP:leave"
+            if content:
+                return f"SHOP:{atype}:{content}:item={iidx}"
+        return f"SHOP:{atype}:item={iidx}"
     if cls == "RestAction":
-        return f"REST:{g('action_type', '?')}(card={g('card_index', -1)})"
+        atype = g("action_type", "?")
+        cidx = g("card_index", -1)
+        if runner is not None and int(cidx) >= 0:
+            content = _rest_card_content(runner, atype, cidx)
+            return f"REST:{atype}:{content}(card={cidx})"
+        return f"REST:{atype}(card={cidx})"
     if cls == "TreasureAction":
         return f"TREASURE:{g('action_type', '?')}"
     if cls == "BossRewardAction":
-        return f"BOSS:relic={g('relic_index', -1)}"
+        ridx = g("relic_index", -1)
+        if runner is not None:
+            content = _boss_relic_content(runner, ridx)
+            return f"BOSS:{content}:relic={ridx}"
+        return f"BOSS:relic={ridx}"
 
     # fallback：直接 repr（保证不抛异常）
     try:
@@ -262,7 +467,7 @@ def get_available_actions(
                 e,
             )
             return _fallback_actions_from_state(state)
-        return [_format_engine_action(a) for a in engine_actions]
+        return [_format_engine_action(a, runner=runner) for a in engine_actions]
 
     # 模式 2：runner 不在 → 用 state 字段做合理占位
     return _fallback_actions_from_state(state)

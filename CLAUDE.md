@@ -67,7 +67,9 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 - 注释和文档使用中文
 - 特征编码：字符串（卡/遗物/动作）→ MD5 hash → embedding 查表（vocab 2048, dim 64），无严格词表
-- 标量特征：8 维（hp%, max_hp, gold, floor, act, deck_size, relics_size, potions_size）+ phase one-hot
+- 标量特征：8 维 = `[hp_ratio, max_hp/100, floor/17, act/3, gold/999, energy/5, num_potions/5, hp/100]`
+  （`deck_size` / `relics_size` 不在 scalar，通过 set-encoder mean-pool 隐式传递；
+  note: `energy` 维度在元决策时永远为 0、`hp` 编了两次——已知冗余，待下次 schema 调整时清理）
 - 模型结构：set encoder（mean-pool）+ pointer-network 动作打分，单 head 输出 logits
 - 日志：决策日志写 `.log` 文件，统计写 `_stats.log`
 - Device: 优先 MPS，fallback CPU
@@ -120,6 +122,19 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   batch 4 进行中（ep=125/128）。trend 显示 RL **在真学**：act 1 boss 通过率从
   batch 1 的 28% 涨到 batch 4 的 64%，avg_reward 从 +0.1 涨到 +28.9。
   Ckpt 路径 `sts_models/v8_ppo_long_v2b/`。
+- **`long_v2b` 完成**: 2026-05-13 12:19:12，13.03h，128 ep 训练 + 30 seed final eval。Final 指标：
+  - reached_a1_boss=0.93, **act1_boss_beat=0.57**, act2_boss_beat=0.57, **won_game=0.23**（A0 通关率 23%）
+  - floor_mean=13.0, 30 seed 中 7 个完整通关 A0
+  - 训练 128 ep 中 35 个 game_won（27%）—— 里程碑 2（A0 通关）首次达成
+  - Per-batch trend: A1 boss kill 28% → 28% → 38% → 66% (单调上涨)，avg_reward 0.10 → -0.46 → 13.72 → 32.21
+  - 关键归因发现 1: **SlimeBoss 10.5% vs TheGuardian 82.4% vs Hexaghost 80.0%**（71.8pp 差距）。模型未学到 SlimeBoss 的 AOE 需求（boss-aware encoding gap，本批未修，留待下批数据判定）
+  - 关键归因发现 2: **eval deterministic 模式 card_reward 阶段 97% argmax=choice=1 mode collapse**（同源 Mysterious Sphere bug）。Action token 只编 choice 序号不编卡名/事件文本/商品名 → 模型看不到候选内容。已修。
+
+### 已修复 bug
+- **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
+
+### Schema 变化
+- Eval 输出新字段：`act1_boss_beat_rate` / `act2_boss_beat_rate` / `won_game_rate` / `boss_kill_counts` / `boss_reach_counts`。旧 `beat_boss_rate` 字段保留为 deprecated（= `act1_boss_beat_rate`）。
 - 2026-05-11 添加全套结构化诊断日志（`[startup]` / `[combat]` / `[floor]` / `[deck]` /
   `[perf]` / `[guard_cap]` / `[heartbeat]`），见上方「诊断日志」段。
 - 2026-05-12 deterministic eval 死循环根因定位：StSRLSolver Python engine
@@ -148,19 +163,21 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 如新会话被 ScheduleWakeup 唤醒来 monitor，按以下信息接手：
 
-- **进程**：v2b 训练在 nohup 下运行，父 PID 68304（python 子进程在父 PID 下）
-- **日志文件**：`/tmp/v8_ppo_long_v2b.log` 全程 append；`/tmp/v8_ppo_long_v2b.exit` 在训练结束时出现
-- **Output 目录**：`sts_models/v8_ppo_long_v2b/`，ckpt 文件 ep=32/64/96 + wall + 最终 ep=128 + final
+- **进程**：v3 训练 nohup 跑，父 PID 5701
+- **日志文件**：`/tmp/v8_ppo_long_v3.log`；exit 文件 `/tmp/v8_ppo_long_v3.exit`（训练结束时出现）
+- **PID 文件**：`/tmp/v8_ppo_long_v3.pid`
+- **Output 目录**：`sts_models/v8_ppo_long_v3/`
 - **参数**：num_episodes=128 batch_size=32 ckpt_freq=32 eval_freq=100
-- **预期完成**：~12:30-13:30（剩 ~3 ep + PPO + 30 seeds 完整 game eval）
-- **下一步**：训练完成后跑 metrics 分析（用户已授权，但说"等这一批完再做"）。下批训练参数 user 已定：每次 128 或 512 ep，ckpt_freq=32
+- **启动时间**：2026-05-13 16:18
+- **预期完成**：~+13-15h（参考 v2b 13.03h）
+- **关键改动**：action token 注入修复（card_name / event choice text / shop item name），v2b 的 token prior 失效，是 fresh start
 
-接手 monitor 的检查清单（一行 bash 看全貌）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_long_v2b/`
+接手 monitor 的检查清单：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_long_v3/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_long_v2b.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_long_v2b.log | tail -1`
-- 训练结束信号：`cat /tmp/v8_ppo_long_v2b.exit 2>&1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_long_v3.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_long_v3.log | tail -1`
+- 训练结束信号：`cat /tmp/v8_ppo_long_v3.exit 2>&1`
 
 ## 子 Agent 协作规范
 
