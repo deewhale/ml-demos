@@ -129,6 +129,13 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   - Per-batch trend: A1 boss kill 28% → 28% → 38% → 66% (单调上涨)，avg_reward 0.10 → -0.46 → 13.72 → 32.21
   - 关键归因发现 1: **SlimeBoss 10.5% vs TheGuardian 82.4% vs Hexaghost 80.0%**（71.8pp 差距）。模型未学到 SlimeBoss 的 AOE 需求（boss-aware encoding gap，本批未修，留待下批数据判定）
   - 关键归因发现 2: **eval deterministic 模式 card_reward 阶段 97% argmax=choice=1 mode collapse**（同源 Mysterious Sphere bug）。Action token 只编 choice 序号不编卡名/事件文本/商品名 → 模型看不到候选内容。已修。
+- **`long_v3` 完成 (N=2/3)**: 2026-05-13 16:18 → 2026-05-14 06:29，14.18h，128 ep + 30 seed final eval。Action token fix 后首次 fresh start。Final 指标：
+  - reached_a1_boss=**1.00** (+7pp vs v2b), **act1_boss_beat=0.63** (+6pp), act2_boss_beat=**0.53** (-4pp), **won_game=0.43** (+20pp，**near doubled**)
+  - floor_mean=14.0 (+1.0), 30 seed 中 13 个完整通关 A0
+  - Per-batch beat_boss_in_batch: 8 / 4 / 11 / 13 (= 25% → 12.5% → 34.4% → 40.6%)，avg_reward 1.79 → -16.72 → 31.53 → 32.06 (batch 2 dip 后稳步上涨)
+  - SlimeBoss 仍是瓶颈: **0/11 kills** in eval（v2b 10.5% → v3 0%，30 seed 全是 SlimeBoss seed → 验证 boss-aware encoding gap 仍存在）
+  - 健康度: 0 Traceback, 6 guard_cap / 128 ep = 4.7%
+  - Ckpt 路径 `sts_models/v8_ppo_long_v3/`，含 ep=32/64/96/128/final + 1 wall_ckpt
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
@@ -159,25 +166,25 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-13 状态快照）
+## 运行中的训练进程（2026-05-14 状态快照）
 
 如新会话被 ScheduleWakeup 唤醒来 monitor，按以下信息接手：
 
-- **进程**：v3 训练 nohup 跑，父 PID 5701
-- **日志文件**：`/tmp/v8_ppo_long_v3.log`；exit 文件 `/tmp/v8_ppo_long_v3.exit`（训练结束时出现）
-- **PID 文件**：`/tmp/v8_ppo_long_v3.pid`
-- **Output 目录**：`sts_models/v8_ppo_long_v3/`
+- **进程**：v4 训练 nohup 跑，PID 37007（N=3/3，与 v3 同参数 fresh start）
+- **日志文件**：`/tmp/v8_ppo_long_v4.log`
+- **Output 目录**：`sts_models/v8_ppo_long_v4/`
 - **参数**：num_episodes=128 batch_size=32 ckpt_freq=32 eval_freq=100
-- **启动时间**：2026-05-13 16:18
-- **预期完成**：~+13-15h（参考 v2b 13.03h）
-- **关键改动**：action token 注入修复（card_name / event choice text / shop item name），v2b 的 token prior 失效，是 fresh start
+- **启动时间**：2026-05-14 06:56
+- **预期完成**：~+13-15h（参考 v3 14.18h）
+- **目的**：N=3 framework 第三次 run，验证 v3 won_game=0.43 是否稳定 reproduce（vs v2b 0.23 baseline）
+- **未做改动**：纯复跑，未修 SlimeBoss boss-aware encoding（留待 N=3 数据齐后决定下一批 fix 方向）
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_long_v3/`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_long_v4/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_long_v3.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_long_v3.log | tail -1`
-- 训练结束信号：`cat /tmp/v8_ppo_long_v3.exit 2>&1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_long_v4.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_long_v4.log | tail -1`
+- Final 标志：`grep "训练结束" /tmp/v8_ppo_long_v4.log`
 
 ## 子 Agent 协作规范
 
