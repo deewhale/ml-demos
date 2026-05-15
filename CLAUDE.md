@@ -153,6 +153,15 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   token mode-collapse fix。预期 ~50h。Ckpt 路径 `sts_models/v8_ppo_batch_v5/`。
   **命名约定切换**：新训练 output_dir 用 `batch_v<N>`（不再 `long_v<N>`）；旧目录
   `v8_ppo_long_v3/v4/v5` 保留避免 break ckpt 引用。
+  **后续 (2026-05-15)**：batch_v5 跑到 ep=96 后被停。**事后发现 concept error**：
+  batch_v3/v4/v5 一直是从 random init 重训而非续训，因为 `tools/v8_ppo_train.py` 没暴露
+  `--resume_from` CLI（trainer 内部本来支持）。已修 (commit `bf2208f`)，下批起强制续训。
+- **`batch_v5_resume` 启动 (首次正确续训)**: 2026-05-15 23:52 启动，从 v4 wall ckpt
+  (`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`, `episodes_done=96`) 续训。
+  参数 `num_episodes=256 batch_size=32 ckpt_freq=32 eval_freq=128`（增量训 160 ep）。
+  Output 目录 `sts_models/v8_ppo_batch_v5_resume/`。这是修完 resume_from CLI 后第一次
+  真正的续训训练，验证「续训规范」生效。256 ep 而非 512 ep 是保守选择：续训第一批先看
+  trend 是否真的持续上涨，确认后再起下批。
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
@@ -195,26 +204,27 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 如新会话被 ScheduleWakeup 唤醒来 monitor，按以下信息接手：
 
-**进程：batch_v5 训练**（512 ep scale-up，新命名约定 `batch_v<N>`）
+**进程：batch_v5_resume 训练**（首次正确续训，从 v4 ep=96 wall ckpt 续）
 
-- **PID**：98905
-- **日志文件**：`/tmp/v8_ppo_batch_v5.log`
-- **Output 目录**：`sts_models/v8_ppo_batch_v5/`
-- **参数**：num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=100
-- **启动时间**：2026-05-15 15:32
-- **预期完成**：~50h（v3 14.18h / 128 ep → ~6.6min/ep × 512 ep ≈ 56h；batch_v5 单跑无 CPU 竞争）
-- **目的**：首次 512 ep 规模训练，4× scale vs batch_v3/v4，按用户「训练量优先」原则。
-  验证 v3 won_game=0.43 趋势是否能在更长 horizon 继续上涨
-- **Applied fixes**：env event_stall guard (`v8/env.py` commit `79b3d51`) + StSRLSolver fork
-  Mushrooms phase filter fix；Action token mode-collapse fix（v3 起就在用）
-- **新 logging 已生效**：`[seed]` / `[action]` / `[meta]` 三类诊断日志验证 OK
+- **PID**：17611
+- **日志文件**：`/tmp/v8_ppo_batch_v5_resume.log`
+- **Output 目录**：`sts_models/v8_ppo_batch_v5_resume/`
+- **参数**：num_episodes=256 batch_size=32 ckpt_freq=32 eval_freq=128
+  --resume_from=`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`
+- **start_episode**：96 (从 v4 wall ckpt metadata.episodes_done)
+- **启动时间**：2026-05-15 23:52
+- **预期完成**：~17h（增量训 160 ep × ~6.6min/ep ≈ 17.6h；预计 2026-05-16 17:00 左右）
+- **目的**：修完 `--resume_from` CLI (commit `bf2208f`) 后首次正确续训，验证续训规范
+  + 看 v4 ep=96 (won_game=0.30 eval) 续训到 ep=256 trend 是否继续上涨
+- **Applied fixes**：v4 之上全套修复 + resume_from CLI
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v5/`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v5_resume/`
 - 进程是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|\[event_stall\]|Error|Traceback" /tmp/v8_ppo_batch_v5.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v5.log | tail -1`
-- 训练结束：`grep "训练结束" /tmp/v8_ppo_batch_v5.log`
+- 异常监测：`grep -cE "\[guard_cap\]|\[event_stall\]|Error|Traceback" /tmp/v8_ppo_batch_v5_resume.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v5_resume.log | tail -1`
+- 训练结束：`grep "训练结束" /tmp/v8_ppo_batch_v5_resume.log`
+- Resume 验证：`grep "\[resume\]" /tmp/v8_ppo_batch_v5_resume.log`
 
 ## 子 Agent 协作规范
 
@@ -228,6 +238,21 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 - 先跑 1 局测试，确认无运行时错误，再跑完整训练
 - 失败的 agent 不应自动重试启动训练，应先报告错误等待指令
 - 运行训练/测试时，使用单条 `&&` 串行命令在同一个 shell 中执行，禁止多次独立 bash 调用启动 Python 进程
+
+### 续训规范（2026-05-15 立规，commit `bf2208f` 之后必须遵守）
+- **默认续训**：所有新 batch_v<N> 必须 `--resume_from=<上批 best ckpt>`，除非有明确
+  理由 fresh start（如：模型结构变了 / 加新 head / debug 隔离）。Fresh start 时必须
+  在 commit message 里说明理由。
+- **Ckpt 选择**：优先选上批 final ckpt；若 final 缺失（如 v4 卡死中止）用最新 wall ckpt
+  或最大 ep 数的 ep_ckpt（如 `v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`，
+  metadata.episodes_done=96）。
+- **`--num_episodes` 是累计目标值**，不是增量。比如续训从 ep=96 起想再训 160 ep，
+  `--num_episodes` 写 256（96+160），不是 160。trainer 会自动按 start_episode 之差
+  计算增量训练量；`[resume]` 日志会显示 `将增量训 N ep`。
+- **Self-check 提示**：output_dir 已有 ckpt 但没传 `--resume_from` 时，日志会输出
+  `[resume-check]` WARN 行；看到这行就停下检查是不是写错 output_dir / 漏传 resume_from。
+- **背景**：2026-05-15 发现 batch_v3/v4/v5 一直是 fresh init 而非续训（CLI 没暴露
+  `--resume_from`，trainer 内部支持），浪费 30h+ 训练时间。规范立此防再犯。
 
 ### 主对话规则（强制）
 - 主对话严禁直接使用 Read/Grep/Glob/Bash/Edit/Write 工具
