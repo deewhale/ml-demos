@@ -414,6 +414,12 @@ class V8Env:
         self._last_event_id: Optional[str] = None
         self._event_enter_max_hp: int = 0
         self._event_enter_relics_count: int = 0
+        # [event_stall] 兜底：单一 event_id 累计 choice 次数超阈值 → FORCE_TERMINATE
+        # 防御 StSRLSolver event handler 缺 phase filter（如 Mysterious Sphere /
+        # Mushrooms 类 bug）导致 deterministic eval 卡死。
+        # 阈值 30：正常 event 至多 ~2-3 choices（包含多 phase），30 远超合理范围。
+        self._event_choice_count: Counter = Counter()
+        self._event_stall_threshold: int = 30
 
         # 性能 / 调用计数（per-episode；trainer 读 delta）
         self.eval_deck_calls: int = 0      # evaluate_deck 调用次数
@@ -485,6 +491,7 @@ class V8Env:
         self._last_event_id = None
         self._event_enter_max_hp = 0
         self._event_enter_relics_count = 0
+        self._event_choice_count.clear()
         # perf 计数器在 reset 也清一遍（兼容 trainer 没调 reset_perf_counters 的情况）
         self.reset_perf_counters()
 
@@ -581,6 +588,12 @@ class V8Env:
         # 诊断：如果是 EventAction，打 [event] choice 日志（纯观察）。
         self._log_event_choice(chosen_action)
 
+        # [event_stall] 兜底：单一 event_id 累计 choice 次数过阈值 → FORCE_TERMINATE
+        # 防御 StSRLSolver event handler 缺 phase filter 类 bug（如 Mysterious
+        # Sphere / Mushrooms COMBAT_WON 阶段反复触发战斗）。增量 + 检查放在
+        # take_action 前，确保即便本次 take_action 又会循环也立刻断。
+        stall_terminated = self._maybe_force_event_stall_terminate(chosen_action)
+
         # 执行 action
         ok = self._runner.take_action(chosen_action)
         self._actions_taken += 1
@@ -592,8 +605,15 @@ class V8Env:
             info["error"] = "take_action_failed"
 
         # 推进到下一个元决策 phase（中间所有 COMBAT 由 _advance 内部用 TurnSolver 处理）
-        battle_happened = self._advance_to_meta_decision()
+        if stall_terminated:
+            # FORCE_TERMINATE 已经把 runner.game_over=True，跳过 advance，
+            # 直接走 done 收尾，避免再触发一次 combat 推进。
+            battle_happened = False
+        else:
+            battle_happened = self._advance_to_meta_decision()
         info["battle_happened"] = battle_happened
+        if stall_terminated:
+            info["error"] = "event_stall"
 
         # 如果发生过战斗，post-battle 触发 evaluate_deck
         next_state = _build_state_from_runner(self._runner)
@@ -1134,6 +1154,51 @@ class V8Env:
                 "[event] _log_event_choice failed: %s: %s",
                 type(e).__name__, e,
             )
+
+    def _maybe_force_event_stall_terminate(self, action: Any) -> bool:
+        """[event_stall] 兜底：单一 event_id 累计 choice 次数过阈值 → FORCE_TERMINATE。
+
+        防御 StSRLSolver Python engine event handler 缺 phase filter 的 bug
+        （MysteriousSphere / Mushrooms 类：COMBAT_WON 阶段菜单未过滤，
+        deterministic 反复选 idx=0 不断重触发战斗）。
+
+        仅在 action 是 EventAction 时递增；非 event 行为不影响计数。
+        返回 True 表示已 FORCE_TERMINATE，外层 step 应跳过 advance。
+        """
+        if not isinstance(action, EventAction):
+            return False
+        if self._runner is None:
+            return False
+        try:
+            cur_event_state = getattr(self._runner, "current_event_state", None)
+            event_id = "?"
+            event_phase_str = "?"
+            if cur_event_state is not None:
+                event_id = str(getattr(cur_event_state, "event_id", "?") or "?")
+                ep = getattr(cur_event_state, "phase", None)
+                event_phase_str = (
+                    getattr(ep, "name", str(ep)) if ep is not None else "?"
+                )
+            self._event_choice_count[event_id] += 1
+            count = self._event_choice_count[event_id]
+            if count >= self._event_stall_threshold:
+                rs = self._runner.run_state
+                logger.warning(
+                    "[event_stall] ep=%s event_id=%s count=%d threshold=%d "
+                    "event_phase=%s floor=%s act=%s hp=%s/%s FORCE_TERMINATE",
+                    self._episode_idx, event_id, count,
+                    self._event_stall_threshold, event_phase_str,
+                    getattr(rs, "floor", "?"), getattr(rs, "act", "?"),
+                    getattr(rs, "current_hp", "?"), getattr(rs, "max_hp", "?"),
+                )
+                self._force_terminate_run(reason="event_stall")
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[event_stall] _maybe_force_event_stall_terminate failed: %s: %s",
+                type(e).__name__, e,
+            )
+        return False
 
     def _log_guard_cap(self, *, battle_happened: bool, guard_cap: int) -> None:
         """guard_cap 触发时打详细诊断日志（key=value 单行，便于 grep）。"""
