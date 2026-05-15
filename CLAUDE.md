@@ -139,21 +139,31 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 - **`long_v4` 卡死中止 (N=3/3 未完整)**: 2026-05-14 06:56 启动，~7h 后落 ep=96 wall_ckpt
   (`v8_ppo_wall_20260514_135748.pt`)，**ep=127 时被 Mushrooms event handler 死循环**
   卡 ~15h（同 event_id 重复 choice 6352 次，COMBAT_WON 阶段菜单未过滤），未触发 final
-  eval。**已用 eval-only 脚本（`/tmp/v4_eval_only.py`）跑 wall ckpt 的 30-seed eval**，
-  输出 `sts_models/v8_ppo_long_v4/v8_ppo_eval_recovered.json`（2026-05-15 启动，
-  PID 84260）。Ckpt 路径 `sts_models/v8_ppo_long_v4/` 含 ep=32/64/96 + wall。
-- **`long_v5` 启动**: 2026-05-15 10:39 启动的 **512 ep** scale-up 训练（首次跳出 128 ep
-  规模），PID 84298。参数 `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=100`。
-  Applied fixes：env event_stall guard (commit `79b3d51`) + StSRLSolver Mushrooms phase
-  filter fix（fork commit）。预期 ~40-50h。Ckpt 路径 `sts_models/v8_ppo_long_v5/`。
+  eval。**用 eval-only 脚本（`/tmp/v4_eval_only.py`）跑 wall ckpt 的 30-seed eval 已完成**，
+  输出 `sts_models/v8_ppo_long_v4/v8_ppo_eval_recovered.json`。Final eval (ep=96 wall ckpt,
+  30 seed)：reached_boss=96.7% (29/30)，**act1_boss_beat=70%**，act2_boss_beat=60%，
+  **won_game=30%** (9/30)，floor_mean=11.2。30% 对应训练 trajectory 中段，非 regression
+  （batch_v3 同期 batch 2 末 34.4% game_won training）。**Mushrooms fix integration 验证通过**：
+  30-seed eval 内 Mushrooms event 触发正常退出，event_stall guard 0 触发。
+  Ckpt 路径 `sts_models/v8_ppo_long_v4/` 含 ep=32/64/96 + wall。
+- **`batch_v5` 启动 (新命名约定)**: 2026-05-15 启动的 **512 ep** scale-up 训练（首次跳出
+  128 ep 规模），按用户「训练量优先」原则 4× scale vs batch_v3/v4。参数
+  `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=100`。Applied fixes：env event_stall
+  guard (commit `79b3d51`) + StSRLSolver Mushrooms phase filter fix（fork commit）+ Action
+  token mode-collapse fix。预期 ~50h。Ckpt 路径 `sts_models/v8_ppo_batch_v5/`。
+  **命名约定切换**：新训练 output_dir 用 `batch_v<N>`（不再 `long_v<N>`）；旧目录
+  `v8_ppo_long_v3/v4/v5` 保留避免 break ckpt 引用。
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
-- **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修):
+- **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修,
+  **2026-05-15 integration validated**):
   v4 ep=127 deterministic eval 卡 15h / 6352 次同 event choice 后定位根因。
   StSRLSolver fork 已修 (commit on `external/StSRLSolver/`)；env 侧加 event_stall
   guard 兜底 (`v8/env.py` commit `79b3d51`)：单 episode 同 event_id choice >= 30
-  → FORCE_TERMINATE，防御未知同类 bug。
+  → FORCE_TERMINATE，防御未知同类 bug。**Integration 验证**：batch_v4 30-seed eval
+  recovered run 内 Mushrooms 出现 1 次，phase INITIAL → COMBAT_WON → resolved 正常退出，
+  event_stall guard 0 触发。
 
 ### Schema 变化
 - Eval 输出新字段：`act1_boss_beat_rate` / `act2_boss_beat_rate` / `won_game_rate` / `boss_kill_counts` / `boss_reach_counts`。旧 `beat_boss_rate` 字段保留为 deprecated（= `act1_boss_beat_rate`）。
