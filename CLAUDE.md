@@ -162,6 +162,19 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   Output 目录 `sts_models/v8_ppo_batch_v5_resume/`。这是修完 resume_from CLI 后第一次
   真正的续训训练，验证「续训规范」生效。256 ep 而非 512 ep 是保守选择：续训第一批先看
   trend 是否真的持续上涨，确认后再起下批。
+- **`batch_v5_resume` 弃用 (eval hang)**: 2026-05-16，5h+ 训练后在 eval phase 卡死
+  （第 10 个 eval seed inference step 慢化 600x，单 step 从 50ms 涨到 30s+），
+  整个 batch 的 PPO update + ckpt 还没 save 就被人为终止，**5h+ 权重全部丢失**。
+  根因：原代码顺序 PPO update → eval → ckpt save，eval 卡死则 ckpt 永不落盘。
+  Output 目录 `sts_models/v8_ppo_batch_v5_resume/` 仅留启动时 metadata。
+- **`batch_v5_resume2` 启动 (修完 eval hang 后重启)**: 2026-05-16 05:27 启动，
+  从同一个 v4 wall ckpt 续训。参数与 batch_v5_resume 相同。Output 目录
+  `sts_models/v8_ppo_batch_v5_resume2/`。**Applied fixes** (commit `93e7c42`)：
+  ckpt save 移到 eval 之前（即便 eval 卡死 ckpt 已落盘）；deck_evaluator future
+  加 60s timeout + None fallback（防 pool worker 卡死累积）；run_eval 单 seed
+  300s wall timeout（防整 eval 拖死训练）；新增 `[deck_eval]` pool state +
+  `[eval] seed start/done` 监控日志。Smoke 验证：0 Traceback，ckpt 在 eval 之前
+  落盘，新 log 标记生效。
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
@@ -200,31 +213,33 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-15 状态快照）
+## 运行中的训练进程（2026-05-16 状态快照）
 
 如新会话被 ScheduleWakeup 唤醒来 monitor，按以下信息接手：
 
-**进程：batch_v5_resume 训练**（首次正确续训，从 v4 ep=96 wall ckpt 续）
+**进程：batch_v5_resume2 训练**（eval hang fix 后重启，从 v4 ep=96 wall ckpt 续）
 
-- **PID**：17611
-- **日志文件**：`/tmp/v8_ppo_batch_v5_resume.log`
-- **Output 目录**：`sts_models/v8_ppo_batch_v5_resume/`
+- **PID**：29972
+- **日志文件**：`/tmp/v8_ppo_batch_v5_resume2.log`
+- **Output 目录**：`sts_models/v8_ppo_batch_v5_resume2/`
 - **参数**：num_episodes=256 batch_size=32 ckpt_freq=32 eval_freq=128
   --resume_from=`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`
 - **start_episode**：96 (从 v4 wall ckpt metadata.episodes_done)
-- **启动时间**：2026-05-15 23:52
-- **预期完成**：~17h（增量训 160 ep × ~6.6min/ep ≈ 17.6h；预计 2026-05-16 17:00 左右）
-- **目的**：修完 `--resume_from` CLI (commit `bf2208f`) 后首次正确续训，验证续训规范
-  + 看 v4 ep=96 (won_game=0.30 eval) 续训到 ep=256 trend 是否继续上涨
-- **Applied fixes**：v4 之上全套修复 + resume_from CLI
+- **启动时间**：2026-05-16 05:27
+- **预期完成**：~17h（增量训 160 ep × ~6.6min/ep ≈ 17.6h；预计 2026-05-16 23:00 左右）
+- **目的**：batch_v5_resume eval hang 中止 (5h+ 权重丢失) 后重启 + 验证 eval-fix 修
+  得对（ckpt 先落盘 + deck_eval/eval timeout + 监控 log）
+- **Applied fixes**：v4 之上全套修复 + resume_from CLI + eval hang fix (commit `93e7c42`)
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v5_resume/`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v5_resume2/`
 - 进程是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|\[event_stall\]|Error|Traceback" /tmp/v8_ppo_batch_v5_resume.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v5_resume.log | tail -1`
-- 训练结束：`grep "训练结束" /tmp/v8_ppo_batch_v5_resume.log`
-- Resume 验证：`grep "\[resume\]" /tmp/v8_ppo_batch_v5_resume.log`
+- 异常监测：`grep -cE "\[guard_cap\]|\[event_stall\]|\[deck_eval\] timeout|\[eval\] seed=.* timeout|Error|Traceback" /tmp/v8_ppo_batch_v5_resume2.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v5_resume2.log | tail -1`
+- 训练结束：`grep "训练结束" /tmp/v8_ppo_batch_v5_resume2.log`
+- Resume 验证：`grep "\[resume\]" /tmp/v8_ppo_batch_v5_resume2.log`
+- Eval timing：`grep "\[eval\] seed" /tmp/v8_ppo_batch_v5_resume2.log | tail -20`
+- Pool 监控：`grep "\[deck_eval\]" /tmp/v8_ppo_batch_v5_resume2.log | tail -10`
 
 ## 子 Agent 协作规范
 
