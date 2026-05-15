@@ -27,6 +27,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -188,13 +189,45 @@ def run_eval(
     boss_reach_counts: Dict[str, int] = {}
     boss_kill_counts: Dict[str, int] = {}
 
+    # 单 seed wall-clock timeout：超过 300s 视为卡死，log + 跳过，让其他 seed 继续
+    # 用 thread + join(timeout) 实现：collect_rollout 是 CPU-bound + 内部循环不响应
+    # KeyboardInterrupt，无法可靠强制 abort；超时后让 background thread 继续跑（隔离），
+    # 主线程跳到下一个 seed，保证整 eval 不被单 seed 拖死。
+    EVAL_SEED_TIMEOUT_SEC = 300.0
+
     for i in range(num_seeds):
         seed = seed_offset + i
-        try:
-            rollout = trainer.collect_rollout(env, seed=seed, deterministic=True)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("eval seed=%d crashed: %s: %s", seed, type(e).__name__, e)
+        seed_t0 = time.time()
+        logger.info("[eval] seed=%d start", seed)
+        rollout: List[Any] = []
+        exc_holder: Dict[str, Any] = {}
+
+        def _run_rollout(_seed: int = seed) -> None:
+            try:
+                rollout.extend(
+                    trainer.collect_rollout(env, seed=_seed, deterministic=True)
+                )
+            except Exception as e:  # noqa: BLE001
+                exc_holder["exc"] = e
+
+        t = threading.Thread(target=_run_rollout, daemon=True)
+        t.start()
+        t.join(timeout=EVAL_SEED_TIMEOUT_SEC)
+        if t.is_alive():
+            logger.warning(
+                "[eval] seed=%d timeout aborted (>%.0fs wall) — skipping (bg thread leaked)",
+                seed, EVAL_SEED_TIMEOUT_SEC,
+            )
             continue
+        if "exc" in exc_holder:
+            e = exc_holder["exc"]
+            logger.warning(
+                "eval seed=%d crashed: %s: %s", seed, type(e).__name__, e,
+            )
+            continue
+
+        seed_elapsed = time.time() - seed_t0
+        logger.info("[eval] seed=%d done elapsed=%.1fs steps=%d", seed, seed_elapsed, len(rollout))
 
         if not rollout:
             continue
@@ -677,7 +710,35 @@ def main() -> None:
             d_cache_hits, d_cache_misses,
         )
 
-        # ---- Eval（修复：里程碑递进，不靠 % freq == 0）----
+        # ---- Checkpoint 先于 Eval（修复：batch_v5_resume 教训）----
+        # 之前顺序是 eval → ckpt：当 eval 在某 seed inference 慢化 600x 卡死时，
+        # ckpt 永远落不了盘，5h+ 训练权重全部丢失。
+        # 现在顺序：先 save ckpt（即便 eval 卡死，ckpt 已在磁盘上），再 run eval。
+        if args.checkpoint_frequency > 0:
+            cur_ckpt_milestone = num_episodes_done // args.checkpoint_frequency
+            if cur_ckpt_milestone > last_ckpt_milestone:
+                last_ckpt_milestone = cur_ckpt_milestone
+                ckpt_path = output_dir / f"v8_ppo_ep{num_episodes_done}.pt"
+                trainer.save_checkpoint(
+                    str(ckpt_path),
+                    metadata={
+                        "phase": "B_ppo_rl",
+                        "episodes_done": num_episodes_done,
+                        "lr": args.lr,
+                        "batch_size": args.batch_size,
+                        "phase_a_meta": phase_a_meta,
+                        "elapsed_sec": time.time() - t_start,
+                    },
+                )
+                save_metadata_json(
+                    str(output_dir / f"v8_ppo_ep{num_episodes_done}.json"),
+                    num_episodes_so_far=num_episodes_done,
+                    eval_history=eval_history,
+                    extra={"args": vars(args)},
+                )
+                logger.info("[ckpt] saved before eval: %s", ckpt_path)
+
+        # ---- Eval（修复：里程碑递进，不靠 % freq == 0；并放在 ckpt 之后）----
         if args.eval_frequency > 0:
             cur_eval_milestone = num_episodes_done // args.eval_frequency
             if cur_eval_milestone > last_eval_milestone:
@@ -714,31 +775,6 @@ def main() -> None:
                         "[eval@ep=%d] boss_kills: %s",
                         num_episodes_done, ", ".join(_parts),
                     )
-
-        # ---- Checkpoint（修复：里程碑递进，不靠 % freq == 0）----
-        if args.checkpoint_frequency > 0:
-            cur_ckpt_milestone = num_episodes_done // args.checkpoint_frequency
-            if cur_ckpt_milestone > last_ckpt_milestone:
-                last_ckpt_milestone = cur_ckpt_milestone
-                ckpt_path = output_dir / f"v8_ppo_ep{num_episodes_done}.pt"
-                trainer.save_checkpoint(
-                    str(ckpt_path),
-                    metadata={
-                        "phase": "B_ppo_rl",
-                        "episodes_done": num_episodes_done,
-                        "lr": args.lr,
-                        "batch_size": args.batch_size,
-                        "phase_a_meta": phase_a_meta,
-                        "elapsed_sec": time.time() - t_start,
-                    },
-                )
-                save_metadata_json(
-                    str(output_dir / f"v8_ppo_ep{num_episodes_done}.json"),
-                    num_episodes_so_far=num_episodes_done,
-                    eval_history=eval_history,
-                    extra={"args": vars(args)},
-                )
-                logger.info("已保存 checkpoint: %s", ckpt_path)
 
         # ---- 5h 墙钟 ckpt（用户硬性要求：episode-ckpt 失效也得有保底）----
         now = time.time()

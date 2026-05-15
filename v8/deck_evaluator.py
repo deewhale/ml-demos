@@ -22,11 +22,19 @@ import hashlib
 import logging
 import multiprocessing
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
+
+# 单个 sim future 的 wall-clock 上限（秒）。SEARCH_BUDGET_S=5s + engine 启动 +
+# pickle 传输 + 偶发慢化，给 60s 余量；超过即视为 worker 卡死，取消 + fallback 0。
+_FUTURE_TIMEOUT_SEC: float = 60.0
+
+# 监控：每 N 次 evaluate_deck 调用打一次 pool state（active/pending）
+_EVAL_CALL_COUNT: int = 0
+_POOL_LOG_INTERVAL: int = 20
 
 
 # ----- 标准敌人配置（act1）-----
@@ -177,7 +185,25 @@ def evaluate_deck(
         2. 否则跑 STANDARD_ENEMIES_BY_ACT[act] × SIMS_PER_ENEMY 次 sim 取平均
         3. 写入 cache 后返回
     """
-    global _CACHE_HITS, _CACHE_MISSES
+    global _CACHE_HITS, _CACHE_MISSES, _EVAL_CALL_COUNT
+
+    _EVAL_CALL_COUNT += 1
+    # 监控：每 N 次调用打一次 pool state（active workers / pending jobs），
+    # 用来在 eval-hang 复现时定位是 pool 内累积 vs. inference 慢化。
+    if _EVAL_CALL_COUNT % _POOL_LOG_INTERVAL == 0:
+        try:
+            _pool = _POOL  # 不要触发 lazy-create
+            if _pool is not None:
+                # ProcessPoolExecutor 的 _processes / _pending_work_items 是 _internal_ 字段，
+                # 没有公开 API。读不到就跳过（不能为 log 让训练崩）。
+                n_workers = len(getattr(_pool, "_processes", {}) or {})
+                n_pending = len(getattr(_pool, "_pending_work_items", {}) or {})
+                logger.info(
+                    "[deck_eval] pool_active=%d queued=%d call_count=%d cache_size=%d",
+                    n_workers, n_pending, _EVAL_CALL_COUNT, len(_DECK_EVAL_CACHE),
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
     cache_key = _deck_hash(deck, relics, hp, max_hp, act)
     cached = _DECK_EVAL_CACHE.get(cache_key)
@@ -219,7 +245,20 @@ def evaluate_deck(
             ]
             for fut in futures:
                 try:
-                    outcomes.append(fut.result())
+                    outcomes.append(fut.result(timeout=_FUTURE_TIMEOUT_SEC))
+                except FutureTimeoutError:
+                    # worker 卡死：cancel + fallback None，让训练继续。
+                    # cancel 对已经 running 的 future 返回 False（进程仍在跑，但池仍可被复用）；
+                    # 不能 join 这条 future，否则又会被它卡住。
+                    try:
+                        fut.cancel()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    logger.warning(
+                        "[deck_eval] timeout (>%ss): future cancelled, fallback None",
+                        _FUTURE_TIMEOUT_SEC,
+                    )
+                    outcomes.append(None)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
                         "evaluate_deck pool future failed: %s: %s",
