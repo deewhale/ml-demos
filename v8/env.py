@@ -495,6 +495,24 @@ class V8Env:
         # perf 计数器在 reset 也清一遍（兼容 trainer 没调 reset_perf_counters 的情况）
         self.reset_perf_counters()
 
+        # [seed] 日志：每局开始时打一次（run 复现 / bug 重现用）。
+        # runner.seed_string 是 StSRLSolver 内部使用的 seed token，
+        # 与 trainer 传进来的 episode 级 seed 一一对应。
+        try:
+            run_seed_str = str(getattr(self._runner, "seed_string", "") or "")
+            run_seed_int = getattr(self._runner, "seed", None)
+            logger.info(
+                "[seed] ep=%s episode_seed=%d run_seed=%s run_seed_str=%s "
+                "ascension=%d character=%s",
+                self._episode_idx, int(seed),
+                str(run_seed_int) if run_seed_int is not None else "?",
+                run_seed_str,
+                int(self.ascension),
+                str(self.character),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[seed] log failed: %s: %s", type(e).__name__, e)
+
         # 推进到第一个元决策 phase（NEOW 一般直接就是；保险起见 advance）
         self._advance_to_meta_decision()
 
@@ -584,6 +602,23 @@ class V8Env:
         # 记录 last_action（诊断 guard_cap 用）
         self._last_action_repr = _safe_action_repr(chosen_action)
         self._recent_actions.append(self._last_action_repr)
+
+        # [action] 日志：每个 model 决策点打一行（含 phase + action_str + idx + n_available）。
+        # 任意阶段 / 任意 bug 都能 grep 出 model 在每个 step 看到的选择 + 实际选了啥。
+        self._log_action(
+            chosen_action=chosen_action,
+            action_idx=action_idx,
+            n_available=len(engine_actions),
+        )
+
+        # [meta] 日志：非 COMBAT 非 EVENT 的元决策 phase 打一行（含完整 available 选项 label）。
+        # EVENT 由更专门的 [event] choice 日志覆盖，跳过避免重复。
+        # COMBAT 决策在 _run_combat_turn 里走 search adapter，不会进 step 这里。
+        self._log_meta_decision(
+            engine_actions=engine_actions,
+            action_idx=action_idx,
+            chosen_action=chosen_action,
+        )
 
         # 诊断：如果是 EventAction，打 [event] choice 日志（纯观察）。
         self._log_event_choice(chosen_action)
@@ -1095,6 +1130,105 @@ class V8Env:
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[event] _maybe_log_event_state failed: %s: %s",
+                type(e).__name__, e,
+            )
+
+    def _log_action(
+        self,
+        *,
+        chosen_action: Any,
+        action_idx: int,
+        n_available: int,
+    ) -> None:
+        """[action] 日志：每个 model 决策点打一行（无条件，所有 phase 都打）。
+
+        包含 phase + action_str（_safe_action_repr，与 [combat]/guard_cap 同格式） +
+        action_idx + n_available + floor + hp 快照。
+        log 量 = 元决策 step 数（每局几百行级），可控且可 grep。
+        """
+        if self._runner is None or self._current_state is None:
+            return
+        try:
+            rs = self._runner.run_state
+            phase_str = self._current_state.phase or "?"
+            action_str = _safe_action_repr(chosen_action)
+            logger.info(
+                "[action] ep=%s step=%d phase=%s action_idx=%d/%d action=%s "
+                "floor=%d hp=%d/%d",
+                self._episode_idx,
+                self._step_count,
+                phase_str,
+                int(action_idx),
+                int(n_available),
+                action_str,
+                int(getattr(rs, "floor", 0) or 0),
+                int(getattr(rs, "hp", 0) or 0),
+                int(getattr(rs, "max_hp", 0) or 0),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[action] _log_action failed: %s: %s",
+                type(e).__name__, e,
+            )
+
+    def _log_meta_decision(
+        self,
+        *,
+        engine_actions: List[Any],
+        action_idx: int,
+        chosen_action: Any,
+    ) -> None:
+        """[meta] 日志：非 COMBAT 非 EVENT 的元决策 phase 打一行（含完整 available 列表）。
+
+        覆盖 phase: NEOW / MAP / CARD_REWARDS / BOSS_REWARDS / SHOP / REST / TREASURE。
+        EVENT 已由 [event] choice 覆盖，跳过避免重复。
+        labels = model 看到的 action 字符串（get_available_actions 返回值，与
+        engine_actions 一一对齐）；如长度对不上 fallback 用 _safe_action_repr。
+        """
+        if self._runner is None or self._current_state is None:
+            return
+        phase_str = self._current_state.phase or ""
+        # 跳过 EVENT（已有 [event] choice）和 COMBAT（走 search adapter，不进这里）和未知
+        if phase_str in ("EVENT", "COMBAT", ""):
+            return
+        try:
+            rs = self._runner.run_state
+            # 取 model-visible label 列表（与 engine_actions 等长）
+            try:
+                labels = get_available_actions(
+                    self._current_state, runner=self._runner
+                )
+            except Exception:  # noqa: BLE001
+                labels = []
+            if len(labels) != len(engine_actions):
+                # fallback：用 _safe_action_repr 兜底
+                labels = [_safe_action_repr(a) for a in engine_actions]
+
+            chosen_label = (
+                labels[action_idx]
+                if 0 <= action_idx < len(labels)
+                else _safe_action_repr(chosen_action)
+            )
+            # 选项截断防爆行（shop / map 多分支时）：最多 16 个 label
+            shown = labels if len(labels) <= 16 else (labels[:16] + ["..."])
+            logger.info(
+                "[meta] ep=%s step=%d phase=%s floor=%d hp=%d/%d gold=%d "
+                "n_options=%d chosen_idx=%d chosen=%s options=%s",
+                self._episode_idx,
+                self._step_count,
+                phase_str,
+                int(getattr(rs, "floor", 0) or 0),
+                int(getattr(rs, "hp", 0) or 0),
+                int(getattr(rs, "max_hp", 0) or 0),
+                int(getattr(rs, "gold", 0) or 0),
+                len(engine_actions),
+                int(action_idx),
+                chosen_label,
+                shown,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[meta] _log_meta_decision failed: %s: %s",
                 type(e).__name__, e,
             )
 
