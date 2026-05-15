@@ -260,21 +260,36 @@ def run_eval(
 # ============================================================
 
 
+_PARSER_DEFAULTS: Dict[str, Any] = {
+    "num_episodes": 1000,
+    "batch_size": 32,
+    "lr": 3e-4,
+    "device": "mps",
+    "combat_head_checkpoint": "sts_models/v8_combat_head_v1.pt",
+    "output_dir": "sts_models/v8_ppo_rl",
+    "eval_frequency": 100,
+    "eval_seeds": 30,
+    "checkpoint_frequency": 500,
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="V8 Phase B PPO 训练入口")
-    parser.add_argument("--num_episodes", type=int, default=1000)
-    parser.add_argument("--batch_size", type=int, default=32, help="每多少 episodes 做一次 PPO update")
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--device", type=str, default="mps", help="mps / cpu / cuda")
+    parser.add_argument("--num_episodes", type=int, default=_PARSER_DEFAULTS["num_episodes"])
+    parser.add_argument("--batch_size", type=int, default=_PARSER_DEFAULTS["batch_size"],
+                        help="每多少 episodes 做一次 PPO update")
+    parser.add_argument("--lr", type=float, default=_PARSER_DEFAULTS["lr"])
+    parser.add_argument("--device", type=str, default=_PARSER_DEFAULTS["device"],
+                        help="mps / cpu / cuda")
     parser.add_argument(
         "--combat_head_checkpoint",
         type=str,
-        default="sts_models/v8_combat_head_v1.pt",
+        default=_PARSER_DEFAULTS["combat_head_checkpoint"],
     )
-    parser.add_argument("--output_dir", type=str, default="sts_models/v8_ppo_rl")
-    parser.add_argument("--eval_frequency", type=int, default=100)
-    parser.add_argument("--eval_seeds", type=int, default=30)
-    parser.add_argument("--checkpoint_frequency", type=int, default=500)
+    parser.add_argument("--output_dir", type=str, default=_PARSER_DEFAULTS["output_dir"])
+    parser.add_argument("--eval_frequency", type=int, default=_PARSER_DEFAULTS["eval_frequency"])
+    parser.add_argument("--eval_seeds", type=int, default=_PARSER_DEFAULTS["eval_seeds"])
+    parser.add_argument("--checkpoint_frequency", type=int, default=_PARSER_DEFAULTS["checkpoint_frequency"])
     parser.add_argument(
         "--max_steps_per_episode",
         type=int,
@@ -286,34 +301,58 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="管线验证：覆盖小 episode/batch/freq + 写临时 output_dir + 限制 max_steps_per_episode",
     )
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="续训：从指定 ckpt 加载 model+optimizer，episode 计数从 ckpt metadata.episodes_done 继续。"
+             "不指定则从随机/Phase-A combat head fresh init 开始。",
+    )
     return parser.parse_args()
 
 
-def apply_smoke_overrides(args: argparse.Namespace) -> None:
+def apply_smoke_overrides(args: argparse.Namespace, *, defaults: Optional[Dict[str, Any]] = None) -> None:
     """smoke 模式：强制小 episode + 临时输出目录 + 卡每局 RL 步数。
 
     单局封顶 30 步（够覆盖几层 meta 决策 + 几场战斗），总耗时控制在 30min 内。
+
+    若用户显式传了 --num_episodes / --batch_size / --eval_frequency /
+    --checkpoint_frequency / --output_dir，则 smoke override 不再强行覆盖
+    （方便 smoke-resume 之类的小型自定义场景）。defaults 用来识别 "是不是用户显式传的"。
     """
-    args.num_episodes = 10
-    args.batch_size = 2
-    args.eval_frequency = 5
-    args.eval_seeds = 2  # smoke eval 也只跑很少几个种子
-    args.checkpoint_frequency = 5
+    d = defaults or {}
+    def _is_default(name: str) -> bool:
+        return getattr(args, name) == d.get(name)
+
+    if _is_default("num_episodes"):
+        args.num_episodes = 10
+    if _is_default("batch_size"):
+        args.batch_size = 2
+    if _is_default("eval_frequency"):
+        args.eval_frequency = 5
+    if _is_default("eval_seeds"):
+        args.eval_seeds = 2  # smoke eval 也只跑很少几个种子
+    if _is_default("checkpoint_frequency"):
+        args.checkpoint_frequency = 5
     if args.max_steps_per_episode is None:
         args.max_steps_per_episode = 30
-    smoke_root = _REPO_ROOT / "sts_models" / "v8_ppo_smoke"
-    smoke_root.mkdir(parents=True, exist_ok=True)
-    args.output_dir = str(smoke_root / f"run_{int(time.time())}")
+    if _is_default("output_dir"):
+        smoke_root = _REPO_ROOT / "sts_models" / "v8_ppo_smoke"
+        smoke_root.mkdir(parents=True, exist_ok=True)
+        args.output_dir = str(smoke_root / f"run_{int(time.time())}")
     logger.info(
-        "smoke 模式：output_dir=%s max_steps_per_episode=%d",
+        "smoke 模式：output_dir=%s max_steps_per_episode=%d num_episodes=%d "
+        "batch_size=%d eval_freq=%d ckpt_freq=%d",
         args.output_dir, args.max_steps_per_episode,
+        args.num_episodes, args.batch_size,
+        args.eval_frequency, args.checkpoint_frequency,
     )
 
 
 def main() -> None:
     args = parse_args()
     if args.smoke:
-        apply_smoke_overrides(args)
+        apply_smoke_overrides(args, defaults=_PARSER_DEFAULTS)
 
     # 安装 SIGINT handler（必须在 heavy import / 训练循环开始前）
     _install_sigint_handler()
@@ -323,6 +362,28 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Self-check：output_dir 已有 ckpt 但没给 --resume_from，警告用户 ----
+    # 让"以为是续训实际从零重训"的 concept error 在 log 第一行就能看到。
+    # 不 abort，因为可能 user 故意 fresh restart 但写了已有目录（如 v2b→long_v2b_round2）；
+    # 只是显式提示。
+    try:
+        existing_ckpts = [
+            f for f in os.listdir(args.output_dir) if f.endswith(".pt")
+        ] if os.path.exists(args.output_dir) else []
+    except Exception:  # noqa: BLE001
+        existing_ckpts = []
+    if existing_ckpts and not args.resume_from:
+        logger.warning(
+            "[resume-check] output_dir=%s 已有 %d 个 .pt ckpt 但未传 --resume_from。"
+            "本次训练将 fresh init（仅 Phase A combat head + 随机 RL 权重），"
+            "不会继承既有 ckpt。如果是想续训请传 --resume_from=<ckpt_path>。",
+            args.output_dir, len(existing_ckpts),
+        )
+        logger.warning(
+            "[resume-check] existing ckpts (前 5): %s",
+            existing_ckpts[:5],
+        )
 
     # 1) Model + 加载 Phase A combat head
     model = V8Model()
@@ -345,27 +406,64 @@ def main() -> None:
     # 4) Trainer
     trainer = V8PPOTrainer(model=model, lr=args.lr, device=str(device))
 
+    # ---- Resume：从指定 ckpt 加载 model+optimizer state，恢复 ep 计数 ----
+    # ckpt metadata 历史上字段名不统一（episodes_done 或 episode 或 num_episodes_so_far），
+    # 三个 key 都试一遍。
+    start_episode = 0
+    if args.resume_from:
+        if not os.path.exists(args.resume_from):
+            raise FileNotFoundError(f"--resume_from ckpt not found: {args.resume_from}")
+        meta = trainer.load_checkpoint(args.resume_from)
+        for k in ("episodes_done", "episode", "num_episodes_so_far"):
+            if k in meta:
+                start_episode = int(meta[k] or 0)
+                logger.info(
+                    "[resume] reading start_episode from metadata['%s']=%d",
+                    k, start_episode,
+                )
+                break
+        else:
+            logger.warning(
+                "[resume] ckpt %s metadata 中找不到 episodes_done/episode/"
+                "num_episodes_so_far；start_episode 默认 0",
+                args.resume_from,
+            )
+        logger.info(
+            "[resume] loaded ckpt=%s, start_episode=%d, target=args.num_episodes=%d "
+            "(将增量训 %d ep)",
+            args.resume_from, start_episode, args.num_episodes,
+            max(0, args.num_episodes - start_episode),
+        )
+        if start_episode >= args.num_episodes:
+            logger.warning(
+                "[resume] start_episode=%d >= --num_episodes=%d；不会再训。"
+                "如要继续训，请把 --num_episodes 调大。",
+                start_episode, args.num_episodes,
+            )
+
     # ---- 启动期 banner，保证用户看得到所有关键 config ----
     logger.info(
         "[startup] output_dir=%s num_episodes=%d batch_size=%d eval_freq=%d ckpt_freq=%d "
-        "max_steps_per_episode=%s smoke=%s",
+        "max_steps_per_episode=%s smoke=%s resume_from=%s start_episode=%d",
         args.output_dir, args.num_episodes, args.batch_size,
         args.eval_frequency, args.checkpoint_frequency,
         args.max_steps_per_episode, args.smoke,
+        args.resume_from, start_episode,
     )
 
     # 5) 训练 loop
     eval_history: List[Dict[str, Any]] = []
     train_log: List[Dict[str, Any]] = []
-    num_episodes_done = 0
+    num_episodes_done = start_episode
     t_start = time.time()
 
     # ----- milestone trackers（修复以前 % freq == 0 与 batch_size 不整除导致永不触发的 bug）-----
     # 旧逻辑：num_episodes_done % checkpoint_frequency == 0
     #   batch_size=32 / freq=500 → LCM=4000，1000 局训练永远 fire 不了
     # 新逻辑：num_episodes_done // freq 越过上一里程碑就 fire
-    last_ckpt_milestone = 0
-    last_eval_milestone = 0
+    # resume 时：里程碑从 start_episode 对应的位置起算，避免立刻 fire 重复 ckpt
+    last_ckpt_milestone = start_episode // args.checkpoint_frequency if args.checkpoint_frequency > 0 else 0
+    last_eval_milestone = start_episode // args.eval_frequency if args.eval_frequency > 0 else 0
 
     # ----- 5h 墙钟 ckpt：episode-based ckpt 万一失效（bug / 进程僵死）也能保底 -----
     wall_ckpt_interval_sec = 5 * 3600  # 5 hours
