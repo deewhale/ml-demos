@@ -89,7 +89,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-13 -->
+<!-- last-verified: 2026-05-15 -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -136,9 +136,24 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   - SlimeBoss 仍是瓶颈: **0/11 kills** in eval（v2b 10.5% → v3 0%，30 seed 全是 SlimeBoss seed → 验证 boss-aware encoding gap 仍存在）
   - 健康度: 0 Traceback, 6 guard_cap / 128 ep = 4.7%
   - Ckpt 路径 `sts_models/v8_ppo_long_v3/`，含 ep=32/64/96/128/final + 1 wall_ckpt
+- **`long_v4` 卡死中止 (N=3/3 未完整)**: 2026-05-14 06:56 启动，~7h 后落 ep=96 wall_ckpt
+  (`v8_ppo_wall_20260514_135748.pt`)，**ep=127 时被 Mushrooms event handler 死循环**
+  卡 ~15h（同 event_id 重复 choice 6352 次，COMBAT_WON 阶段菜单未过滤），未触发 final
+  eval。**已用 eval-only 脚本（`/tmp/v4_eval_only.py`）跑 wall ckpt 的 30-seed eval**，
+  输出 `sts_models/v8_ppo_long_v4/v8_ppo_eval_recovered.json`（2026-05-15 启动，
+  PID 84260）。Ckpt 路径 `sts_models/v8_ppo_long_v4/` 含 ep=32/64/96 + wall。
+- **`long_v5` 启动**: 2026-05-15 10:39 启动的 **512 ep** scale-up 训练（首次跳出 128 ep
+  规模），PID 84298。参数 `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=100`。
+  Applied fixes：env event_stall guard (commit `79b3d51`) + StSRLSolver Mushrooms phase
+  filter fix（fork commit）。预期 ~40-50h。Ckpt 路径 `sts_models/v8_ppo_long_v5/`。
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
+- **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修):
+  v4 ep=127 deterministic eval 卡 15h / 6352 次同 event choice 后定位根因。
+  StSRLSolver fork 已修 (commit on `external/StSRLSolver/`)；env 侧加 event_stall
+  guard 兜底 (`v8/env.py` commit `79b3d51`)：单 episode 同 event_id choice >= 30
+  → FORCE_TERMINATE，防御未知同类 bug。
 
 ### Schema 变化
 - Eval 输出新字段：`act1_boss_beat_rate` / `act2_boss_beat_rate` / `won_game_rate` / `boss_kill_counts` / `boss_reach_counts`。旧 `beat_boss_rate` 字段保留为 deprecated（= `act1_boss_beat_rate`）。
@@ -166,25 +181,41 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-14 状态快照）
+## 运行中的训练进程（2026-05-15 状态快照）
 
 如新会话被 ScheduleWakeup 唤醒来 monitor，按以下信息接手：
 
-- **进程**：v4 训练 nohup 跑，PID 37007（N=3/3，与 v3 同参数 fresh start）
-- **日志文件**：`/tmp/v8_ppo_long_v4.log`
-- **Output 目录**：`sts_models/v8_ppo_long_v4/`
-- **参数**：num_episodes=128 batch_size=32 ckpt_freq=32 eval_freq=100
-- **启动时间**：2026-05-14 06:56
-- **预期完成**：~+13-15h（参考 v3 14.18h）
-- **目的**：N=3 framework 第三次 run，验证 v3 won_game=0.43 是否稳定 reproduce（vs v2b 0.23 baseline）
-- **未做改动**：纯复跑，未修 SlimeBoss boss-aware encoding（留待 N=3 数据齐后决定下一批 fix 方向）
+**进程 1：v4 eval-only**（恢复 v4 wall ckpt 评估）
+
+- **PID**：84260
+- **脚本**：`/tmp/v4_eval_only.py`（独立 driver，加载 ckpt 后调 `tools.v8_ppo_train.run_eval`）
+- **加载的 ckpt**：`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`（episodes_done=96, 7.03h wall runtime）
+- **日志文件**：`/tmp/v4_eval_only.log`
+- **输出**：`sts_models/v8_ppo_long_v4/v8_ppo_eval_recovered.json`
+- **启动时间**：2026-05-15 10:38
+- **预期完成**：~2-3h（30 seeds × 完整 episode）
+- **目的**：v4 训练 ep=127 Mushrooms 卡死未触发 final eval，独立跑 30-seed eval 恢复指标
+
+**进程 2：v5 训练**（512 ep scale-up）
+
+- **PID**：84298
+- **日志文件**：`/tmp/v8_ppo_long_v5.log`
+- **Output 目录**：`sts_models/v8_ppo_long_v5/`
+- **参数**：num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=100
+- **启动时间**：2026-05-15 10:39
+- **预期完成**：~+40-50h（v3 14.18h / 128 ep → ~6.6min/ep × 512 ep ≈ 56h，再算并行 CPU 竞争）
+- **目的**：首次 512 ep 规模训练，验证 v3/v4 won_game=0.43 趋势是否能在更长 horizon 继续上涨
+- **Applied fixes**：env event_stall guard (`v8/env.py` commit `79b3d51`) + StSRLSolver fork
+  Mushrooms phase filter fix；Action token mode-collapse fix（v3 起就在用）
+- **并行 CPU 竞争风险**：v4 eval ~2-3h 时间窗口与 v5 训练同时跑，eval 结束后 v5 单跑
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_long_v4/`
-- 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_long_v4.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_long_v4.log | tail -1`
-- Final 标志：`grep "训练结束" /tmp/v8_ppo_long_v4.log`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_long_v5/`
+- 进程是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`（v5）/ `ps -p 84260`（v4 eval）
+- 异常监测：`grep -cE "\[guard_cap\]|\[event_stall\]|Error|Traceback" /tmp/v8_ppo_long_v5.log`
+- v5 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_long_v5.log | tail -1`
+- v5 训练结束：`grep "训练结束" /tmp/v8_ppo_long_v5.log`
+- v4 eval 完成：`ls sts_models/v8_ppo_long_v4/v8_ppo_eval_recovered.json 2>&1`
 
 ## 子 Agent 协作规范
 
