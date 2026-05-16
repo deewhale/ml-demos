@@ -175,6 +175,44 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   300s wall timeout（防整 eval 拖死训练）；新增 `[deck_eval]` pool state +
   `[eval] seed start/done` 监控日志。Smoke 验证：0 Traceback，ckpt 在 eval 之前
   落盘，新 log 标记生效。
+- **`batch_v5_resume2` 完成 + plateau 确认 (N=3, 跨 v3/v4/v5_resume2)**: 2026-05-17
+  06:21 训练 + final eval 全部完成，~24.9h（89630s）。160 ep 增量训练 + 2 次 eval@ep=128/256。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v5_resume2/` 含 ep=128/160/192/224/256 + final
+  + 3 wall。**核心结论：plateau 已严格确认，N=3 framework 触发 escalation**。
+  - **Per-batch beat_boss_in_batch (5 连续 batch)**：
+    - batch 1 (ep 97-128): 14/32 = 43.8%
+    - batch 2 (ep 129-160): 13/32 = 40.6%
+    - batch 3 (ep 161-192): 14/32 = 43.8%
+    - batch 4 (ep 193-224): 15/32 = 46.9%
+    - batch 5 (ep 225-256): 14/31 = 45.2% (1 ep 未计入 heartbeat)
+    - **5 batch 全部落在 40-47% 窄区间，零趋势上升 → 训练量已不再带来 won_game 提升**
+  - **mean_reward 同期**：46.91 / 53.72 / 56.18 / 52.80 / 47.85（高位震荡，不再单调上涨）
+  - **Entropy drift**：0.689 → 0.685 → 0.643 → 0.631 → 0.590（缓慢收敛，policy 在 sharpen）
+  - **Eval@ep=128 (mid-run)**: 30 seed 中仅 **completed=15/30**（15 个超 300s timeout 弃用）。
+    reached_a1=0.43, **a1_beat=0.20**, a2_beat=0.17, **won_game=0.067** (1/15),
+    floor_mean=11.9, SlimeBoss=0/7
+  - **Eval@ep=256 (final)**: 30 seed 中 **completed=15/30**（15 timeout）。reached_a1=0.43,
+    **a1_beat=0.23**, a2_beat=0.17, **won_game=0.00** (0/15), floor_mean=9.0,
+    SlimeBoss=0/6. **同 run 内 ep=128→256 won_game 下降 (0.07→0.00)**，且 floor_mean
+    下降 (11.9→9.0)，**进一步证实 plateau / mild overfit**
+  - **Eval timeout 问题严重未根治**：50% seed 超 300s wall timeout（v4 recovered run
+    completed=30/30），eval 数据样本量减半导致 won_game 噪声大；timeout 病灶仍在
+    inference 慢化（之前疑似 MPS / pool worker 状态泄漏）
+  - **跨批 won_game 对比 (eval, 单数据点警告：v5_resume2 仅 15 seed)**：
+    - v3 final (ep=128, 30/30 seed): **won=0.43**
+    - v4 eval_recovered (ep=96 wall ckpt, 30/30 seed): **won=0.30**
+    - v5_resume2 ep=128 (15/30 seed): won=0.067
+    - v5_resume2 ep=256 (15/30 seed): won=0.00
+    - 注意 v5_resume2 eval 仅 15 seed completed，**不能直接 1:1 对比 v3/v4 30-seed 数据**；
+      但 per-batch training trend 40-47% 是 32-seed 全量数据，plateau 结论稳
+  - **SlimeBoss 累计 (eval)**: v5_resume2 中 **0/13 = 0%**，与 v3 (0/11) / v4 (0/8)
+    完全一致 → SlimeBoss 仍是单点 bottleneck，boss-aware encoding gap 未变
+  - **健康度**: 0 Traceback / 0 fatal error，guard_cap / event_stall 在正常范围
+  - **判定**：N=3 (v3 / v4_recovered / v5_resume2) plateau framework 触发 escalation。
+    续训 160 ep（96→256）在 won_game 维度 zero 增益（甚至轻微 regression）。**训练量已
+    饱和，需结构性改动**：boss-aware encoding（SlimeBoss AOE 表征）/ reward shaping
+    （加 boss-specific signal）/ 别的方案。下批训练前必须先讨论结构改动方向，不能再纯
+    scale 训练时间。
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
@@ -213,33 +251,17 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-16 状态快照）
+## 运行中的训练进程（2026-05-17 状态快照）
 
-如新会话被 ScheduleWakeup 唤醒来 monitor，按以下信息接手：
+**无正在运行的训练**。`batch_v5_resume2` 已于 2026-05-17 06:21 完成 + final eval@ep=256 完成。
+PID 29972 不存在（process DONE）。下批训练启动前必须先做结构性改动讨论（见上方 plateau 判定）。
 
-**进程：batch_v5_resume2 训练**（eval hang fix 后重启，从 v4 ep=96 wall ckpt 续）
-
-- **PID**：29972
-- **日志文件**：`/tmp/v8_ppo_batch_v5_resume2.log`
-- **Output 目录**：`sts_models/v8_ppo_batch_v5_resume2/`
-- **参数**：num_episodes=256 batch_size=32 ckpt_freq=32 eval_freq=128
-  --resume_from=`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`
-- **start_episode**：96 (从 v4 wall ckpt metadata.episodes_done)
-- **启动时间**：2026-05-16 05:27
-- **预期完成**：~17h（增量训 160 ep × ~6.6min/ep ≈ 17.6h；预计 2026-05-16 23:00 左右）
-- **目的**：batch_v5_resume eval hang 中止 (5h+ 权重丢失) 后重启 + 验证 eval-fix 修
-  得对（ckpt 先落盘 + deck_eval/eval timeout + 监控 log）
-- **Applied fixes**：v4 之上全套修复 + resume_from CLI + eval hang fix (commit `93e7c42`)
-
-接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v5_resume2/`
-- 进程是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|\[event_stall\]|\[deck_eval\] timeout|\[eval\] seed=.* timeout|Error|Traceback" /tmp/v8_ppo_batch_v5_resume2.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v5_resume2.log | tail -1`
-- 训练结束：`grep "训练结束" /tmp/v8_ppo_batch_v5_resume2.log`
-- Resume 验证：`grep "\[resume\]" /tmp/v8_ppo_batch_v5_resume2.log`
-- Eval timing：`grep "\[eval\] seed" /tmp/v8_ppo_batch_v5_resume2.log | tail -20`
-- Pool 监控：`grep "\[deck_eval\]" /tmp/v8_ppo_batch_v5_resume2.log | tail -10`
+最近完成的训练参考信息（如需 re-eval 或对比）：
+- **Best ckpt 候选 (按 won_game 排序)**：
+  - v3 final (`sts_models/v8_ppo_long_v3/v8_ppo_final.pt`, ep=128) — won=0.43, 30/30 seed eval
+  - v4 wall (`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`, ep=96) — won=0.30, 30/30 seed eval
+  - v5_resume2 final (`sts_models/v8_ppo_batch_v5_resume2/v8_ppo_final.pt`, ep=256) — won=0.00, 仅 15/30 seed eval (timeout)
+- 默认下批续训 base：当前最佳是 v3 final（won_game 角度），但 v5_resume2 是续训规范立后最规整的 baseline
 
 ## 子 Agent 协作规范
 
