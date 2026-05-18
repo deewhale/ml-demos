@@ -401,6 +401,17 @@ class V8Model(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
+        # ----- Boss-aware encoding（boss token → hidden_dim 残差加到 state_vec）-----
+        # 不改 state_fuse 输入维度 → 旧 ckpt strict=False load 全部已有 key 不 mismatch；
+        # boss_proj 在旧 ckpt 里是 missing key，random init，需要续训学习。
+        # 用 shared token_embed 把 boss name hash 成 embed_dim，再投影到 hidden_dim 后
+        # add 到 state_vec（residual style，初始 ~0 不破坏既有行为）。
+        self.boss_proj = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
     # ===== 工具：state → batch tensor =====
 
     def _device(self) -> torch.device:
@@ -541,6 +552,16 @@ class V8Model(nn.Module):
             dim=-1,
         )
         state_vec = self.state_fuse(fused_in)
+
+        # ---- Boss-aware residual：boss name → embed → MLP → add 到 state_vec ----
+        # boss 为空（NEOW / 部分 reset 边界）时仍走 hash_to_token_id(""=0)，
+        # token_embed[0] 因 padding_idx=0 永远为 0，boss_proj(0) 也 ~0，安全。
+        boss_token_id = hash_to_token_id(state.boss or "", self.vocab_size)
+        boss_id_t = torch.tensor([boss_token_id], dtype=torch.long, device=device)
+        boss_emb = self.token_embed(boss_id_t).squeeze(0)  # [embed_dim]
+        boss_residual = self.boss_proj(boss_emb)           # [hidden_dim]
+        state_vec = state_vec + boss_residual
+
         return state_vec
 
     def encode_state(self, state) -> torch.Tensor:

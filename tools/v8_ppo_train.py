@@ -76,10 +76,21 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from v8.combat_net_wrapper import V8CombatNetWrapper
-from v8.deck_evaluator import get_cache_stats as get_deck_cache_stats
+from v8.deck_evaluator import (
+    get_cache_stats as get_deck_cache_stats,
+    restart_pool as restart_deck_pool,
+)
 from v8.env import V8Env
 from v8.model import V8Model
 from v8.trainer import RolloutStep, V8PPOTrainer
+
+# Eval 内存监控用（可选；若环境无 psutil 用 None fallback）
+try:
+    import psutil  # type: ignore
+    _PSUTIL_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    psutil = None  # type: ignore
+    _PSUTIL_AVAILABLE = False
 
 # 强制 stdout 行缓冲（unbuffered），保证 heartbeat 实时可见。
 # python -u / PYTHONUNBUFFERED=1 也行，这里再加一道保险。
@@ -158,6 +169,28 @@ def save_metadata_json(
 # ============================================================
 
 
+def _log_eval_mem(tag: str, seed: int) -> None:
+    """[eval-mem] log：每个 seed 开始/结束打 RSS + MPS allocated。
+
+    监控 eval 慢化是否来自内存累积。psutil 不可用时只打 MPS。
+    """
+    parts: List[str] = []
+    if _PSUTIL_AVAILABLE and psutil is not None:
+        try:
+            rss_mb = psutil.Process().memory_info().rss / 1e6
+            parts.append(f"rss={rss_mb:.0f}MB")
+        except Exception:  # noqa: BLE001
+            parts.append("rss=?")
+    if torch.backends.mps.is_available():
+        try:
+            mps_alloc_mb = torch.mps.current_allocated_memory() / 1e6
+            parts.append(f"mps_alloc={mps_alloc_mb:.0f}MB")
+        except Exception:  # noqa: BLE001
+            parts.append("mps_alloc=?")
+    if parts:
+        logger.info("[eval-mem] %s seed=%d %s", tag, seed, " ".join(parts))
+
+
 def run_eval(
     trainer: V8PPOTrainer,
     env: V8Env,
@@ -178,6 +211,13 @@ def run_eval(
       kill 维度对应 boss 计 0；总 act1 击杀数走 act1_boss_beat_rate）
 
     保留旧字段 beat_boss_rate = act1_boss_beat_rate（deprecated，下游迁移完毕后删）。
+
+    慢化修复（4 道防线，2026-05-13 加）：
+    - Fix A: 外层 torch.no_grad() 显式包裹（collect_rollout 已有 @torch.no_grad，
+             此处冗余兜底任何非 rollout 的 forward）。
+    - Fix B: 每个 seed 完成后 torch.mps.empty_cache() 释放 MPS 内存碎片。
+    - Fix C: eval 前后 restart_deck_pool() 重建 worker 池，防 worker 状态累积。
+    - Fix D: [eval-mem] log 监控 RSS + MPS allocated，便于复现时定位累积曲线。
     """
     floors: List[int] = []
     reached_boss = 0
@@ -195,9 +235,22 @@ def run_eval(
     # 主线程跳到下一个 seed，保证整 eval 不被单 seed 拖死。
     EVAL_SEED_TIMEOUT_SEC = 300.0
 
+    # ---- Fix C: eval 前重建 deck_evaluator pool（防 worker 累积慢化）----
+    try:
+        restart_deck_pool()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[eval] restart_deck_pool (pre) failed: %s: %s", type(e).__name__, e)
+
+    # ---- Fix A: 外层禁 grad（用 set_grad_enabled bookend 避免整段缩进改动）----
+    # collect_rollout 已 @torch.no_grad，此处仅作冗余兜底（任何非 rollout forward 也覆盖）。
+    _eval_prev_grad_enabled = torch.is_grad_enabled()
+    torch.set_grad_enabled(False)
+
     for i in range(num_seeds):
         seed = seed_offset + i
         seed_t0 = time.time()
+        # ---- Fix D: 入口 memory log ----
+        _log_eval_mem("start", seed)
         logger.info("[eval] seed=%d start", seed)
         rollout: List[Any] = []
         exc_holder: Dict[str, Any] = {}
@@ -218,18 +271,38 @@ def run_eval(
                 "[eval] seed=%d timeout aborted (>%.0fs wall) — skipping (bg thread leaked)",
                 seed, EVAL_SEED_TIMEOUT_SEC,
             )
+            # ---- Fix B + D: 即便 timeout 也清 cache + 打出口 mem log ----
+            if torch.backends.mps.is_available():
+                try:
+                    torch.mps.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+            _log_eval_mem("timeout", seed)
             continue
         if "exc" in exc_holder:
             e = exc_holder["exc"]
             logger.warning(
                 "eval seed=%d crashed: %s: %s", seed, type(e).__name__, e,
             )
+            if torch.backends.mps.is_available():
+                try:
+                    torch.mps.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+            _log_eval_mem("crash", seed)
             continue
 
         seed_elapsed = time.time() - seed_t0
         logger.info("[eval] seed=%d done elapsed=%.1fs steps=%d", seed, seed_elapsed, len(rollout))
 
         if not rollout:
+            # 仍然清 cache + 出口 log，保持 per-seed 不变量
+            if torch.backends.mps.is_available():
+                try:
+                    torch.mps.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+            _log_eval_mem("empty", seed)
             continue
         last = rollout[-1]
         # last.state 是这一步**之前**的 state；需要从 env 拿最新
@@ -268,6 +341,26 @@ def run_eval(
             env.close()
         except Exception:  # noqa: BLE001
             pass
+
+        # ---- Fix B + D: 每 seed 结束后清 MPS cache + 打出口 mem log ----
+        if torch.backends.mps.is_available():
+            try:
+                torch.mps.empty_cache()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[eval] mps.empty_cache failed seed=%d: %s: %s",
+                    seed, type(e).__name__, e,
+                )
+        _log_eval_mem("end", seed)
+
+    # ---- Fix A: 还原 grad enable 状态（与 set_grad_enabled bookend 配对）----
+    torch.set_grad_enabled(_eval_prev_grad_enabled)
+
+    # ---- Fix C: eval 完成后再重建一次 pool（防把累积带回训练阶段）----
+    try:
+        restart_deck_pool()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[eval] restart_deck_pool (post) failed: %s: %s", type(e).__name__, e)
 
     n = max(1, len(floors))
     act1_beat_rate = act1_beat / num_seeds

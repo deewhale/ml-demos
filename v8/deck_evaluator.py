@@ -103,6 +103,28 @@ def _shutdown_pool() -> None:
         _POOL = None
 
 
+def restart_pool() -> None:
+    """重建 ProcessPoolExecutor（eval 前后调用，防 worker 状态累积 / 慢化）。
+
+    用法（run_eval 入口 + 出口都调一次）：
+        from v8.deck_evaluator import restart_pool
+        restart_pool()  # 关旧的 + 让下次 _get_pool 重建
+
+    线程安全说明：不在 eval 中途调；只在 eval boundary 处调（caller 保证）。
+    """
+    global _POOL
+    if _POOL is not None:
+        try:
+            _POOL.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "deck_evaluator.restart_pool: shutdown old pool failed: %s: %s",
+                type(e).__name__, e,
+            )
+        _POOL = None
+    logger.info("deck_evaluator: pool restarted (next call will lazy-create)")
+
+
 atexit.register(_shutdown_pool)
 
 

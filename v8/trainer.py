@@ -497,10 +497,36 @@ class V8PPOTrainer:
         logger.info("V8PPOTrainer: saved checkpoint to %s", path)
 
     def load_checkpoint(self, path: str) -> Dict[str, Any]:
-        """加载 model + optimizer + 元数据。返回 metadata（方便恢复 episode 计数）。"""
+        """加载 model + optimizer + 元数据。返回 metadata（方便恢复 episode 计数）。
+
+        兼容性策略（2026-05-13 加 boss-aware encoding 后引入）：
+        - model: 用 strict=False 加载，旧 ckpt 缺新加的 boss_proj.* keys 会被忽略
+          并保留 module 内 random init（log missing/unexpected 数量）。
+        - optimizer: 如果 param 数量变了（新 model 多了 boss_proj 参数），原 optimizer
+          state_dict 跟 self.optimizer.param_groups 对不上，load 会 raise ValueError。
+          捕获后保留 self.optimizer 的 fresh AdamW state（旧权重仍在，仅 Adam 一阶/
+          二阶矩重新积累），不阻塞 resume。
+        """
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ckpt["model_state_dict"])
-        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        missing, unexpected = self.model.load_state_dict(
+            ckpt["model_state_dict"], strict=False
+        )
+        if missing or unexpected:
+            logger.info(
+                "V8PPOTrainer: model load_state_dict missing=%d unexpected=%d "
+                "(missing keys preview: %s, unexpected preview: %s)",
+                len(missing), len(unexpected),
+                list(missing)[:5], list(unexpected)[:5],
+            )
+        try:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        except (ValueError, KeyError) as e:
+            logger.warning(
+                "V8PPOTrainer: optimizer load_state_dict mismatch (%s: %s); "
+                "keeping fresh optimizer state (model weights still loaded). "
+                "Adam moments will rebuild over next batches.",
+                type(e).__name__, e,
+            )
         logger.info("V8PPOTrainer: loaded checkpoint from %s", path)
         return ckpt.get("metadata", {})
 

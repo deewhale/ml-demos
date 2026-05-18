@@ -181,6 +181,11 @@ def _build_state_from_runner(runner: GameRunner) -> V8State:
     if mp is not None and not (mp.x == -1 and mp.y == -1):
         current_position = {"floor": int(mp.y), "x": int(mp.x)}
 
+    # ----- 当前 act 的 boss 名（boss-aware encoding）-----
+    # runner._boss_name 在 GameRunner reset 时即填好（如 'Hexaghost'）。
+    # 容错：缺字段 / None → 空字符串。
+    boss_name = str(getattr(runner, "_boss_name", "") or "")
+
     state = V8State(
         hp=hp,
         max_hp=max_hp,
@@ -195,6 +200,7 @@ def _build_state_from_runner(runner: GameRunner) -> V8State:
         deck_strength=None,  # 由 env 在 reset/step 中按时机填
         in_combat=(runner.phase == GamePhase.COMBAT),
         phase=phase_name,
+        boss=boss_name,
     )
     return state
 

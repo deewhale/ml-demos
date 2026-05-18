@@ -79,6 +79,13 @@ class V8State:
     #       CARD_REWARDS / BOSS_REWARDS
     phase: str = ""
 
+    # ----- 当前 act 的 boss 名（boss-aware encoding）-----
+    # 取值: "Slime Boss" / "Hexaghost" / "The Guardian" / "Automaton" / ...
+    # GameRunner reset 时即已确定（runner._boss_name），act 切换后会被覆盖成新 act 的 boss。
+    # 进入 act1 boss 战之前 model 看得到这个字段，决策 boss-specific route / 选卡。
+    # 旧 ckpt 兼容：token_embed 共享，新 token 走 hash → embed lookup，random init。
+    boss: str = ""
+
     # ===== 序列化 =====
 
     def to_dict(self) -> Dict[str, Any]:
