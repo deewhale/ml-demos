@@ -251,17 +251,31 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-17 状态快照）
+## 运行中的训练进程（2026-05-18 状态快照）
 
-**无正在运行的训练**。`batch_v5_resume2` 已于 2026-05-17 06:21 完成 + final eval@ep=256 完成。
-PID 29972 不存在（process DONE）。下批训练启动前必须先做结构性改动讨论（见上方 plateau 判定）。
+- **进程**：`batch_v6` 训练在 nohup 下运行，PID 48534（2026-05-18 10:46 启动）
+- **日志文件**：`/tmp/v8_ppo_batch_v6.log` 全程 append
+- **Output 目录**：`sts_models/v8_ppo_batch_v6/`，ckpt freq=32（预计落 ep=288/320/352/384 + wall + final）
+- **参数**：num_episodes=384 batch_size=32 ckpt_freq=32 eval_freq=128 ——
+  从 `sts_models/v8_ppo_batch_v5_resume2/v8_ppo_ep256.pt` 续训，增量训 128 ep
+- **本批主要目的**：验证 boss-aware encoding（model 新增 `boss_proj.*` 4 个参数，
+  load missing=4 unexpected=0）打破 v5_resume2 的 5-batch plateau (40-47% won_game)
+- **次要验证**：eval 慢化 fix 的 4 道防线（ckpt save 移到 eval 前 / deck_evaluator
+  future 60s timeout / run_eval 300s wall timeout / pool 监控日志）
+- **预期完成**：ETA ~12-15h，预计 2026-05-18 22:00 — 2026-05-19 02:00 完成训练 + final eval
+- **启动 health (T+15s)**：PID alive；`[resume] start_episode=256`✓；model load
+  missing=4 (boss_proj.0/2.weight+bias) unexpected=0 ✓；optimizer load_state_dict
+  WARN（boss-aware 新增参数导致 size mismatch，预期，Adam moments 重建）；
+  0 Traceback；ep=256 已经在跑前几楼 combat & rewards
+- **注意**：`[seed]` 日志文本本身不含 boss field，boss-aware encoding 信号来自
+  model 内部新增的 `boss_proj` 通路（runtime 行为而非 seed 配置）
 
 最近完成的训练参考信息（如需 re-eval 或对比）：
 - **Best ckpt 候选 (按 won_game 排序)**：
   - v3 final (`sts_models/v8_ppo_long_v3/v8_ppo_final.pt`, ep=128) — won=0.43, 30/30 seed eval
   - v4 wall (`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`, ep=96) — won=0.30, 30/30 seed eval
   - v5_resume2 final (`sts_models/v8_ppo_batch_v5_resume2/v8_ppo_final.pt`, ep=256) — won=0.00, 仅 15/30 seed eval (timeout)
-- 默认下批续训 base：当前最佳是 v3 final（won_game 角度），但 v5_resume2 是续训规范立后最规整的 baseline
+- batch_v6 续训 base：v5_resume2 ep=256（续训规范立后最规整的 baseline，且 plateau 测算基线）
 
 ## 子 Agent 协作规范
 
