@@ -48,7 +48,16 @@ _POOL_LOG_INTERVAL: int = 20
 # 解决 mini-smoke v2 报告"win_rate 卡 0.667 = 2/3"区分度不足问题。
 STANDARD_ENEMIES_ACT1: List[str] = ["Cultist", "GremlinNob", "Lagavulin", "Hexaghost"]
 SIMS_PER_ENEMY: int = 3
-SEARCH_BUDGET_S: float = 5.0  # 单次 sim 时间预算（监控 hexaghost 时可能需要拉到 2s+）
+# 单 turn 搜索时间预算（秒）。1.0s 已足够找到与 5.0s 完全相同的 win/dmg 结果；
+# 在 Snecko Eye 拿到后（随机 cost）5.0s 会被全用满（每 turn 都 hit budget），
+# 导致 evaluate_deck wall-time 50s+ → eval 30 seeds 一半 timeout。
+#
+# 2026-05-19 benchmark（post-boss deck + Snecko Eye 全 4 敌人 × 3 sim）：
+#   budget=5.0s → 152s seq → ~17s parallel；ALL outcomes identical
+#   budget=1.0s → 38s seq  → ~4s parallel；ALL outcomes identical
+# 同 benchmark 也覆盖 starter deck + Snecko（最 pathological 情形），1.0s 与 5.0s
+# 在 4 个敌人 × 3 sim 的 win_rate / damage_dealt / damage_taken 完全一致。
+SEARCH_BUDGET_S: float = 1.0
 
 # act2/act3 的标准敌人 user 后续训练时再扩展，先 act1 跑通
 STANDARD_ENEMIES_BY_ACT: Dict[int, List[str]] = {
@@ -385,7 +394,11 @@ def reset_cache_stats() -> None:
 # 全局缓存（懒加载）：name → card_id 映射 / enemy_class 表
 _CARD_NAME_TO_ID: Optional[Dict[str, str]] = None
 _ENEMY_REGISTRY: Optional[Dict[str, type]] = None
-_MAX_TURNS_HARD_CAP: int = 50  # safety 上限，超过算败
+# safety 上限：超过算败。act1 fights 中典型 turn 数 3-10；超过 15 turn 还没赢的 deck
+# 强度本就极低（搜索每 turn hit budget 但仍 stall）。从 50 → 15 限制极端 worst-case
+# 不影响 win/dmg 输出（2026-05-19 benchmark：starter+Snecko/post-boss+Snecko 等 deck
+# max_turns=15 与 50 输出完全一致）。
+_MAX_TURNS_HARD_CAP: int = 15
 
 
 def _ensure_solver_imports() -> Tuple[type, type, type, callable, type]:
