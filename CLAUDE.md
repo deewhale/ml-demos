@@ -213,6 +213,47 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     饱和，需结构性改动**：boss-aware encoding（SlimeBoss AOE 表征）/ reward shaping
     （加 boss-specific signal）/ 别的方案。下批训练前必须先讨论结构改动方向，不能再纯
     scale 训练时间。
+- **`batch_v6` 完成 (boss-aware encoding 部分有效 + eval timeout 仍 53%)**: 2026-05-19
+  07:15 训练 + final eval 全部完成，~20.5h（73750s）。128 ep 增量训练（ep 257→384）
+  + 1 次 final eval@ep=384。从 v5_resume2 ep=256 续训，model 新增 `boss_proj.*` 4 参数。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v6/` 含 ep=288/320/352/384 + final + 3 wall。
+  **核心结论**：boss-aware encoding 在 training 信号上有效（SlimeBoss 训练胜率 0%→8.5%），
+  但 eval 端未表现，整体仍 plateau。
+  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 257→384)**：
+    - batch 1 (ep 257-288): 20/32 = 62.5%
+    - batch 2 (ep 289-320): 17/32 = 53.1%
+    - batch 3 (ep 321-352): 15/32 = 46.9%
+    - batch 4 (ep 353-384): 16/32 = 50.0%
+    - **末段 ~50%**，相较 v5_resume2 五连 batch (40-47%) 上移约 ~5pp，**training 端可见小幅提升**
+  - **mean_reward 同期**：96.9 / 81.5 / 74.6 / 89.3（远高于 v5_resume2 的 46-56 区间）。
+    reward shaping 强化的 dense reward 让数字直接没有可比性，但相对趋势仍是单批内有效。
+  - **Entropy drift**：0.523 → 0.500 → 0.449 → 0.409（继续 sharpen，无 collapse）
+  - **SlimeBoss training kills**: **4/47 = 8.5%**（v3/v4/v5_resume2 训练侧累计 ~0%）→
+    **boss-aware encoding 真信号，但增量小（绝对值仍 < 10%）**
+  - **Eval@ep=384 (final, 30 seed)**: **completed=12/30**（**16 timeout**, 2 其他），
+    reached_a1=0.33, **a1_beat=0.13**, a2_beat=0.07, **won_game=0.00** (0/12),
+    floor_mean=11.7, SlimeBoss eval kills=**0/6 reach**
+  - **跨批 won_game 完整对比 (eval, 数据从各 run summary.json 校对)**：
+    | Run | ep | completed | reached_a1 | a1_beat | a2_beat | won_game | floor_mean | SlimeBoss kill |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | v3 final | 128 | 30/30 | 1.00 | 0.63 | 0.53 | **0.43** | 14.0 | 0/11=0% |
+    | v4 eval recovered | 96 | 30/30 | 0.97 | 0.70 | 0.60 | **0.30** | 11.2 | 0/8=0% |
+    | v5_resume2 final | 256 | 15/30 | 0.43 | 0.23 | 0.17 | **0.00** | 9.0 | 0/6=0% |
+    | v6 final | 384 | 12/30 | 0.33 | 0.13 | 0.07 | **0.00** | 11.7 | 0/6=0% |
+    - **绝对 won_game**: v3/v4 高位 → v5_resume2/v6 归零，**timeout 让样本严重不可比**
+    - **completed 率**: 30/30 → 30/30 → 15/30 → 12/30，**timeout 加剧，eval 慢化未根治**
+    - **reached_a1 趋势**：1.00 → 0.97 → 0.43 → 0.33，**eval 端能跑到 a1 boss 的 seed
+      数量持续下降**，与 timeout 加剧同步，可能两者同根因（inference 慢化）
+  - **Eval timeout fix 部分有效**：MPS cache 完全生效（mps_alloc 稳定 12MB，未泄漏），
+    四道防线（ckpt 前置 / deck_evaluator 60s future timeout / 300s wall / pool 监控）
+    均落地生效（0 fatal hang）。但 **timeout 率仍 53%（16/30）**，根因不在 MPS，
+    需进一步 profiling（inference 慢化 / search 不收敛 / event handler 慢）。
+  - **健康度**: 0 Traceback / 0 fatal error / 0 `[guard_cap]` / 0 Mysterious Sphere
+    COMBAT_WON loop。续训规范 + bug fix 全部 integration validated。
+  - **Boss-aware encoding 总评判**：**部分有效**（training 端 SlimeBoss 0%→8.5%，
+    per-batch 50% 高于 plateau 40-47%）；但 **eval 端零反映**（eval timeout 高 +
+    SlimeBoss reach 后 0 kill）。需更长训练验证 / 或新结构（reward shaping +
+    eval-timeout 根因修复）。下批训练前再次必须先讨论方向，**不再纯加 ep 数**。
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
@@ -251,31 +292,23 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-18 状态快照）
+## 运行中的训练进程（2026-05-19 状态快照）
 
-- **进程**：`batch_v6` 训练在 nohup 下运行，PID 48534（2026-05-18 10:46 启动）
-- **日志文件**：`/tmp/v8_ppo_batch_v6.log` 全程 append
-- **Output 目录**：`sts_models/v8_ppo_batch_v6/`，ckpt freq=32（预计落 ep=288/320/352/384 + wall + final）
-- **参数**：num_episodes=384 batch_size=32 ckpt_freq=32 eval_freq=128 ——
-  从 `sts_models/v8_ppo_batch_v5_resume2/v8_ppo_ep256.pt` 续训，增量训 128 ep
-- **本批主要目的**：验证 boss-aware encoding（model 新增 `boss_proj.*` 4 个参数，
-  load missing=4 unexpected=0）打破 v5_resume2 的 5-batch plateau (40-47% won_game)
-- **次要验证**：eval 慢化 fix 的 4 道防线（ckpt save 移到 eval 前 / deck_evaluator
-  future 60s timeout / run_eval 300s wall timeout / pool 监控日志）
-- **预期完成**：ETA ~12-15h，预计 2026-05-18 22:00 — 2026-05-19 02:00 完成训练 + final eval
-- **启动 health (T+15s)**：PID alive；`[resume] start_episode=256`✓；model load
-  missing=4 (boss_proj.0/2.weight+bias) unexpected=0 ✓；optimizer load_state_dict
-  WARN（boss-aware 新增参数导致 size mismatch，预期，Adam moments 重建）；
-  0 Traceback；ep=256 已经在跑前几楼 combat & rewards
-- **注意**：`[seed]` 日志文本本身不含 boss field，boss-aware encoding 信号来自
-  model 内部新增的 `boss_proj` 通路（runtime 行为而非 seed 配置）
-
-最近完成的训练参考信息（如需 re-eval 或对比）：
-- **Best ckpt 候选 (按 won_game 排序)**：
+- **当前无 active 训练**。batch_v6 于 2026-05-19 07:15 完成（exit_reason=completed，
+  没有 .exit sentinel 因 nohup 包装层不写 sentinel；判定依据 summary.json 落盘 +
+  父进程 PID 48534 已退出）。下批训练参数待用户与主对话讨论后再启动。
+- **Best ckpt 候选 (按 won_game 排序, 注意 v5_resume2/v6 因 timeout 样本不足)**：
   - v3 final (`sts_models/v8_ppo_long_v3/v8_ppo_final.pt`, ep=128) — won=0.43, 30/30 seed eval
   - v4 wall (`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`, ep=96) — won=0.30, 30/30 seed eval
-  - v5_resume2 final (`sts_models/v8_ppo_batch_v5_resume2/v8_ppo_final.pt`, ep=256) — won=0.00, 仅 15/30 seed eval (timeout)
-- batch_v6 续训 base：v5_resume2 ep=256（续训规范立后最规整的 baseline，且 plateau 测算基线）
+  - v5_resume2 final (`sts_models/v8_ppo_batch_v5_resume2/v8_ppo_final.pt`, ep=256) — won=0.00, 15/30 seed eval (timeout)
+  - v6 final (`sts_models/v8_ppo_batch_v6/v8_ppo_final.pt`, ep=384) — won=0.00, 12/30 seed eval (timeout)
+- **boss-aware encoding 模型权重**：v6 final 含 `boss_proj.*` 4 个新参数；从 v6
+  续训的下批不需要 missing key fallback；从 v3/v4/v5_resume2 续训仍需 missing=4 fallback
+- **下批训练前必要前置任务**（按 plateau-escalation framework）：
+  1. **eval timeout 根因 profiling**：53% timeout 不能再忍，需定位是
+     inference 慢化 / search 不收敛 / event handler 慢；MPS cache fix 已排除
+  2. **方向讨论**：boss-aware encoding 信号 小但真，下一步是 (a) 加更长训练，
+     (b) 加 reward shaping 强化 boss-specific signal，(c) 别的结构改动；不再纯 scale ep 数
 
 ## 子 Agent 协作规范
 
