@@ -255,6 +255,20 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     SlimeBoss reach 后 0 kill）。需更长训练验证 / 或新结构（reward shaping +
     eval-timeout 根因修复）。下批训练前再次必须先讨论方向，**不再纯加 ep 数**。
 
+- **deck_evaluator search budget 收紧 fix 验证 (2026-05-19)**: commit `fbda896`
+  收紧 `deck_evaluator` search budget (`s` 字段) + turn cap，假设 eval timeout 是
+  deck_evaluator 慢化导致。在 v6 ep=384 ckpt 上 10-seed re-eval 验证（log
+  `/tmp/v6_eval_verify.log`, json `sts_models/v8_ppo_batch_v6/v8_ppo_eval_verify_ep384.json`）。
+  - **结果**：完成率 5/10 = 50%，timeout 率 50%（5/10 seed: 2/4/6/7/8 超 300s）
+  - **对比 baseline (v6 30-seed eval, ep=384)**：completed 12/30 = 40%, timeout 16/30 = 53.3%
+  - **统计判定**：10 seed 噪声 (SE ~16pp) 内与 baseline 无差异，**fix 无显著效果**
+  - **eval 数据 (5 done seed)**：reached_a1=0.4, a1_beat=0.2, a2_beat=0.1, **won_game=0.0**,
+    floor_mean=10.8, avg_steps=35.0，与 baseline 30-seed (reached_a1=0.33, a1_beat=0.13,
+    a2_beat=0.07, won_game=0.00, floor_mean=11.7) 在噪声内一致
+  - **结论**：eval timeout 根因 **不在 deck_evaluator search budget**。下一步必须改换
+    profiling 方向：inference 慢化（per-step model fwd）/ search 不收敛 / event handler
+    慢 / sim engine 端慢；继续盲改 timeout 防线无用。
+
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
 - **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修,
