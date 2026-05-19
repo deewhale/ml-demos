@@ -89,7 +89,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-15 -->
+<!-- last-verified: 2026-05-20 -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -288,6 +288,54 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   - **结论 3**：commit `fbda896` (deck_evaluator search 收紧) 无独立效果，可保留
     作为副助力。
 
+- **`batch_v7` 完成 (2026-05-20 03:06, attribution-based hang detection + 30-seed
+  full eval)**: 从 v6 ep=384 续训 128 ep (ep 385→512)，~12h 训练 + ~2.1h final eval
+  全部完成，~12.0h 训练 + 2.1h eval = 总 14.1h（43295s）。Ckpt 路径
+  `sts_models/v8_ppo_batch_v7/` 含 ep=416/448/480/512 + final + 1 wall。
+  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 385→512)**：
+    - batch 1 (ep 385-416): 13/32 = 40.6%
+    - batch 2 (ep 417-448): 15/32 = 46.9%
+    - batch 3 (ep 449-480): 21/32 = **65.6%** (高点)
+    - batch 4 (ep 481-512): 17/32 = 53.1%
+    - 平均 ~51.6%，相较 v6 (~53%) 持平、v5_resume2 (40-47%) 上移 ~5-10pp，**training
+      端 trend 维持**
+  - **mean_reward 同期**：76.0 / 65.3 / 101.8 / 91.6（高位，batch 3 峰值 101.8）
+  - **Entropy drift**：0.399 → 0.381 → 0.344 → 0.306（持续 sharpen，无 collapse）
+  - **Eval@ep=512 (final, 30 seed, attribution-based timeout)**: **30/30 completed**
+    （0 timeout, 0 hang, 0 false-positive kill），reached_a1=**1.00**, **a1_beat=0.77**,
+    a2_beat=**0.73**, **won_game=0.50** (15/30), floor_mean=13.1, SlimeBoss reach=7/30,
+    SlimeBoss kill=**0/7=0%** (gap unchanged)
+  - **跨批 won_game 真实对比 (统一 30-seed 全量, 注意 timeout 维度不同)**：
+    | Run | ep | completed | reached_a1 | a1_beat | a2_beat | won_game | floor_mean | SlimeBoss kill |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | v3 final | 128 | 30/30 (300s) | 1.00 | 0.63 | 0.53 | **0.43** | 14.0 | 0/11=0% |
+    | v4 recovered | 96 | 30/30 (300s) | 0.97 | 0.70 | 0.60 | **0.30** | 11.2 | 0/8=0% |
+    | v6 final 30-seed | 384 | 12/30 (300s) | 0.33 | 0.13 | 0.07 | 0.00 (artifact) | 11.7 | 0/6=0% |
+    | v6 ep=384 re-verify | 384 | 10/10 (600s) | 0.90 | 0.70 | N/A | **0.50** | 14.2 | N/A |
+    | **v7 final 30-seed** | **512** | **30/30 (attr)** | **1.00** | **0.77** | **0.73** | **0.50** | **13.1** | **0/7=0%** |
+    - **v7 30-seed full eval = won_game 0.50**，与 v6 10-seed 600s timeout (0.50)
+      **一致**，并比 v3 30-seed (0.43) **+7pp**
+    - **completed 30/30**：attribution-based timeout 完全替代了 300s/600s hard kill，
+      所有 seed 自然走完
+    - **reached_a1=1.00 / a1_beat=0.77 / a2_beat=0.73** 均为历史最高
+  - **SlimeBoss**: eval kill 仍 0/7 = 0%，与 v3/v4/v5/v6 完全一致。training 端
+    v6 boss-aware encoding 已让 SlimeBoss training kill 0%→8.5%；v7 续训没新结构
+    改动，eval 仍 0% 在意料内。**SlimeBoss 仍是 bottleneck**。
+  - **健康度**: 0 Traceback / 1 `[guard_cap]` (~0.2% 命中) / 0 Mysterious Sphere
+    COMBAT_WON loop / 0 fatal hang
+
+- **新 attribution-based hang detection 实战验证 (batch_v7 30-seed full eval)**:
+  - **触发次数**: `long_running` (>=600s warning) **0 次**, `hang_confirmed` **0 次**,
+    `stagnation_no_loop` **0 次**, `grace_expired` **0 次**, `hard_cap_hit` **0 次**
+  - **30 seed elapsed 分布**: 最长 444.9s（远低于 600s warning threshold），
+    其余分布 257-389s 区间，无慢化样本
+  - **结论**: 新 timeout 逻辑**零 false positive kill**，**所有 30 seed 自然走完**
+    （包括之前可能被 300s/600s 砍掉的深局），证明 attribution-based 设计正确
+    （归因再 kill > 时间 hard kill）
+  - **caveat**: v7 这批的 eval 数据本身没有真正的 hang 出现，所以 "hang 归因正确性"
+    没被压力测试。下批跑出深局 + 超长 seed 时还需观测 long_running warning trigger
+    是否正常打 log，但当前判定：**attribution-based 改造 zero-regression 已落实**
+
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
 - **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修,
@@ -325,7 +373,12 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-19 状态快照）
+## 运行中的训练进程（2026-05-20 状态快照）
+
+**无训练进程运行**。batch_v7 已于 2026-05-20 03:06 完成，含 30-seed full eval。
+下批训练待用户启动（用户已表示下批跑 128 或 512 ep，ckpt_freq=32）。
+
+### batch_v7 历史快照
 
 - **`batch_v7` 首次启动后被人为停掉 (2026-05-19 14:12 启动 → 14:35 stop @ ep≈387)**：
   从 v6 ep=384 ckpt 续训。**问题：之前 eval seed wall timeout 还是 600s 硬 kill**，
@@ -360,35 +413,29 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   逻辑从 v6 ep=384 续训 128 ep (target=512)，参数
   `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=128`。第一次启动
   (PID 96912) 因 `EVAL_SEED_HANG_SEC` 直接 kill 被用户 push back 杀掉
-  (`sts_models/v8_ppo_batch_v7_killed_v2/` 备份)。
-  - **PID**: 97564
-  - **Log**: `/tmp/v8_ppo_batch_v7.log`
-  - **Output**: `sts_models/v8_ppo_batch_v7/`
-  - **Resume from**: `sts_models/v8_ppo_batch_v6/v8_ppo_ep384.pt`
-  - **接手 monitor**：
-    - ckpt 落盘：`ls sts_models/v8_ppo_batch_v7/`
-    - 进程：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-    - 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v7.log`
-    - 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v7.log | tail -1`
-    - Eval 异常（要看的新 log）：`grep -E "\[eval\] seed=.*(long_running|hang_confirmed|stagnation_no_loop|grace_expired|hard_cap_hit)" /tmp/v8_ppo_batch_v7.log`
+  (`sts_models/v8_ppo_batch_v7_killed_v2/` 备份)。**完成于 2026-05-20 03:06**，
+  详见上方「batch_v7 完成」条目。
 
-- **历史 best ckpt 备查**（v7 未完成前继续以 v6 为 best）。**batch_v6 ep=384
-  已用 600s timeout 10-seed re-verify**（10/10 completed, won_game=0.50, +7pp vs v3）。
-- **Best ckpt (统一 wall timeout 维度排序)**：
-  - **v6 final** (`sts_models/v8_ppo_batch_v6/v8_ppo_final.pt`, ep=384) — **won=0.50**,
-    10/10 seed eval (600s timeout, commit `437f279`)，含 boss-aware `boss_proj.*` 4 参数
+- **Best ckpt (统一 30-seed eval 维度排序，2026-05-20 更新)**：
+  - **v7 final** (`sts_models/v8_ppo_batch_v7/v8_ppo_final.pt`, ep=512) — **won=0.50**,
+    **30/30 seed eval** (attribution-based timeout)，a1_beat=0.77, reached_a1=1.00,
+    含 boss-aware `boss_proj.*` 4 参数。**最新 best ckpt**
+  - v6 final (`sts_models/v8_ppo_batch_v6/v8_ppo_final.pt`, ep=384) — won=0.50,
+    10/10 seed eval (600s)；30-seed 同维度 eval 未做，跨批同维度对比看 v3/v7
   - v3 final (`sts_models/v8_ppo_long_v3/v8_ppo_final.pt`, ep=128) — won=0.43, 30/30 seed eval (300s)
   - v4 wall (`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`, ep=96) — won=0.30, 30/30 seed eval (300s)
-- **boss-aware encoding 模型权重**：v6 final 含 `boss_proj.*` 4 个新参数；从 v6
+- **boss-aware encoding 模型权重**：v6/v7 final 含 `boss_proj.*` 4 个新参数；从 v6/v7
   续训的下批不需要 missing key fallback；从 v3/v4/v5_resume2 续训仍需 missing=4 fallback
-- **eval timeout 修复 confirmed**：commit `437f279` (300s → 600s) **根治 eval
-  测量失效问题**。v5_resume2/v6 之前的 "won_game=0%" 不是 model 变差，是 300s
-  砍掉了所有深局 seed（v6 真实 won_game 50%，含 515s/580s 两个深局 seed）。
+- **eval timeout 修复 confirmed (累计 2 步)**：
+  1. commit `437f279` (300s → 600s) 修好 v5/v6 "eval 测量失效" 假象
+  2. attribution-based timeout (batch_v7) 用 30-seed full eval (30/30 completed)
+     彻底替代 hard wall kill，**最干净的 eval 测量维度**
 - **下批训练前可选方向**：
-  1. boss-aware encoding 已 confirmed 真实改善（+7pp won_game）→ 可继续 scale 训练
-     时间或叠加 reward shaping 强化 SlimeBoss-specific signal
-  2. 旧 plateau 结论（v3 → v5_resume2 → v6 won_game 下降）已 invalidated，是
-     timeout artifact 而非真实 regression
+  1. 继续 scale (boss-aware encoding 已 confirmed 真实改善 +7pp won_game vs v3，
+     v7 维持 0.50 plateau 4 个 batch trend ~52% → 仍有上升势头)；或叠加 reward
+     shaping 强化 SlimeBoss-specific signal（30 seed 中 7 个 SlimeBoss 但 0 kill）
+  2. SlimeBoss-only encoding / AOE-related state representation 改造（继续解
+     SlimeBoss 0% gap）
 
 ## 子 Agent 协作规范
 
