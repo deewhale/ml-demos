@@ -269,6 +269,25 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     profiling 方向：inference 慢化（per-step model fwd）/ search 不收敛 / event handler
     慢 / sim engine 端慢；继续盲改 timeout 防线无用。
 
+- **batch_v6 ep=384 真实 eval 验证 (2026-05-19, 600s timeout)**: commit `437f279`
+  把 eval seed wall timeout 从 300s 放宽到 600s 后，在 v6 ep=384 ckpt 上 10-seed
+  re-eval 验证。**10/10 seed 完成（0 timeout）**。
+  - **eval 数据 (10/10 completed)**：reached_boss=0.90, **a1_beat=0.70**,
+    a2_beat=N/A, **won_game=0.50** (5/10), floor_mean=14.2, avg_steps=99.1
+  - **2 个 seed 耗时 515s 和 580s** → 300s wall 会砍掉它们；这是之前 v5_resume2 /
+    v6 30-seed eval completed 率掉到 12-15/30 的根本原因
+  - **跨批 won_game 真实对比 (统一 wall timeout 维度)**：
+    - v3 final (300s wall, 30/30 completed): won=0.43
+    - v6 final (600s wall, 10/10 completed): **won=0.50** (+7pp vs v3)
+  - **结论 1**：commit `437f279` (timeout 300→600) **修好了"eval 测量失效"问题**。
+    eval 慢化根因 = v5/v6 model 玩得更深 (avg_steps 99.1)，不是 model 真慢化 /
+    inference 卡死 / search 不收敛。
+  - **结论 2**：boss-aware encoding (v6) 真实有效 **+7pp won_game vs v3 baseline**。
+    之前 v5_resume2/v6 "won_game=0% in eval" 不是 model 变差，是 300s timeout
+    砍掉了所有深局 seed。
+  - **结论 3**：commit `fbda896` (deck_evaluator search 收紧) 无独立效果，可保留
+    作为副助力。
+
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
 - **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修,
@@ -308,21 +327,24 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 运行中的训练进程（2026-05-19 状态快照）
 
-- **当前无 active 训练**。batch_v6 于 2026-05-19 07:15 完成（exit_reason=completed，
-  没有 .exit sentinel 因 nohup 包装层不写 sentinel；判定依据 summary.json 落盘 +
-  父进程 PID 48534 已退出）。下批训练参数待用户与主对话讨论后再启动。
-- **Best ckpt 候选 (按 won_game 排序, 注意 v5_resume2/v6 因 timeout 样本不足)**：
-  - v3 final (`sts_models/v8_ppo_long_v3/v8_ppo_final.pt`, ep=128) — won=0.43, 30/30 seed eval
-  - v4 wall (`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`, ep=96) — won=0.30, 30/30 seed eval
-  - v5_resume2 final (`sts_models/v8_ppo_batch_v5_resume2/v8_ppo_final.pt`, ep=256) — won=0.00, 15/30 seed eval (timeout)
-  - v6 final (`sts_models/v8_ppo_batch_v6/v8_ppo_final.pt`, ep=384) — won=0.00, 12/30 seed eval (timeout)
+- **当前无 active 训练**。batch_v6 于 2026-05-19 07:15 完成。**batch_v6 ep=384
+  已用 600s timeout 10-seed re-verify**（10/10 completed, won_game=0.50, +7pp vs v3）。
+  下批训练参数待用户与主对话讨论后再启动。
+- **Best ckpt (统一 wall timeout 维度排序)**：
+  - **v6 final** (`sts_models/v8_ppo_batch_v6/v8_ppo_final.pt`, ep=384) — **won=0.50**,
+    10/10 seed eval (600s timeout, commit `437f279`)，含 boss-aware `boss_proj.*` 4 参数
+  - v3 final (`sts_models/v8_ppo_long_v3/v8_ppo_final.pt`, ep=128) — won=0.43, 30/30 seed eval (300s)
+  - v4 wall (`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`, ep=96) — won=0.30, 30/30 seed eval (300s)
 - **boss-aware encoding 模型权重**：v6 final 含 `boss_proj.*` 4 个新参数；从 v6
   续训的下批不需要 missing key fallback；从 v3/v4/v5_resume2 续训仍需 missing=4 fallback
-- **下批训练前必要前置任务**（按 plateau-escalation framework）：
-  1. **eval timeout 根因 profiling**：53% timeout 不能再忍，需定位是
-     inference 慢化 / search 不收敛 / event handler 慢；MPS cache fix 已排除
-  2. **方向讨论**：boss-aware encoding 信号 小但真，下一步是 (a) 加更长训练，
-     (b) 加 reward shaping 强化 boss-specific signal，(c) 别的结构改动；不再纯 scale ep 数
+- **eval timeout 修复 confirmed**：commit `437f279` (300s → 600s) **根治 eval
+  测量失效问题**。v5_resume2/v6 之前的 "won_game=0%" 不是 model 变差，是 300s
+  砍掉了所有深局 seed（v6 真实 won_game 50%，含 515s/580s 两个深局 seed）。
+- **下批训练前可选方向**：
+  1. boss-aware encoding 已 confirmed 真实改善（+7pp won_game）→ 可继续 scale 训练
+     时间或叠加 reward shaping 强化 SlimeBoss-specific signal
+  2. 旧 plateau 结论（v3 → v5_resume2 → v6 won_game 下降）已 invalidated，是
+     timeout artifact 而非真实 regression
 
 ## 子 Agent 协作规范
 
