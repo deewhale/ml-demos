@@ -229,14 +229,18 @@ def run_eval(
     boss_reach_counts: Dict[str, int] = {}
     boss_kill_counts: Dict[str, int] = {}
 
-    # 单 seed wall-clock timeout：超过 600s 视为卡死，log + 跳过，让其他 seed 继续
-    # 用 thread + join(timeout) 实现：collect_rollout 是 CPU-bound + 内部循环不响应
-    # KeyboardInterrupt，无法可靠强制 abort；超时后让 background thread 继续跑（隔离），
-    # 主线程跳到下一个 seed，保证整 eval 不被单 seed 拖死。
-    # 2026-05-13 300s → 600s：v5/v6 model 玩得更深，单局耗时上限超 300s；deck_evaluator
-    # search budget 收紧 (commit fbda896) 没解决 timeout，推断不是 search 慢化，
-    # 而是 eval seed wall budget 本身太紧。
-    EVAL_SEED_TIMEOUT_SEC = 600.0
+    # ----- 单 seed 超时策略（2026-05-19 重做：从 hard kill 改成 stagnation-based）-----
+    # 旧逻辑：300s/600s 硬 kill，把所有深局（玩到 act3+ 通关线）误杀，扼杀强模型的 eval 信号。
+    # 新逻辑：
+    #   - EVAL_SEED_LONG_WARN_SEC=600s：单 seed 跑了 10min 还没结束 → log warning（不 kill）
+    #   - EVAL_SEED_HANG_SEC=300s：观察到 progress 信号停滞 5min → 判定卡死 → 终止 seed
+    #   - EVAL_SEED_HARD_CAP_SEC=3600s：极端兜底，防止 progress 信号误判导致 seed 永跑
+    # Progress 信号定义：env.runner.run_state 里 (floor, act, screen_type) 的 tuple，
+    # 变化即视为有进度；env 内部 phase-transition loop / combat turn 都会更新这几个字段。
+    EVAL_SEED_LONG_WARN_SEC = 600.0
+    EVAL_SEED_HANG_SEC = 300.0
+    EVAL_SEED_HARD_CAP_SEC = 3600.0
+    POLL_INTERVAL_SEC = 5.0  # 主线程轮询间隔
 
     # ---- Fix C: eval 前重建 deck_evaluator pool（防 worker 累积慢化）----
     try:
@@ -268,19 +272,99 @@ def run_eval(
 
         t = threading.Thread(target=_run_rollout, daemon=True)
         t.start()
-        t.join(timeout=EVAL_SEED_TIMEOUT_SEC)
+
+        # ---- Progress 监控 loop ----
+        # 每 POLL_INTERVAL_SEC 短 join 一次；读 env.runner 的 (floor, act, screen_type)
+        # 当作 progress signal；信号变化 → 重置 last_progress_ts。
+        # 触发 long_running warning（一次性）+ hang_detected kill + hard_cap kill。
+        def _read_progress_signal() -> tuple:
+            """从 env 读一个 progress tuple；任何读失败返回 ('?',)。"""
+            try:
+                runner = env.runner
+                if runner is None:
+                    return ("no_runner",)
+                rs = getattr(runner, "run_state", None)
+                if rs is None:
+                    return ("no_run_state",)
+                floor = int(getattr(rs, "floor", 0) or 0)
+                act = int(getattr(rs, "act", 1) or 1)
+                screen = str(getattr(rs, "screen_type", "") or "")
+                # phase 用 env 自己暴露的（如果有）
+                phase = str(getattr(env, "_last_phase", "") or "")
+                # combat 内：用 enemies 数量 + 玩家 hp 当 sub-progress（防战斗超时被误判 hang）
+                player_hp = int(getattr(rs, "current_hp", 0) or 0)
+                enemies_t = tuple(
+                    sorted(
+                        (e.monster_id, int(e.current_hp))
+                        for e in (getattr(rs, "monsters_alive", []) or [])
+                    )
+                ) if hasattr(rs, "monsters_alive") else ()
+                return (floor, act, screen, phase, player_hp, enemies_t)
+            except Exception:  # noqa: BLE001
+                return ("read_err",)
+
+        seed_start_ts = time.time()
+        last_progress_ts = seed_start_ts
+        last_progress_sig = _read_progress_signal()
+        long_warning_fired = False
+        kill_reason: Optional[str] = None
+
+        while t.is_alive():
+            t.join(timeout=POLL_INTERVAL_SEC)
+            if not t.is_alive():
+                break
+
+            now = time.time()
+            elapsed = now - seed_start_ts
+
+            # 读 progress 信号
+            cur_sig = _read_progress_signal()
+            if cur_sig != last_progress_sig:
+                last_progress_sig = cur_sig
+                last_progress_ts = now
+            stagnation = now - last_progress_ts
+
+            # 600s elapsed warning（一次性）
+            if not long_warning_fired and elapsed >= EVAL_SEED_LONG_WARN_SEC:
+                long_warning_fired = True
+                floor_now = cur_sig[0] if isinstance(cur_sig[0], int) else "?"
+                act_now = cur_sig[1] if len(cur_sig) > 1 and isinstance(cur_sig[1], int) else "?"
+                logger.warning(
+                    "[eval] seed=%d long_running elapsed=%.0fs floor=%s act=%s "
+                    "(not kill—deep run, still progressing)",
+                    seed, elapsed, floor_now, act_now,
+                )
+
+            # Hang detection（progress 停滞 EVAL_SEED_HANG_SEC）
+            if stagnation >= EVAL_SEED_HANG_SEC:
+                floor_now = cur_sig[0] if isinstance(cur_sig[0], int) else "?"
+                act_now = cur_sig[1] if len(cur_sig) > 1 and isinstance(cur_sig[1], int) else "?"
+                logger.warning(
+                    "[eval] seed=%d hang_detected last_log_age=%.0fs elapsed=%.0fs "
+                    "floor=%s act=%s sig=%r — terminating seed (bg thread leaked)",
+                    seed, stagnation, elapsed, floor_now, act_now, cur_sig,
+                )
+                kill_reason = "hang"
+                break
+
+            # 极硬上限
+            if elapsed >= EVAL_SEED_HARD_CAP_SEC:
+                logger.warning(
+                    "[eval] seed=%d hard_cap_hit elapsed=%.0fs (>%.0fs) — terminating seed "
+                    "(bg thread leaked)",
+                    seed, elapsed, EVAL_SEED_HARD_CAP_SEC,
+                )
+                kill_reason = "hard_cap"
+                break
+
         if t.is_alive():
-            logger.warning(
-                "[eval] seed=%d timeout aborted (>%.0fs wall) — skipping (bg thread leaked)",
-                seed, EVAL_SEED_TIMEOUT_SEC,
-            )
-            # ---- Fix B + D: 即便 timeout 也清 cache + 打出口 mem log ----
+            # Hang / hard_cap：放弃 thread，跳到下一个 seed（与旧实现一致，thread 隔离 leak）
             if torch.backends.mps.is_available():
                 try:
                     torch.mps.empty_cache()
                 except Exception:  # noqa: BLE001
                     pass
-            _log_eval_mem("timeout", seed)
+            _log_eval_mem(f"abort_{kill_reason}", seed)
             continue
         if "exc" in exc_holder:
             e = exc_holder["exc"]

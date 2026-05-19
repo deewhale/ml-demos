@@ -327,21 +327,35 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 运行中的训练进程（2026-05-19 状态快照）
 
-- **`batch_v7` 启动 (2026-05-19 14:12)**: 从 v6 ep=384 ckpt 续训 128 ep（target=512），
-  参数 `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=128`。
-  - **PID**: 95886（nohup 子进程在父 PID 下）
-  - **Log**: `/tmp/v8_ppo_batch_v7.log` 全程 append
+- **`batch_v7` 首次启动后被人为停掉 (2026-05-19 14:12 启动 → 14:35 stop @ ep≈387)**：
+  从 v6 ep=384 ckpt 续训。**问题：之前 eval seed wall timeout 还是 600s 硬 kill**，
+  会粗暴砍掉所有深局（v6 已观测到 515s/580s 的深局 seed），eval 信号噪声大。
+  用户 push back：「600s 应该是警告（检查是否死循环），不应粗暴 kill 深局」。
+  Killed 后改 timeout 逻辑（见下条），重启 batch_v7。
+- **eval seed timeout 改造 (2026-05-19, 同日)**：
+  `tools/v8_ppo_train.py` 中 `run_eval` 的 wall hard kill 改成 stagnation-based。
+  - 移除单 seed wall hard kill（之前 300s → 600s）
+  - 加 `EVAL_SEED_LONG_WARN_SEC=600s` warning（一次性 log，不 kill）：
+    `[eval] seed=X long_running elapsed=Xs floor=Y act=Z`
+  - 加 `EVAL_SEED_HANG_SEC=300s` log-stagnation 检测：
+    progress signal (env.runner 的 `(floor, act, screen_type, phase, hp, enemies)` tuple)
+    停滞 300s → 判定卡死，终止 seed（bg thread leak 与旧实现一致）+
+    log `[eval] seed=X hang_detected last_log_age=Xs`
+  - 加 `EVAL_SEED_HARD_CAP_SEC=3600s` 极硬上限作 catch-all
+  - 主线程 5s 轮询读 progress signal，progress 变化 → 重置 stagnation 计时
+  - **Smoke validated**: 0 Traceback, 4 seed (smoke 短局)，0 warn/hang/cap 触发
+- **`batch_v7` 重启 (2026-05-19 14:47)**：用新 timeout 逻辑从 v6 ep=384 续训 128 ep
+  (target=512)，参数 `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=128`。
+  - **PID**: 96912
+  - **Log**: `/tmp/v8_ppo_batch_v7.log`
   - **Output**: `sts_models/v8_ppo_batch_v7/`
   - **Resume from**: `sts_models/v8_ppo_batch_v6/v8_ppo_ep384.pt`
-    （v6 won_game=50%, a1_beat=70% 已 600s eval 验证）
-  - **目的**：验证 boss-aware encoding 配合更多训练是否持续 +pp，尤其 SlimeBoss
-    训练侧 8.5% → 更高的趋势
-  - **ETA**：~13-15h，预期 2026-05-20 凌晨 02-04 点完成训练 + final eval
   - **接手 monitor**：
     - ckpt 落盘：`ls sts_models/v8_ppo_batch_v7/`
     - 进程：`ps -ef | grep v8_ppo_train.py | grep -v grep`
     - 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v7.log`
     - 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v7.log | tail -1`
+    - Eval 异常（要看的新 log）：`grep -E "\[eval\] seed=.*(long_running|hang_detected|hard_cap_hit)" /tmp/v8_ppo_batch_v7.log`
 
 - **历史 best ckpt 备查**（v7 未完成前继续以 v6 为 best）。**batch_v6 ep=384
   已用 600s timeout 10-seed re-verify**（10/10 completed, won_game=0.50, +7pp vs v3）。
