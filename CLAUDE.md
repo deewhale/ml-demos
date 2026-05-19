@@ -327,9 +327,24 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 运行中的训练进程（2026-05-19 状态快照）
 
-- **当前无 active 训练**。batch_v6 于 2026-05-19 07:15 完成。**batch_v6 ep=384
+- **`batch_v7` 启动 (2026-05-19 14:12)**: 从 v6 ep=384 ckpt 续训 128 ep（target=512），
+  参数 `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=128`。
+  - **PID**: 95886（nohup 子进程在父 PID 下）
+  - **Log**: `/tmp/v8_ppo_batch_v7.log` 全程 append
+  - **Output**: `sts_models/v8_ppo_batch_v7/`
+  - **Resume from**: `sts_models/v8_ppo_batch_v6/v8_ppo_ep384.pt`
+    （v6 won_game=50%, a1_beat=70% 已 600s eval 验证）
+  - **目的**：验证 boss-aware encoding 配合更多训练是否持续 +pp，尤其 SlimeBoss
+    训练侧 8.5% → 更高的趋势
+  - **ETA**：~13-15h，预期 2026-05-20 凌晨 02-04 点完成训练 + final eval
+  - **接手 monitor**：
+    - ckpt 落盘：`ls sts_models/v8_ppo_batch_v7/`
+    - 进程：`ps -ef | grep v8_ppo_train.py | grep -v grep`
+    - 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v7.log`
+    - 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v7.log | tail -1`
+
+- **历史 best ckpt 备查**（v7 未完成前继续以 v6 为 best）。**batch_v6 ep=384
   已用 600s timeout 10-seed re-verify**（10/10 completed, won_game=0.50, +7pp vs v3）。
-  下批训练参数待用户与主对话讨论后再启动。
 - **Best ckpt (统一 wall timeout 维度排序)**：
   - **v6 final** (`sts_models/v8_ppo_batch_v6/v8_ppo_final.pt`, ep=384) — **won=0.50**,
     10/10 seed eval (600s timeout, commit `437f279`)，含 boss-aware `boss_proj.*` 4 参数
