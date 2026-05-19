@@ -337,16 +337,31 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   - 移除单 seed wall hard kill（之前 300s → 600s）
   - 加 `EVAL_SEED_LONG_WARN_SEC=600s` warning（一次性 log，不 kill）：
     `[eval] seed=X long_running elapsed=Xs floor=Y act=Z`
-  - 加 `EVAL_SEED_HANG_SEC=300s` log-stagnation 检测：
-    progress signal (env.runner 的 `(floor, act, screen_type, phase, hp, enemies)` tuple)
-    停滞 300s → 判定卡死，终止 seed（bg thread leak 与旧实现一致）+
-    log `[eval] seed=X hang_detected last_log_age=Xs`
   - 加 `EVAL_SEED_HARD_CAP_SEC=3600s` 极硬上限作 catch-all
   - 主线程 5s 轮询读 progress signal，progress 变化 → 重置 stagnation 计时
-  - **Smoke validated**: 0 Traceback, 4 seed (smoke 短局)，0 warn/hang/cap 触发
-- **`batch_v7` 重启 (2026-05-19 14:47)**：用新 timeout 逻辑从 v6 ep=384 续训 128 ep
-  (target=512)，参数 `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=128`。
-  - **PID**: 96912
+- **eval hang detection 加归因 (2026-05-19, 同日，二次迭代)**：
+  user push back：「stagnation 5min 不一定是死循环（可能 PPO 内部慢），要先归因再 kill」。
+  - 删 `EVAL_SEED_HANG_SEC` 直接 kill，改成 `EVAL_SEED_STAGNATION_SEC=300s` 触发归因
+  - polling loop 维护 3 个 deque（无需 hook env，靠 env 已有诊断字段）：
+    - `event_id_history` (maxlen=50)：取 `env._last_event_id`
+    - `combat_enemies_history` (maxlen=20)：取 progress signal tuple 的 enemies 项
+    - `action_history` (maxlen=50)：取 `env._last_action_repr`
+  - 归因 (`_classify_hang_pattern`)：
+    - 同 event_id 出现 >= 30 次 → `event_loop`
+    - 同 combat enemies 连续 >= 5 次 → `combat_hang`
+    - 最近 50 action 全同一 → `action_mode_collapse`
+  - 命中 → log `[eval] seed=X hang_confirmed type=Y ...` → kill seed
+  - 未命中 → log `[eval] seed=X stagnation_no_loop dump=...` → 给
+    `EVAL_SEED_GRACE_SEC=300s` 宽限，期间 progress 恢复则 reset；仍卡 →
+    `[eval] seed=X grace_expired ... terminating`
+  - **Smoke validated**: 0 Traceback, 4 ep × 2 eval-seed 全部 done，
+    无 stagnation 触发（smoke 太短）；attribution 单元测试 4/4 通过
+- **`batch_v7` 重启 (2026-05-19 15:05, 二次启动)**：用新 attribution-based timeout
+  逻辑从 v6 ep=384 续训 128 ep (target=512)，参数
+  `num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=128`。第一次启动
+  (PID 96912) 因 `EVAL_SEED_HANG_SEC` 直接 kill 被用户 push back 杀掉
+  (`sts_models/v8_ppo_batch_v7_killed_v2/` 备份)。
+  - **PID**: 97564
   - **Log**: `/tmp/v8_ppo_batch_v7.log`
   - **Output**: `sts_models/v8_ppo_batch_v7/`
   - **Resume from**: `sts_models/v8_ppo_batch_v6/v8_ppo_ep384.pt`
@@ -355,7 +370,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     - 进程：`ps -ef | grep v8_ppo_train.py | grep -v grep`
     - 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v7.log`
     - 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v7.log | tail -1`
-    - Eval 异常（要看的新 log）：`grep -E "\[eval\] seed=.*(long_running|hang_detected|hard_cap_hit)" /tmp/v8_ppo_batch_v7.log`
+    - Eval 异常（要看的新 log）：`grep -E "\[eval\] seed=.*(long_running|hang_confirmed|stagnation_no_loop|grace_expired|hard_cap_hit)" /tmp/v8_ppo_batch_v7.log`
 
 - **历史 best ckpt 备查**（v7 未完成前继续以 v6 为 best）。**batch_v6 ep=384
   已用 600s timeout 10-seed re-verify**（10/10 completed, won_game=0.50, +7pp vs v3）。

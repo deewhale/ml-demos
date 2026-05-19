@@ -29,9 +29,10 @@ import signal
 import sys
 import threading
 import time
+from collections import Counter, deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import torch
 
@@ -191,6 +192,107 @@ def _log_eval_mem(tag: str, seed: int) -> None:
         logger.info("[eval-mem] %s seed=%d %s", tag, seed, " ".join(parts))
 
 
+# ----- Eval stagnation attribution（2026-05-19 加）-----
+# 用户要求：log 停滞 5 min 不立即 kill，先归因（同 event/combat/action 反复）。
+# 命中 loop pattern → 真死循环 → kill；未命中 → 给 5 min grace；hard cap 3600s 兜底。
+#
+# 设计：在主线程 polling loop 中维护内存 deque（无需 hook env），每次 poll 读 env 暴露的
+#   - _last_event_id（最近 event_id；非 EVENT phase 时为 None / 不变）
+#   - _last_action_repr（最近一次 take_action 描述；env 内部已维护）
+#   - runner.run_state.monsters_alive（战斗内 enemies）
+# 与 polling 间隔（5s）对齐，poll 期间没新动作则同一个值会被重复 push，本身就是 mode collapse 信号。
+
+# 阈值（参考 docstring 里 user 要求）
+ATTR_EVENT_LOOP_THRESHOLD = 30          # 同 event_id 出现次数（event 死循环）
+ATTR_COMBAT_HANG_THRESHOLD = 5          # 同 enemies 连续出现（combat 没推进）
+ATTR_ACTION_COLLAPSE_THRESHOLD = 50     # 最近 50 个 action 全同一（mode collapse）
+
+
+def _classify_hang_pattern(
+    event_id_history: Deque[str],
+    combat_enemies_history: Deque[str],
+    action_history: Deque[str],
+) -> Tuple[Optional[str], str]:
+    """从 history deque 判定是否真死循环。
+
+    Returns:
+        (loop_type, detail): loop_type in {"event_loop", "combat_hang",
+            "action_mode_collapse"} or None（未命中）。detail 是一行汇总。
+    """
+    # 1) Event loop：同 event_id 出现 >= 阈值
+    if event_id_history:
+        ev_counter: Counter = Counter(event_id_history)
+        ev_top, ev_top_n = ev_counter.most_common(1)[0]
+        if ev_top and ev_top != "?" and ev_top_n >= ATTR_EVENT_LOOP_THRESHOLD:
+            return ("event_loop", f"event_id={ev_top} count={ev_top_n}/{len(event_id_history)}")
+
+    # 2) Combat hang：同 enemies 连续 >= 阈值 出现（最后 N 个全相同）
+    if len(combat_enemies_history) >= ATTR_COMBAT_HANG_THRESHOLD:
+        recent = list(combat_enemies_history)[-ATTR_COMBAT_HANG_THRESHOLD:]
+        # 过滤空（非战斗状态）
+        non_empty = [x for x in recent if x and x != "?"]
+        if len(non_empty) >= ATTR_COMBAT_HANG_THRESHOLD and len(set(non_empty)) == 1:
+            return ("combat_hang", f"enemies={non_empty[0]} repeated={len(non_empty)}")
+
+    # 3) Action mode collapse：最近 N 个 action 全同一
+    if len(action_history) >= ATTR_ACTION_COLLAPSE_THRESHOLD:
+        recent = list(action_history)[-ATTR_ACTION_COLLAPSE_THRESHOLD:]
+        non_empty = [x for x in recent if x]
+        if len(non_empty) >= ATTR_ACTION_COLLAPSE_THRESHOLD and len(set(non_empty)) == 1:
+            return ("action_mode_collapse", f"action={non_empty[0]!r} repeated={len(non_empty)}")
+
+    return (None, "")
+
+
+def _attribution_dump(
+    env: "V8Env",
+    event_id_history: Deque[str],
+    combat_enemies_history: Deque[str],
+    action_history: Deque[str],
+) -> str:
+    """从 env runner + history 拼一个 multi-line attribution dump。"""
+    lines: List[str] = []
+    try:
+        runner = env.runner
+        rs = getattr(runner, "run_state", None) if runner is not None else None
+        if rs is not None:
+            floor = int(getattr(rs, "floor", 0) or 0)
+            act = int(getattr(rs, "act", 1) or 1)
+            screen = str(getattr(rs, "screen_type", "") or "")
+            hp = int(getattr(rs, "current_hp", 0) or 0)
+            max_hp = int(getattr(rs, "max_hp", 0) or 0)
+            deck_size = len(getattr(rs, "deck", []) or [])
+            phase = str(getattr(env, "_last_phase", "") or "")
+            enemies = [
+                (e.monster_id, int(e.current_hp))
+                for e in (getattr(rs, "monsters_alive", []) or [])
+            ]
+            lines.append(
+                f"  runner: floor={floor} act={act} screen={screen} "
+                f"phase={phase} hp={hp}/{max_hp} deck_size={deck_size} enemies={enemies}"
+            )
+            lines.append(f"  env._last_event_id={getattr(env, '_last_event_id', None)!r}")
+        else:
+            lines.append("  runner: <unavailable>")
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"  runner: read_err {type(e).__name__}: {e}")
+
+    # History 统计
+    if event_id_history:
+        ev_counter: Counter = Counter(event_id_history)
+        top3 = ev_counter.most_common(3)
+        lines.append(f"  event_id_history len={len(event_id_history)} top3={top3}")
+    if combat_enemies_history:
+        en_counter: Counter = Counter(combat_enemies_history)
+        top3 = en_counter.most_common(3)
+        lines.append(f"  combat_enemies_history len={len(combat_enemies_history)} top3={top3}")
+    if action_history:
+        ac_counter: Counter = Counter(action_history)
+        top3 = ac_counter.most_common(3)
+        lines.append(f"  action_history len={len(action_history)} top3={top3}")
+    return "\n".join(lines)
+
+
 def run_eval(
     trainer: V8PPOTrainer,
     env: V8Env,
@@ -229,16 +331,22 @@ def run_eval(
     boss_reach_counts: Dict[str, int] = {}
     boss_kill_counts: Dict[str, int] = {}
 
-    # ----- 单 seed 超时策略（2026-05-19 重做：从 hard kill 改成 stagnation-based）-----
-    # 旧逻辑：300s/600s 硬 kill，把所有深局（玩到 act3+ 通关线）误杀，扼杀强模型的 eval 信号。
-    # 新逻辑：
+    # ----- 单 seed 超时策略（2026-05-19 重做 + 2026-05-19 加归因）-----
+    # 旧逻辑：300s/600s 硬 kill，把所有深局（玩到 act3+ 通关线）误杀。
+    # 中代：progress 停滞 5min → 直接 kill，但 user 反馈停滞不一定是死循环（可能 PPO 内部慢）。
+    # 新逻辑（带归因）：
     #   - EVAL_SEED_LONG_WARN_SEC=600s：单 seed 跑了 10min 还没结束 → log warning（不 kill）
-    #   - EVAL_SEED_HANG_SEC=300s：观察到 progress 信号停滞 5min → 判定卡死 → 终止 seed
+    #   - EVAL_SEED_STAGNATION_SEC=300s：progress 信号停滞 5min → 跑 attribution：
+    #       * 命中 loop pattern（event_loop / combat_hang / action_mode_collapse）
+    #         → [eval] hang_confirmed → kill
+    #       * 未命中 → [eval] stagnation_no_loop dump → 给 EVAL_SEED_GRACE_SEC 宽限
+    #   - EVAL_SEED_GRACE_SEC=300s：no_loop 后累计再等这么多 → 仍无 progress → kill (timeout)
     #   - EVAL_SEED_HARD_CAP_SEC=3600s：极端兜底，防止 progress 信号误判导致 seed 永跑
     # Progress 信号定义：env.runner.run_state 里 (floor, act, screen_type) 的 tuple，
     # 变化即视为有进度；env 内部 phase-transition loop / combat turn 都会更新这几个字段。
     EVAL_SEED_LONG_WARN_SEC = 600.0
-    EVAL_SEED_HANG_SEC = 300.0
+    EVAL_SEED_STAGNATION_SEC = 300.0
+    EVAL_SEED_GRACE_SEC = 300.0
     EVAL_SEED_HARD_CAP_SEC = 3600.0
     POLL_INTERVAL_SEC = 5.0  # 主线程轮询间隔
 
@@ -309,6 +417,17 @@ def run_eval(
         long_warning_fired = False
         kill_reason: Optional[str] = None
 
+        # ---- Attribution history（每次 poll 维护，stagnation 触发时分析）----
+        # 直接 push 当前 snapshot——同一个值反复 push 即代表 mode collapse / hang。
+        event_id_history: Deque[str] = deque(maxlen=50)
+        combat_enemies_history: Deque[str] = deque(maxlen=20)
+        action_history: Deque[str] = deque(maxlen=50)
+
+        # Grace 期相关：第一次 stagnation 触发后 dump、设置 grace_deadline；
+        # 之后只要 progress 重新推进就 reset；grace 内仍卡 → kill。
+        grace_deadline: Optional[float] = None
+        attribution_logged_once = False
+
         while t.is_alive():
             t.join(timeout=POLL_INTERVAL_SEC)
             if not t.is_alive():
@@ -322,7 +441,33 @@ def run_eval(
             if cur_sig != last_progress_sig:
                 last_progress_sig = cur_sig
                 last_progress_ts = now
+                # progress 重新推进 → 清 grace（之前归因为 no_loop，现在恢复了）
+                if grace_deadline is not None:
+                    logger.info(
+                        "[eval] seed=%d grace_recovered progress resumed elapsed=%.0fs",
+                        seed, elapsed,
+                    )
+                    grace_deadline = None
+                    attribution_logged_once = False
             stagnation = now - last_progress_ts
+
+            # ---- 维护 attribution history ----
+            # event_id：env 暴露的 _last_event_id；非 EVENT phase 时为 None
+            ev_id = getattr(env, "_last_event_id", None)
+            event_id_history.append(str(ev_id) if ev_id else "")
+            # combat enemies：从 cur_sig 取（tuple 在最后一位）
+            enemies_repr = ""
+            if isinstance(cur_sig, tuple) and len(cur_sig) >= 6:
+                try:
+                    enemies_t = cur_sig[5]
+                    if enemies_t:
+                        enemies_repr = repr(enemies_t)
+                except Exception:  # noqa: BLE001
+                    pass
+            combat_enemies_history.append(enemies_repr)
+            # action：env 暴露的 _last_action_repr（最后一次 take_action）
+            action_repr = str(getattr(env, "_last_action_repr", "") or "")
+            action_history.append(action_repr)
 
             # 600s elapsed warning（一次性）
             if not long_warning_fired and elapsed >= EVAL_SEED_LONG_WARN_SEC:
@@ -335,17 +480,50 @@ def run_eval(
                     seed, elapsed, floor_now, act_now,
                 )
 
-            # Hang detection（progress 停滞 EVAL_SEED_HANG_SEC）
-            if stagnation >= EVAL_SEED_HANG_SEC:
+            # ---- Stagnation handling with attribution ----
+            if stagnation >= EVAL_SEED_STAGNATION_SEC:
                 floor_now = cur_sig[0] if isinstance(cur_sig[0], int) else "?"
                 act_now = cur_sig[1] if len(cur_sig) > 1 and isinstance(cur_sig[1], int) else "?"
-                logger.warning(
-                    "[eval] seed=%d hang_detected last_log_age=%.0fs elapsed=%.0fs "
-                    "floor=%s act=%s sig=%r — terminating seed (bg thread leaked)",
-                    seed, stagnation, elapsed, floor_now, act_now, cur_sig,
+                loop_type, loop_detail = _classify_hang_pattern(
+                    event_id_history, combat_enemies_history, action_history,
                 )
-                kill_reason = "hang"
-                break
+                if loop_type is not None:
+                    # 真死循环 → kill
+                    dump = _attribution_dump(
+                        env, event_id_history, combat_enemies_history, action_history,
+                    )
+                    logger.warning(
+                        "[eval] seed=%d hang_confirmed type=%s %s "
+                        "(stagnation=%.0fs elapsed=%.0fs floor=%s act=%s)\n%s",
+                        seed, loop_type, loop_detail, stagnation, elapsed,
+                        floor_now, act_now, dump,
+                    )
+                    kill_reason = f"hang_{loop_type}"
+                    break
+
+                # 未命中 loop → 归因为 no_loop，给 grace
+                if not attribution_logged_once:
+                    dump = _attribution_dump(
+                        env, event_id_history, combat_enemies_history, action_history,
+                    )
+                    logger.warning(
+                        "[eval] seed=%d stagnation_no_loop stagnation=%.0fs elapsed=%.0fs "
+                        "floor=%s act=%s — granting %.0fs grace\n%s",
+                        seed, stagnation, elapsed, floor_now, act_now,
+                        EVAL_SEED_GRACE_SEC, dump,
+                    )
+                    attribution_logged_once = True
+                    grace_deadline = now + EVAL_SEED_GRACE_SEC
+
+                # Grace 已到 → kill
+                if grace_deadline is not None and now >= grace_deadline:
+                    logger.warning(
+                        "[eval] seed=%d grace_expired stagnation=%.0fs elapsed=%.0fs "
+                        "floor=%s act=%s — terminating seed (bg thread leaked)",
+                        seed, stagnation, elapsed, floor_now, act_now,
+                    )
+                    kill_reason = "grace_expired"
+                    break
 
             # 极硬上限
             if elapsed >= EVAL_SEED_HARD_CAP_SEC:
