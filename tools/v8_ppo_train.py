@@ -229,11 +229,14 @@ def run_eval(
     boss_reach_counts: Dict[str, int] = {}
     boss_kill_counts: Dict[str, int] = {}
 
-    # 单 seed wall-clock timeout：超过 300s 视为卡死，log + 跳过，让其他 seed 继续
+    # 单 seed wall-clock timeout：超过 600s 视为卡死，log + 跳过，让其他 seed 继续
     # 用 thread + join(timeout) 实现：collect_rollout 是 CPU-bound + 内部循环不响应
     # KeyboardInterrupt，无法可靠强制 abort；超时后让 background thread 继续跑（隔离），
     # 主线程跳到下一个 seed，保证整 eval 不被单 seed 拖死。
-    EVAL_SEED_TIMEOUT_SEC = 300.0
+    # 2026-05-13 300s → 600s：v5/v6 model 玩得更深，单局耗时上限超 300s；deck_evaluator
+    # search budget 收紧 (commit fbda896) 没解决 timeout，推断不是 search 慢化，
+    # 而是 eval seed wall budget 本身太紧。
+    EVAL_SEED_TIMEOUT_SEC = 600.0
 
     # ---- Fix C: eval 前重建 deck_evaluator pool（防 worker 累积慢化）----
     try:
