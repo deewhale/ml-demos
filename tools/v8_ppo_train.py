@@ -661,6 +661,8 @@ _PARSER_DEFAULTS: Dict[str, Any] = {
     "eval_frequency": 100,
     "eval_seeds": 30,
     "checkpoint_frequency": 500,
+    "max_steps_per_episode": 1500,
+    "deck_eval_freq": 5,
 }
 
 
@@ -684,8 +686,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max_steps_per_episode",
         type=int,
-        default=None,
-        help="V8Env 单局最多 RL step 数；None 用 env 默认（5000）。smoke 会自动覆盖成 30。",
+        default=_PARSER_DEFAULTS["max_steps_per_episode"],
+        help="V8Env 单局最多 RL step 数（default=1500）；超时 force game_over 兜底"
+             "（深局拖太久会浪费 wall time，1500 step 足够覆盖正常深 run）。smoke 会自动覆盖成 30。",
+    )
+    parser.add_argument(
+        "--deck_eval_freq",
+        type=int,
+        default=_PARSER_DEFAULTS["deck_eval_freq"],
+        help="每 N 次 post-step evaluate_deck 才真跑一次，中间复用上次 deck_strength"
+             "（reward shaping signal 略微稀疏化，换 5-10%% 加速）。default=5。",
     )
     parser.add_argument(
         "--smoke",
@@ -725,7 +735,8 @@ def apply_smoke_overrides(args: argparse.Namespace, *, defaults: Optional[Dict[s
         args.eval_seeds = 2  # smoke eval 也只跑很少几个种子
     if _is_default("checkpoint_frequency"):
         args.checkpoint_frequency = 5
-    if args.max_steps_per_episode is None:
+    # smoke：max_steps_per_episode 强制 30（兼容 None 或仍是 default 1500 两种情况）
+    if args.max_steps_per_episode is None or _is_default("max_steps_per_episode"):
         args.max_steps_per_episode = 30
     if _is_default("output_dir"):
         smoke_root = _REPO_ROOT / "sts_models" / "v8_ppo_smoke"
@@ -792,6 +803,8 @@ def main() -> None:
     env_kwargs: Dict[str, Any] = {"combat_net_wrapper": wrapper}
     if args.max_steps_per_episode is not None:
         env_kwargs["max_steps_per_episode"] = int(args.max_steps_per_episode)
+    if args.deck_eval_freq is not None:
+        env_kwargs["deck_eval_freq"] = int(args.deck_eval_freq)
     env = V8Env(**env_kwargs)
 
     # 4) Trainer

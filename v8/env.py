@@ -357,6 +357,7 @@ class V8Env:
         max_steps_per_episode: int = DEFAULT_MAX_STEPS_PER_EPISODE,
         solver_budgets: Optional[Dict[str, Tuple[float, int, int]]] = None,
         combat_net_wrapper: Optional[Any] = None,
+        deck_eval_freq: int = 1,
     ):
         """V8Env 构造器。
 
@@ -364,6 +365,10 @@ class V8Env:
             combat_net_wrapper: 可选 V8CombatNetWrapper（让 model 在战斗 search
                 里参与 leaf 评估）。None 时 fallback 到原纯搜索（hand-rolled heuristic）。
                 设计原则：用户原话第 2 点"搜索+模型联合"，wrapper 是 hook。
+            deck_eval_freq: post-step evaluate_deck 的频率（每 N 次 post-step 才真跑一次，
+                中间复用上次 _prev_deck_strength）。默认 1（每次都跑，旧行为）。
+                初始 reset() 内的 evaluate_deck 不受影响（开局必须有 baseline）。
+                trainer 入口建议传 5：换 5-10% 加速代价是 reward shaping signal 略微稀疏。
         """
         self.character = character
         self.ascension = ascension
@@ -371,6 +376,9 @@ class V8Env:
         self.max_steps_per_episode = max_steps_per_episode
         self._solver_budgets = solver_budgets or SOLVER_BUDGETS
         self._combat_net_wrapper = combat_net_wrapper
+        self.deck_eval_freq = max(1, int(deck_eval_freq))
+        # 计数器：每次 post-step evaluate_deck 触发点 +1，% freq == 0 时真跑
+        self._post_step_eval_counter: int = 0
 
         # 每局重置的运行时状态
         self._runner: Optional[GameRunner] = None
@@ -498,6 +506,8 @@ class V8Env:
         self._event_enter_max_hp = 0
         self._event_enter_relics_count = 0
         self._event_choice_count.clear()
+        # deck_eval_freq 节流计数器：每局清零，与 episode 边界对齐
+        self._post_step_eval_counter = 0
         # perf 计数器在 reset 也清一遍（兼容 trainer 没调 reset_perf_counters 的情况）
         self.reset_perf_counters()
 
@@ -670,26 +680,45 @@ class V8Env:
         #   2. CARD_REWARDS phase 后 deck 可能变了（cache miss 自动重算）
         #   3. SHOP 后 deck 可能变了
         #   4. REST upgrade 后 deck 可能变了
-        # 简化：每次 phase 切到元决策 phase（非 COMBAT）都调一次 evaluate_deck，
-        # 内部 cache 命中重复 case，开销可控。
+        # 简化：每次 phase 切到元决策 phase（非 COMBAT）都尝试一次 evaluate_deck，
+        # 但被 deck_eval_freq 节流（每 N 次才真跑，中间复用 _prev_deck_strength），
+        # 内部 cache 命中重复 case 进一步压成本。
+        # next_state.deck_strength 总是给一个非 None 值（fallback prev），避免 model 端 None 分支。
         next_deck_strength: Optional[Dict[str, float]] = self._prev_deck_strength
         if not self._runner.game_over:
-            ed_t0 = time.time()
-            try:
-                next_deck_strength = evaluate_deck(
-                    deck=next_state.deck,
-                    relics=next_state.relics,
-                    hp=next_state.hp,
-                    max_hp=next_state.max_hp,
-                    act=next_state.act,
+            self._post_step_eval_counter += 1
+            should_eval = (self._post_step_eval_counter % self.deck_eval_freq) == 0
+            if should_eval:
+                ed_t0 = time.time()
+                try:
+                    next_deck_strength = evaluate_deck(
+                        deck=next_state.deck,
+                        relics=next_state.relics,
+                        hp=next_state.hp,
+                        max_hp=next_state.max_hp,
+                        act=next_state.act,
+                    )
+                    next_state.deck_strength = next_deck_strength
+                    info["deck_strength_evaluated"] = True
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("post-step evaluate_deck failed: %s: %s", type(e).__name__, e)
+                    next_state.deck_strength = self._prev_deck_strength
+                self.eval_deck_calls += 1
+                self.eval_deck_time_sec += time.time() - ed_t0
+                # [deck_eval] 日志：每次真跑一次 evaluate_deck 落一行（freq 限频后的实际触发点）
+                logger.info(
+                    "[deck_eval] ep=%s floor=%d act=%d post_step_counter=%d freq=%d",
+                    self._episode_idx,
+                    int(getattr(self._runner.run_state, "floor", 0) or 0),
+                    int(getattr(self._runner.run_state, "act", 1) or 1),
+                    self._post_step_eval_counter,
+                    self.deck_eval_freq,
                 )
-                next_state.deck_strength = next_deck_strength
-                info["deck_strength_evaluated"] = True
-            except Exception as e:  # noqa: BLE001
-                logger.warning("post-step evaluate_deck failed: %s: %s", type(e).__name__, e)
+            else:
+                # 节流跳过：复用 prev_deck_strength（保持 reward shaping 不污染、model 不见 None）
                 next_state.deck_strength = self._prev_deck_strength
-            self.eval_deck_calls += 1
-            self.eval_deck_time_sec += time.time() - ed_t0
+                info["deck_strength_evaluated"] = False
+                info["deck_strength_throttled"] = True
 
         # node_reward detect
         node_reward = _detect_node_reward(
