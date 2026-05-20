@@ -336,6 +336,29 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     没被压力测试。下批跑出深局 + 超长 seed 时还需观测 long_running warning trigger
     是否正常打 log，但当前判定：**attribution-based 改造 zero-regression 已落实**
 
+- **`batch_v8` 完成 (2026-05-20, 训练 trend up + 首次 hang_confirmed 实战触发)**:
+  从 v7 ep=512 续训 128 ep (ep 513→640)。Ckpt 路径 `sts_models/v8_ppo_batch_v8/`
+  含 ep=640 final。
+  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 513→640)**：
+    - batch 1: 53%
+    - batch 2: 59%
+    - batch 3: 59%
+    - batch 4: **72%** (末段大跃迁，历史新高)
+    - 平均 ~60.8%，相较 v7 (~51.6%) 上移 ~9pp，**training 端 trend 持续 up**
+  - **Eval@ep=640 (final, 30 seed, attribution-based timeout)**: 29/30 done + 1
+    `hang_confirmed` (action_mode_collapse)，**won_game=0.40** (12/30, vs v7 0.50 小幅
+    回落), reached_boss=**0.87**, **a1_boss_beat=0.60**, floor_mean=13.7
+  - **跨批 won_game 对比 (30-seed full eval)**：
+    - v3 final (ep=128): 0.43
+    - v6 re-verify (ep=384, 10 seed): 0.50
+    - v7 final (ep=512): **0.50**
+    - **v8 final (ep=640): 0.40** (vs v7 -10pp 小幅回落，training trend up 但 eval 没跟上)
+  - **首次 attribution-based hang_confirmed 实战触发 (1 次)**: 归因
+    `action_mode_collapse`，证明新 hang detection logic 在真实压力下能正确捕获
+    deterministic policy 卡死的 seed，**zero false-positive** 保持
+  - **健康度**: 30 seed eval 中 29 顺利完成 + 1 正确归因 hang，无 Traceback / 无
+    Mysterious Sphere COMBAT_WON loop
+
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
 - **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修,
