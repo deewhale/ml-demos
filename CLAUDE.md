@@ -398,22 +398,23 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 运行中的训练进程（2026-05-20 状态快照）
 
-- **进程**：`batch_v8` 训练在 nohup 下运行，PID 17222（2026-05-20 03:30:45 启动）
-- **日志文件**：`/tmp/v8_ppo_batch_v8.log` 全程 append
-- **Output 目录**：`sts_models/v8_ppo_batch_v8/`
-- **续训源**：`sts_models/v8_ppo_batch_v7/v8_ppo_ep512.pt`（won_game=50%, a1_beat=77%
-  verified, 30/30 completed）
-- **参数**：`num_episodes=640 batch_size=32 ckpt_freq=32 eval_freq=128`
-  （增量训 128 ep, ep 513→640）
-- **预期完成**：~13-15h 训练 + ~2h final eval = 2026-05-20 17:00 - 20:00
-- **目的**：验证 boss-aware encoding 续训是否继续 trend up（v6→v7 已 +7pp won_game）
+- **进程**：`batch_v9` 训练在 nohup 下运行，PID 39392（2026-05-20 15:49:16 启动）
+- **日志文件**：`/tmp/v8_ppo_batch_v9.log` 全程 append
+- **Output 目录**：`sts_models/v8_ppo_batch_v9/`
+- **续训源**：`sts_models/v8_ppo_batch_v8/v8_ppo_ep640.pt`（won_game=40%, training
+  trend 53/59/59/72% per-batch）
+- **参数**：`num_episodes=768 batch_size=32 ckpt_freq=32 eval_freq=128`
+  （增量训 128 ep, ep 641→768）
+- **预期完成**：~13-15h 训练 + ~2h final eval = 2026-05-21 06:00 - 09:00
+- **目的**：验证 v8 末段大跃迁 (batch 4 = 72%) 是否在续训后保持 / 进一步上扬；
+  观察 eval won_game 是否回到 v7 (50%) 之上
 - **下一步**：训练完成后跑 30-seed final eval（自动）+ metrics 分析
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v8/`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v9/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v8.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v8.log | tail -1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v9.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v9.log | tail -1`
 
 ### batch_v7 历史快照
 
