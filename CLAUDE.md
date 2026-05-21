@@ -512,26 +512,28 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-21 状态快照）
+## 运行中的训练进程（2026-05-22 状态快照）
 
-- **进程**：`batch_v12` 训练在 nohup 下运行，PID 89364（2026-05-21 20:54 启动）
-- **日志文件**：`/tmp/v8_ppo_batch_v12.log` 全程 append
-- **Output 目录**：`sts_models/v8_ppo_batch_v12/`
-- **续训源**：`sts_models/v8_ppo_batch_v11/v8_ppo_ep960.pt`（v11 ep=960 ckpt，
-  v11 真实训练 OK 但 parallel stats bug 让指标误报；详见 `batch_v11` 完成条目）
-- **参数**：`num_episodes=1088 batch_size=32 ckpt_freq=32 eval_freq=128`
-  （**默认 n_envs=1 serial**, 不传 `--n_envs` flag, 增量训 128 ep, ep 961→1088）
-- **本批关键**: v11 parallel stats bug 已修 (commit `b69a0bc`)。serial 模式
-  [heartbeat] / [perf] 本来就有真实 floor/beat_boss，本批是修复 + serial 后首跑。
-  parallel 实测反而慢，先 fallback n_envs=1，并行 infra 等 phase 2 重做。
-- **预期完成**：训练 ~6-8h + final eval ~1-2h
-- **下一步**：训练完成后跑 30-seed final eval（自动）+ metrics 分析
+- **进程**：`batch_v13` 训练在 nohup 下运行，PID 2327（2026-05-22 05:13 启动）
+- **日志文件**：`/tmp/v8_ppo_batch_v13.log` 全程 append
+- **Output 目录**：`sts_models/v8_ppo_batch_v13/`
+- **续训源**：`sts_models/v8_ppo_batch_v12/v8_ppo_final.pt`（v12 ep=1088 final ckpt，
+  v12 mid-eval@ep=1024 won_game=0.533 与 v9 历史最高持平；详见 `batch_v12` 完成条目）
+- **参数**：`num_episodes=1216 batch_size=32 ckpt_freq=32 eval_freq=128`
+  （**默认 n_envs=1 serial**, 不传 `--n_envs` flag, 增量训 128 ep, ep 1089→1216）
+- **本批关键**: v12 plateau ~50% per-batch trend 延续验证。v12 ep=1216 续训 trend
+  与 v12 后期 (50% / 53.1% / 46.9% / 50%) 对比 → 看 boss-aware encoding 是否还有
+  上升空间，或彻底 plateau 等结构改动。
+- **预期完成**：训练 ~7-8h + final eval ~1.5-2h（按 v12 27311s ≈ 7.59h 基线推）
+- **下一步**：训练完成后等 ep=1216 mid-eval（eval_freq=128，1216 % 128 = 0
+  应触发）+ metrics 分析。**caveat**：v12 因为 1088 % 128 = 64 ≠ 0 所以没 final
+  eval，下批 v13 1216 % 128 = 0 应能拿到 final eval
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v12/`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v13/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v12.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v12.log | tail -1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v13.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v13.log | tail -1`
 
 ### batch_v7 历史快照
 
