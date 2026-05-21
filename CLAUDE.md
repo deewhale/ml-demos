@@ -359,6 +359,44 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   - **健康度**: 30 seed eval 中 29 顺利完成 + 1 正确归因 hang，无 Traceback / 无
     Mysterious Sphere COMBAT_WON loop
 
+- **`batch_v9` 完成 (2026-05-21 02:44, training trend slight dip + eval won_game 历史最高)**:
+  从 v8 ep=640 续训 128 ep (ep 641→768)，~10.9h 训练 + ~2.4h final eval = 总 ~10.9h (39334s)。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v9/` 含 ep=672/704/736/768 final + 1 wall。
+  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 641→768)**：
+    - batch 1 (ep 641-672): 15/32 = 46.9%
+    - batch 2 (ep 673-704): 15/32 = 46.9%
+    - batch 3 (ep 705-736): 9/32 = 28.1% (dip)
+    - batch 4 (ep 737-768): 14/32 = 43.8%
+    - 平均 ~41.4%，相较 v8 (~60.8%) **回落 ~19pp**，**v8 末段 72% 跃迁未保持**
+  - **mean_reward 同期**：83.3 / 95.1 / 62.1 / 90.1（高位震荡）
+  - **Entropy drift**：0.208 → 0.213 → 0.211 → 0.217（极低位 stable，未继续 sharpen）
+  - **Eval@ep=768 (final, 30 seed, attribution-based timeout)**: **30/30 completed**
+    (1 long_running warning seed=10770 ~600s+ 未 kill，归因正确放过)，
+    reached_a1_boss=**1.00**, **a1_boss_beat=0.80**, a2_boss_beat=**0.73**,
+    **won_game=0.53** (16/30, **历史最高 +3pp vs v7**), floor_mean=14.6,
+    SlimeBoss reach=6/30, SlimeBoss kill=**0/6=0%** (gap unchanged)
+  - **跨批 won_game 完整对比 (30-seed full eval)**：
+    | Run | ep | completed | reached_a1 | a1_beat | a2_beat | won_game | floor_mean | SlimeBoss kill |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | v3 final | 128 | 30/30 (300s) | 1.00 | 0.63 | 0.53 | 0.43 | 14.0 | 0/11=0% |
+    | v4 recovered | 96 | 30/30 (300s) | 0.97 | 0.70 | 0.60 | 0.30 | 11.2 | 0/8=0% |
+    | v6 re-verify | 384 | 10/10 (600s) | 0.90 | 0.70 | N/A | 0.50 | 14.2 | N/A |
+    | v7 final | 512 | 30/30 (attr) | 1.00 | 0.77 | 0.73 | 0.50 | 13.1 | 0/7=0% |
+    | v8 final | 640 | 29/30 (attr) | 0.87 | 0.60 | N/A | 0.40 | 13.7 | N/A |
+    | **v9 final** | **768** | **30/30 (attr)** | **1.00** | **0.80** | **0.73** | **0.53** | **14.6** | **0/6=0%** |
+  - **关键发现**: training per-batch dip (60.8% → 41.4%) **同时** eval won_game 上升
+    (0.40 → 0.53)，training/eval 信号脱钩。training 端是 stochastic policy 采样，
+    eval 是 deterministic argmax；可能 v9 entropy 极低 (~0.21) 后 deterministic argmax
+    policy 收敛更稳，training noise 反而拉低
+  - **SlimeBoss**: eval kill 仍 **0/6 = 0%**，与 v3/v4/v5/v6/v7/v8 完全一致。
+    boss-aware encoding 在 eval 端**累计 5 个 run 仍 0 kill**，gap 未变
+  - **健康度**: 30 seed eval 中 30 全部 completed (含 1 个 long_running 600s+ 但
+    自然走完)，12 个 `[guard_cap]` (~1.5% / 768 ep, 正常范围), 0 Traceback,
+    0 Mysterious Sphere COMBAT_WON event loop bug
+  - **attribution-based hang detection 二次实战**: long_running warning 触发 1 次
+    (seed=10770 elapsed 601s floor=14 act=3)，归因为深局正常 progressing 未 kill，
+    最终该 seed 自然 done，**zero false-positive** 维持
+
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
 - **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修,
@@ -454,12 +492,14 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   (`sts_models/v8_ppo_batch_v7_killed_v2/` 备份)。**完成于 2026-05-20 03:06**，
   详见上方「batch_v7 完成」条目。
 
-- **Best ckpt (统一 30-seed eval 维度排序，2026-05-20 更新)**：
-  - **v7 final** (`sts_models/v8_ppo_batch_v7/v8_ppo_final.pt`, ep=512) — **won=0.50**,
-    **30/30 seed eval** (attribution-based timeout)，a1_beat=0.77, reached_a1=1.00,
-    含 boss-aware `boss_proj.*` 4 参数。**最新 best ckpt**
+- **Best ckpt (统一 30-seed eval 维度排序，2026-05-21 更新)**：
+  - **v9 final** (`sts_models/v8_ppo_batch_v9/v8_ppo_final.pt`, ep=768) — **won=0.53**,
+    **30/30 seed eval** (attribution-based timeout)，a1_beat=0.80, a2_beat=0.73,
+    reached_a1=1.00, floor_mean=14.6，含 boss-aware `boss_proj.*` 4 参数。**当前 best ckpt**
+  - v7 final (`sts_models/v8_ppo_batch_v7/v8_ppo_final.pt`, ep=512) — won=0.50,
+    30/30 seed eval (attr)，a1_beat=0.77, reached_a1=1.00
   - v6 final (`sts_models/v8_ppo_batch_v6/v8_ppo_final.pt`, ep=384) — won=0.50,
-    10/10 seed eval (600s)；30-seed 同维度 eval 未做，跨批同维度对比看 v3/v7
+    10/10 seed eval (600s)；30-seed 同维度 eval 未做
   - v3 final (`sts_models/v8_ppo_long_v3/v8_ppo_final.pt`, ep=128) — won=0.43, 30/30 seed eval (300s)
   - v4 wall (`sts_models/v8_ppo_long_v4/v8_ppo_wall_20260514_135748.pt`, ep=96) — won=0.30, 30/30 seed eval (300s)
 - **boss-aware encoding 模型权重**：v6/v7 final 含 `boss_proj.*` 4 个新参数；从 v6/v7
