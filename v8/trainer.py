@@ -126,6 +126,174 @@ class V8PPOTrainer:
     # ---------------------------------------------------------
 
     @torch.no_grad()
+    def collect_rollout_batched(
+        self,
+        parallel_env: Any,  # ParallelV8Env (duck typed to avoid circular import)
+        seeds: List[int],
+        deterministic: bool = False,
+    ) -> List[List[RolloutStep]]:
+        """并行收 N 局 episode 的 trajectory（每个 sub-env 一条）。
+
+        与 collect_rollout 相比：
+        - 主进程仍单 model forward（pointer-net 不同长度，不能 batch forward）
+        - per step 流程：
+            1) parallel_env.get_available_actions() → List[List[str]]  (n_envs)
+            2) 主进程 per-active-env 跑 model.forward 选 action_idx
+            3) parallel_env.step(action_idxs) → batched (states, rewards, dones, infos)
+            4) 已 done 的 env 标 inactive；step idx 给 inactive env 填 0（被 worker
+               忽略：worker 看 done state 不会再 step，但我们仍然要把 idx 占位以满足
+               broadcast 长度约束）
+            5) 等所有 N env 都 done → 收 batch 结束
+
+        ⚠️ 已 done 的 env 在并行 batched step 中也仍然会被发 cmd（占位 0）。
+        worker 端 V8Env 在已 done 状态下 step 行为：env 内 done 时 step 会返回 done=True
+        + reward=0；这不会污染 trajectory（我们在 active mask 内不记录这步）。
+        但还是有 cost。一种优化：把 active list 真正缩减后只 broadcast 子集；现行简单
+        实现先保正确性。
+
+        参数：
+            parallel_env: ParallelV8Env 实例，n_envs == len(seeds)
+            seeds: 每个 env 的 reset seed
+            deterministic: True=argmax, False=multinomial sample
+
+        返回：
+            List[List[RolloutStep]]，外层 len=n_envs，内层是每 env trajectory
+            （已 done 后不再 append）
+        """
+        n_envs = parallel_env.n_envs
+        if len(seeds) != n_envs:
+            raise ValueError(f"seeds len={len(seeds)} != n_envs={n_envs}")
+
+        was_training = self.model.training
+        self.model.eval()
+
+        forward_time_sec = 0.0
+        env_step_time_sec = 0.0
+
+        # reset_perf_counters 让 per-rollout 子进程统计干净
+        if hasattr(parallel_env, "reset_perf_counters"):
+            parallel_env.reset_perf_counters()
+
+        rollouts: List[List[RolloutStep]] = [[] for _ in range(n_envs)]
+        active = [True] * n_envs
+        states = parallel_env.reset(seeds)
+
+        max_iter = 100_000  # 兜底，避免 batched 死循环
+        it = 0
+        while any(active) and it < max_iter:
+            it += 1
+            acts_lists = parallel_env.get_available_actions()
+            assert len(acts_lists) == n_envs
+
+            action_idxs: List[int] = []
+            # 每个 active env 记下选了哪个 idx + log_prob + value 以便 step 后 push
+            per_env_decision: List[Optional[Dict[str, Any]]] = [None] * n_envs
+
+            for i in range(n_envs):
+                if not active[i]:
+                    # inactive env：发 placeholder 0；不记 decision
+                    action_idxs.append(0)
+                    continue
+
+                actions = acts_lists[i]
+                if not actions:
+                    # 没合法 action：mark inactive，期望 env.step 兜底 done
+                    logger.warning(
+                        "collect_rollout_batched: env-%d no actions at phase=%s, mark done",
+                        i, states[i].phase,
+                    )
+                    action_idxs.append(0)
+                    active[i] = False
+                    continue
+
+                fwd_t0 = time.time()
+                out = self.model(states[i], actions)
+                forward_time_sec += time.time() - fwd_t0
+                logits = out["logits"]
+                value = out["value"]
+                n_options = logits.shape[0]
+                valid_n = min(n_options, len(actions))
+                if valid_n <= 0:
+                    action_idxs.append(0)
+                    active[i] = False
+                    continue
+                logits = logits[:valid_n]
+
+                probs = F.softmax(logits, dim=-1)
+                if deterministic:
+                    action_idx = int(torch.argmax(probs).item())
+                else:
+                    probs_cpu = probs.detach().to("cpu")
+                    if torch.isnan(probs_cpu).any() or probs_cpu.sum().item() <= 0:
+                        action_idx = 0
+                    else:
+                        action_idx = int(torch.multinomial(probs_cpu, num_samples=1).item())
+
+                log_probs_all = F.log_softmax(logits, dim=-1)
+                log_prob = float(log_probs_all[action_idx].item())
+                value_scalar = (
+                    float(value.item()) if value.dim() == 0
+                    else float(value.flatten()[0].item())
+                )
+
+                action_idxs.append(action_idx)
+                per_env_decision[i] = {
+                    "actions": actions,
+                    "action_idx": action_idx,
+                    "log_prob": log_prob,
+                    "value": value_scalar,
+                    "state": states[i],
+                }
+
+            es_t0 = time.time()
+            next_states, rewards, dones, infos = parallel_env.step(action_idxs)
+            env_step_time_sec += time.time() - es_t0
+            assert len(next_states) == n_envs
+
+            # 把这步推到对应 env trajectory（只对原本 active 且有 decision 的 env）
+            for i in range(n_envs):
+                d = per_env_decision[i]
+                if d is None:
+                    continue
+                rollouts[i].append(
+                    RolloutStep(
+                        state=d["state"],
+                        available_actions=d["actions"],
+                        action_idx=d["action_idx"],
+                        log_prob=d["log_prob"],
+                        value=d["value"],
+                        reward=float(rewards[i]),
+                        done=bool(dones[i]),
+                        phase=d["state"].phase or "",
+                    )
+                )
+                if dones[i]:
+                    active[i] = False
+                else:
+                    states[i] = next_states[i]
+
+        if it >= max_iter:
+            logger.error(
+                "collect_rollout_batched: hit max_iter=%d safety cap (still active=%s)",
+                max_iter, [i for i, a in enumerate(active) if a],
+            )
+
+        if was_training:
+            self.model.train()
+
+        self.last_rollout_stats = {
+            "forward_time_sec": forward_time_sec,
+            "env_step_time_sec": env_step_time_sec,
+            # eval_deck_calls / combat_search_calls 在 batched 模式下分散在子进程，
+            # 主进程读不到（phase 2 简化：置 0；如需要可加 get_perf_counters cmd）
+            "eval_deck_calls": 0.0,
+            "eval_deck_time_sec": 0.0,
+            "combat_search_calls": 0.0,
+            "n_steps": float(sum(len(r) for r in rollouts)),
+        }
+        return rollouts
+
+    @torch.no_grad()
     def collect_rollout(
         self,
         env: V8Env,

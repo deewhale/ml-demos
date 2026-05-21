@@ -86,12 +86,30 @@ _POOL: Optional[ProcessPoolExecutor] = None
 
 
 def _get_pool() -> Optional[ProcessPoolExecutor]:
-    """懒创建 spawn-context process pool。disable 时返回 None。"""
+    """懒创建 spawn-context process pool。disable 时返回 None。
+
+    环境变量 cap（parallel_env.py 子进程模式用）：
+        V8_DECK_EVALUATOR_MAX_WORKERS=N → 把默认 min(12, cpu-1) 进一步压到 N。
+        典型场景：ParallelV8Env n_envs=4 时，每个子进程设 N=2，避免 4×12=48 个
+        孙子进程爆 CPU。未设环境变量则保留旧上限。
+    """
     global _POOL
     if not _PARALLEL_ENABLED:
         return None
     if _POOL is None:
         max_workers = min(12, max(1, (os.cpu_count() or 2) - 1))
+        # env var cap（subprocess 模式下小化 worker 防爆 CPU）
+        env_cap_raw = os.environ.get("V8_DECK_EVALUATOR_MAX_WORKERS", "").strip()
+        if env_cap_raw:
+            try:
+                env_cap = int(env_cap_raw)
+                if env_cap >= 1:
+                    max_workers = min(max_workers, env_cap)
+            except ValueError:
+                logger.warning(
+                    "deck_evaluator: invalid V8_DECK_EVALUATOR_MAX_WORKERS=%r, ignored",
+                    env_cap_raw,
+                )
         ctx = multiprocessing.get_context("spawn")
         _POOL = ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx)
         logger.info(

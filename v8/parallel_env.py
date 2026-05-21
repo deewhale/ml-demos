@@ -46,10 +46,12 @@ deck_evaluator pool 策略（phase 1）：
 
 from __future__ import annotations
 
+import atexit
 import logging
 import multiprocessing as mp
 import os
 import sys
+import weakref
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -67,6 +69,33 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# 全局 reap registry（atexit 兜底）
+# ============================================================
+#
+# worker 进程 daemon=False（必须，否则 deck_evaluator._get_pool spawn 子 pool 时
+# Python 抛 "daemonic processes are not allowed to have children"）。
+# 但 daemon=False 的代价：主进程退出前必须显式 join，否则子进程变孤儿。
+# 用 atexit + weakref 兜底：每个 ParallelV8Env 实例 init 时注册自己，
+# atexit 时若实例还活着且没 close，触发 close()（礼貌发 close cmd + join）。
+#
+# weakref 防止 atexit 持 strong ref 阻止 GC。
+
+_OPEN_PARALLEL_ENVS: "weakref.WeakSet[ParallelV8Env]" = weakref.WeakSet()
+
+
+def _atexit_close_all() -> None:
+    """atexit hook：关掉所有还活着的 ParallelV8Env。"""
+    for penv in list(_OPEN_PARALLEL_ENVS):
+        try:
+            penv.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+atexit.register(_atexit_close_all)
+
+
+# ============================================================
 # Worker：在子进程里 host 一个 V8Env，循环接 command 处理
 # ============================================================
 
@@ -76,6 +105,7 @@ def _worker_main(
     conn: Connection,
     env_kwargs: Dict[str, Any],
     log_level: int = logging.INFO,
+    deck_eval_workers: int = 2,
 ) -> None:
     """子进程入口：建 V8Env，loop 接 (cmd, *args)，处理后回 reply。
 
@@ -84,8 +114,13 @@ def _worker_main(
     - V8Env 实例化用 env_kwargs（caller 传，可含 character / ascension /
       max_steps_per_episode / deck_eval_freq / verbose 等）
     - combat_net_wrapper 不能 pickle pytorch model 到子进程（spawn 也未必干净），
-      所以子进程默认拿不到。phase 2 设计如何把 forward 桥回主，再决定。
+      所以子进程默认拿不到。phase 2 接受 combat search-only regression 作为 MVP。
+    - deck_eval_workers 通过环境变量 V8_DECK_EVALUATOR_MAX_WORKERS 传给
+      v8.deck_evaluator._get_pool（限制子进程内 pool 大小，防爆 CPU）
     """
+    # 限制子进程内 deck_evaluator pool 大小（env var 在 deck_evaluator import 前设）
+    os.environ["V8_DECK_EVALUATOR_MAX_WORKERS"] = str(int(deck_eval_workers))
+
     # 子进程独立日志（带 [env-N] 前缀），不继承主进程 handler
     h = logging.StreamHandler(stream=sys.stderr)
     h.setFormatter(logging.Formatter(
@@ -206,12 +241,27 @@ class ParallelV8Env(V8EnvBase):
         n_envs: int = 4,
         env_kwargs: Optional[Dict[str, Any]] = None,
         log_level: int = logging.INFO,
+        deck_eval_workers_per_env: int = 2,
     ):
+        """初始化 N 个子进程。
+
+        Args:
+            n_envs: 并行 env 数
+            env_kwargs: 传给 V8Env 的 kwargs；combat_net_wrapper 若非 None 会被
+                子进程强制忽略（参见 _worker_main）
+            log_level: 子进程 root logger 等级
+            deck_eval_workers_per_env: 子进程内 deck_evaluator pool max_workers 上限，
+                通过环境变量 V8_DECK_EVALUATOR_MAX_WORKERS 传递（deck_evaluator
+                读取该 var 作为 cap）。n_envs × per_env 应 ≤ 物理核数 - 2，
+                典型值 n_envs=4 + per_env=2 = 8 子进程池，外加 4 个 worker 主进程，
+                总 12 进程在 8-10 核 M-series 上仍可控。
+        """
         if n_envs < 1:
             raise ValueError(f"n_envs must be >= 1, got {n_envs}")
         self.n_envs = int(n_envs)
         self._env_kwargs = dict(env_kwargs or {})
         self._log_level = log_level
+        self._deck_eval_workers_per_env = max(1, int(deck_eval_workers_per_env))
 
         # macOS + MPS 强制 spawn
         ctx = mp.get_context("spawn")
@@ -224,8 +274,15 @@ class ParallelV8Env(V8EnvBase):
             parent_conn, child_conn = ctx.Pipe(duplex=True)
             p = ctx.Process(
                 target=_worker_main,
-                args=(i, child_conn, self._env_kwargs, self._log_level),
-                daemon=True,
+                args=(
+                    i, child_conn, self._env_kwargs, self._log_level,
+                    self._deck_eval_workers_per_env,
+                ),
+                # 重要：daemon=False。daemon=True 会让子进程不能再 spawn 子 pool
+                # （deck_evaluator._get_pool 在子进程内会 fail with
+                # "daemonic processes are not allowed to have children"）。
+                # 代价：必须显式 close + join，atexit registry 兜底。
+                daemon=False,
                 name=f"v8-env-{i}",
             )
             p.start()
@@ -234,10 +291,15 @@ class ParallelV8Env(V8EnvBase):
             self._parent_conns.append(parent_conn)
             self._procs.append(p)
 
+        # 注册到 atexit registry：进程退出前若没 close 自动关
+        _OPEN_PARALLEL_ENVS.add(self)
+
         logger.info(
-            "ParallelV8Env: spawned %d worker processes (pids=%s)",
+            "ParallelV8Env: spawned %d worker processes (pids=%s) "
+            "deck_eval_workers_per_env=%d",
             self.n_envs,
             [p.pid for p in self._procs],
+            self._deck_eval_workers_per_env,
         )
 
     # ---------------------------------------------------------------

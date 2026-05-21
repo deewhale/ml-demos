@@ -83,6 +83,7 @@ from v8.deck_evaluator import (
 )
 from v8.env import V8Env
 from v8.model import V8Model
+from v8.parallel_env import ParallelV8Env
 from v8.trainer import RolloutStep, V8PPOTrainer
 
 # Eval 内存监控用（可选；若环境无 psutil 用 None fallback）
@@ -663,6 +664,7 @@ _PARSER_DEFAULTS: Dict[str, Any] = {
     "checkpoint_frequency": 500,
     "max_steps_per_episode": 1500,
     "deck_eval_freq": 5,
+    "n_envs": 1,
 }
 
 
@@ -708,6 +710,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="续训：从指定 ckpt 加载 model+optimizer，episode 计数从 ckpt metadata.episodes_done 继续。"
              "不指定则从随机/Phase-A combat head fresh init 开始。",
+    )
+    parser.add_argument(
+        "--n_envs",
+        type=int,
+        default=_PARSER_DEFAULTS["n_envs"],
+        help="并行 rollout collection 子进程数。1=旧串行行为（V8Env + combat_net_wrapper）；"
+             ">1=ParallelV8Env，每步 broadcast 给 N 个子进程并行收 episode，主进程仍单 model"
+             " forward。子进程内 combat_net_wrapper=None（regression：战斗 leaf 走纯搜索）。"
+             " eval 路径保持串行（用 V8Env），不受影响。",
     )
     return parser.parse_args()
 
@@ -806,6 +817,27 @@ def main() -> None:
     if args.deck_eval_freq is not None:
         env_kwargs["deck_eval_freq"] = int(args.deck_eval_freq)
     env = V8Env(**env_kwargs)
+
+    # ---- Parallel env (rollout 加速)：n_envs > 1 时启动 ----
+    # 注意：ParallelV8Env 子进程内 combat_net_wrapper 被强制 None（regression：
+    # 战斗 leaf 评估退到纯搜索）。详见 docs/parallel_env_design.md。
+    # eval 路径继续用主进程 env（V8Env + wrapper），保证 eval 与 ckpt 评估一致。
+    parallel_env: Optional[ParallelV8Env] = None
+    if int(args.n_envs) > 1:
+        # ParallelV8Env 子进程不能 pickle wrapper（含 MPS V8Model）
+        parallel_env_kwargs = {k: v for k, v in env_kwargs.items() if k != "combat_net_wrapper"}
+        parallel_env_kwargs["combat_net_wrapper"] = None
+        parallel_env = ParallelV8Env(
+            n_envs=int(args.n_envs),
+            env_kwargs=parallel_env_kwargs,
+            # n_envs=4 + per_env=2 → 4 worker + 4×2 = 12 子进程，控总数
+            deck_eval_workers_per_env=2,
+        )
+        logger.info(
+            "[parallel] enabled n_envs=%d (rollout collection 走 ParallelV8Env, "
+            "战斗 leaf eval 退到纯搜索；eval 路径仍走串行 V8Env+wrapper)",
+            int(args.n_envs),
+        )
 
     # 4) Trainer
     trainer = V8PPOTrainer(model=model, lr=args.lr, device=str(device))
@@ -946,70 +978,189 @@ def main() -> None:
         prev_cache_hits = int(prev_cache.get("hits", 0) or 0)
         prev_cache_misses = int(prev_cache.get("misses", 0) or 0)
 
-        for k in range(batch_target):
-            ep_idx = num_episodes_done + k
-            ep_t0 = time.time()
-            # 把 episode 编号告诉 env，guard_cap / [combat] 日志带上
-            try:
-                env.set_episode(ep_idx)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                rollout = trainer.collect_rollout(env, seed=ep_idx, deterministic=False)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "rollout ep=%d crashed: %s: %s (skip)",
-                    ep_idx, type(e).__name__, e,
-                )
-                # crash 也打 heartbeat，方便定位卡顿点
+        if parallel_env is not None and batch_target >= parallel_env.n_envs:
+            # ----------- 并行 rollout 路径（n_envs > 1）-----------
+            n_envs_eff = parallel_env.n_envs
+            # 一次收 n_envs 个 episode，多收几轮直到 batch_target
+            n_rounds = batch_target // n_envs_eff
+            remainder = batch_target - n_rounds * n_envs_eff
+            if remainder != 0:
+                # 简化：把 remainder 折成串行的 collect_rollout，不影响 batch
                 logger.info(
-                    "[heartbeat] ep=%d CRASHED after %.1fs (%s)",
-                    ep_idx, time.time() - ep_t0, type(e).__name__,
+                    "[parallel] batch_target=%d not multiple of n_envs=%d; "
+                    "%d round(s) parallel + %d serial tail",
+                    batch_target, n_envs_eff, n_rounds, remainder,
                 )
-                continue
 
-            ep_reward = sum(s.reward for s in rollout)
-            runner = env.runner
-            final_floor = int(getattr(runner.run_state, "floor", 0) or 0) if runner else 0
-            final_act = int(getattr(runner.run_state, "act", 1) or 1) if runner else 1
-            beat_boss = bool(runner.game_won) if runner else False
-            ep_secs = time.time() - ep_t0
+            for round_idx in range(n_rounds):
+                round_t0 = time.time()
+                seeds = [
+                    num_episodes_done + round_idx * n_envs_eff + k
+                    for k in range(n_envs_eff)
+                ]
+                # set_episode 给每个子进程（guard_cap / [combat] 日志带 episode 标识）
+                try:
+                    parallel_env.set_episode(seeds)
+                except Exception:  # noqa: BLE001
+                    pass
 
-            # 拿 per-episode 性能 / 调用计数
-            rstats = getattr(trainer, "last_rollout_stats", {}) or {}
-            ep_fwd = float(rstats.get("forward_time_sec", 0.0))
-            ep_env_step = float(rstats.get("env_step_time_sec", 0.0))
-            ep_eval_deck_sec = float(rstats.get("eval_deck_time_sec", 0.0))
-            ep_eval_deck_calls = int(rstats.get("eval_deck_calls", 0))
-            ep_search_calls = int(rstats.get("combat_search_calls", 0))
-            batch_collect_fwd_sec += ep_fwd
-            batch_env_step_sec += ep_env_step
-            batch_eval_deck_sec += ep_eval_deck_sec
-            batch_eval_deck_calls += ep_eval_deck_calls
-            batch_search_calls += ep_search_calls
+                try:
+                    sub_rollouts = trainer.collect_rollout_batched(
+                        parallel_env, seeds=seeds, deterministic=False,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[parallel] rollout batched crashed seeds=%s: %s: %s (skip round)",
+                        seeds, type(e).__name__, e,
+                    )
+                    continue
 
-            batch_rollouts.extend(rollout)
-            batch_meta.append({
-                "ep": ep_idx,
-                "steps": len(rollout),
-                "reward_sum": ep_reward,
-                "final_floor": final_floor,
-                "final_act": final_act,
-                "beat_boss": beat_boss,
-                "secs": ep_secs,
-            })
-            # ---- 每局 heartbeat：silent 跑步是不可接受的 ----
-            logger.info(
-                "[heartbeat] ep=%d steps=%d secs=%.1f reward=%.3f floor=%d act=%d beat_boss=%s "
-                "search_calls=%d eval_deck_calls=%d",
-                ep_idx, len(rollout), ep_secs, ep_reward,
-                final_floor, final_act, beat_boss,
-                ep_search_calls, ep_eval_deck_calls,
-            )
-            try:
-                env.close()
-            except Exception:  # noqa: BLE001
-                pass
+                round_secs = time.time() - round_t0
+                rstats = getattr(trainer, "last_rollout_stats", {}) or {}
+                batch_collect_fwd_sec += float(rstats.get("forward_time_sec", 0.0))
+                batch_env_step_sec += float(rstats.get("env_step_time_sec", 0.0))
+
+                # 每个 sub-rollout 也打 heartbeat（subprocess 内 [combat] 等日志已分别写 stderr）
+                for i, rollout in enumerate(sub_rollouts):
+                    ep_idx = seeds[i]
+                    if not rollout:
+                        logger.info(
+                            "[heartbeat] ep=%d (parallel) empty rollout, skip",
+                            ep_idx,
+                        )
+                        continue
+                    ep_reward = sum(s.reward for s in rollout)
+                    # parallel 模式拿不到 env.runner（在子进程里），floor/beat_boss 等
+                    # 跨进程同步代价大，暂时不记。如需要 phase 后续加 get_runner_snapshot
+                    # cmd 把字段一次性传回。
+                    batch_rollouts.extend(rollout)
+                    batch_meta.append({
+                        "ep": ep_idx,
+                        "steps": len(rollout),
+                        "reward_sum": ep_reward,
+                        "final_floor": 0,
+                        "final_act": 1,
+                        "beat_boss": False,
+                        "secs": round_secs / n_envs_eff,  # 摊到每 ep
+                    })
+                    logger.info(
+                        "[heartbeat] ep=%d (parallel) steps=%d round_secs=%.1f reward=%.3f",
+                        ep_idx, len(rollout), round_secs, ep_reward,
+                    )
+
+            # ----------- 串行尾巴（remainder）-----------
+            for k in range(remainder):
+                ep_idx = num_episodes_done + n_rounds * n_envs_eff + k
+                ep_t0 = time.time()
+                try:
+                    env.set_episode(ep_idx)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    rollout = trainer.collect_rollout(env, seed=ep_idx, deterministic=False)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "rollout ep=%d (tail) crashed: %s: %s (skip)",
+                        ep_idx, type(e).__name__, e,
+                    )
+                    continue
+                ep_reward = sum(s.reward for s in rollout)
+                runner = env.runner
+                final_floor = int(getattr(runner.run_state, "floor", 0) or 0) if runner else 0
+                final_act = int(getattr(runner.run_state, "act", 1) or 1) if runner else 1
+                beat_boss = bool(runner.game_won) if runner else False
+                ep_secs = time.time() - ep_t0
+                rstats = getattr(trainer, "last_rollout_stats", {}) or {}
+                batch_collect_fwd_sec += float(rstats.get("forward_time_sec", 0.0))
+                batch_env_step_sec += float(rstats.get("env_step_time_sec", 0.0))
+                batch_eval_deck_sec += float(rstats.get("eval_deck_time_sec", 0.0))
+                batch_eval_deck_calls += int(rstats.get("eval_deck_calls", 0))
+                batch_search_calls += int(rstats.get("combat_search_calls", 0))
+                batch_rollouts.extend(rollout)
+                batch_meta.append({
+                    "ep": ep_idx,
+                    "steps": len(rollout),
+                    "reward_sum": ep_reward,
+                    "final_floor": final_floor,
+                    "final_act": final_act,
+                    "beat_boss": beat_boss,
+                    "secs": ep_secs,
+                })
+                logger.info(
+                    "[heartbeat] ep=%d (tail-serial) steps=%d secs=%.1f reward=%.3f "
+                    "floor=%d beat_boss=%s",
+                    ep_idx, len(rollout), ep_secs, ep_reward, final_floor, beat_boss,
+                )
+                try:
+                    env.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            # ----------- 串行 rollout 路径（旧逻辑 / n_envs=1）-----------
+            for k in range(batch_target):
+                ep_idx = num_episodes_done + k
+                ep_t0 = time.time()
+                # 把 episode 编号告诉 env，guard_cap / [combat] 日志带上
+                try:
+                    env.set_episode(ep_idx)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    rollout = trainer.collect_rollout(env, seed=ep_idx, deterministic=False)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "rollout ep=%d crashed: %s: %s (skip)",
+                        ep_idx, type(e).__name__, e,
+                    )
+                    # crash 也打 heartbeat，方便定位卡顿点
+                    logger.info(
+                        "[heartbeat] ep=%d CRASHED after %.1fs (%s)",
+                        ep_idx, time.time() - ep_t0, type(e).__name__,
+                    )
+                    continue
+
+                ep_reward = sum(s.reward for s in rollout)
+                runner = env.runner
+                final_floor = int(getattr(runner.run_state, "floor", 0) or 0) if runner else 0
+                final_act = int(getattr(runner.run_state, "act", 1) or 1) if runner else 1
+                beat_boss = bool(runner.game_won) if runner else False
+                ep_secs = time.time() - ep_t0
+
+                # 拿 per-episode 性能 / 调用计数
+                rstats = getattr(trainer, "last_rollout_stats", {}) or {}
+                ep_fwd = float(rstats.get("forward_time_sec", 0.0))
+                ep_env_step = float(rstats.get("env_step_time_sec", 0.0))
+                ep_eval_deck_sec = float(rstats.get("eval_deck_time_sec", 0.0))
+                ep_eval_deck_calls = int(rstats.get("eval_deck_calls", 0))
+                ep_search_calls = int(rstats.get("combat_search_calls", 0))
+                batch_collect_fwd_sec += ep_fwd
+                batch_env_step_sec += ep_env_step
+                batch_eval_deck_sec += ep_eval_deck_sec
+                batch_eval_deck_calls += ep_eval_deck_calls
+                batch_search_calls += ep_search_calls
+
+                batch_rollouts.extend(rollout)
+                batch_meta.append({
+                    "ep": ep_idx,
+                    "steps": len(rollout),
+                    "reward_sum": ep_reward,
+                    "final_floor": final_floor,
+                    "final_act": final_act,
+                    "beat_boss": beat_boss,
+                    "secs": ep_secs,
+                })
+                # ---- 每局 heartbeat：silent 跑步是不可接受的 ----
+                logger.info(
+                    "[heartbeat] ep=%d steps=%d secs=%.1f reward=%.3f floor=%d act=%d beat_boss=%s "
+                    "search_calls=%d eval_deck_calls=%d",
+                    ep_idx, len(rollout), ep_secs, ep_reward,
+                    final_floor, final_act, beat_boss,
+                    ep_search_calls, ep_eval_deck_calls,
+                )
+                try:
+                    env.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
         if not batch_rollouts:
             logger.warning("batch 全部 crash，跳过 update")
@@ -1198,6 +1349,15 @@ def main() -> None:
 
     # ---- 最终 ckpt + summary（统一走 _save_final_checkpoint_and_summary）----
     _save_final_checkpoint_and_summary()
+
+    # ---- 关并行子进程 ----
+    if parallel_env is not None:
+        try:
+            parallel_env.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "parallel_env close failed: %s: %s", type(e).__name__, e,
+            )
 
 
 if __name__ == "__main__":
