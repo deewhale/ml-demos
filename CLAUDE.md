@@ -434,25 +434,27 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
   **事实上我们 own 这个 fork**。
 
-## 运行中的训练进程（2026-05-20 状态快照）
+## 运行中的训练进程（2026-05-21 状态快照）
 
-- **进程**：`batch_v9` 训练在 nohup 下运行，PID 39392（2026-05-20 15:49:16 启动）
-- **日志文件**：`/tmp/v8_ppo_batch_v9.log` 全程 append
-- **Output 目录**：`sts_models/v8_ppo_batch_v9/`
-- **续训源**：`sts_models/v8_ppo_batch_v8/v8_ppo_ep640.pt`（won_game=40%, training
-  trend 53/59/59/72% per-batch）
-- **参数**：`num_episodes=768 batch_size=32 ckpt_freq=32 eval_freq=128`
-  （增量训 128 ep, ep 641→768）
-- **预期完成**：~13-15h 训练 + ~2h final eval = 2026-05-21 06:00 - 09:00
-- **目的**：验证 v8 末段大跃迁 (batch 4 = 72%) 是否在续训后保持 / 进一步上扬；
-  观察 eval won_game 是否回到 v7 (50%) 之上
+- **进程**：`batch_v10` 训练在 nohup 下运行，PID 71625（2026-05-21 10:22:35 启动）
+- **日志文件**：`/tmp/v8_ppo_batch_v10.log` 全程 append
+- **Output 目录**：`sts_models/v8_ppo_batch_v10/`
+- **续训源**：`sts_models/v8_ppo_batch_v9/v8_ppo_ep768.pt`（won_game=53%, training
+  trend 47/47/28/44% per-batch）
+- **参数**：`num_episodes=896 batch_size=32 ckpt_freq=32 eval_freq=128`
+  （增量训 128 ep, ep 769→896）
+- **新加速配置生效** (commit `83d14e1`)：`max_steps_per_episode=1500`,
+  `deck_eval_freq=5`（v9 用 max_steps=null + freq=1，v10 起统一新默认值）
+- **预期完成**：~10-12h 训练 + ~2.5h final eval = 2026-05-21 22:00 - 23:30
+- **目的**：用新加速配置 + 从历史最高 won_game (v9=0.53) 续训，看 eval won_game
+  是否能继续 push 上去；training 端 per-batch 是否能稳定回到 >50% 区间
 - **下一步**：训练完成后跑 30-seed final eval（自动）+ metrics 分析
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v9/`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v10/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v9.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v9.log | tail -1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v10.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v10.log | tail -1`
 
 ### batch_v7 历史快照
 
