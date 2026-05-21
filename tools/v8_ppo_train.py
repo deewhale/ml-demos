@@ -1020,6 +1020,20 @@ def main() -> None:
                 batch_collect_fwd_sec += float(rstats.get("forward_time_sec", 0.0))
                 batch_env_step_sec += float(rstats.get("env_step_time_sec", 0.0))
 
+                # 跨进程一次性拿 runner snapshot 填 final_floor / beat_boss 等真值。
+                # 单次广播 N envs 的额外开销 ~ms 级，相对 rollout 耗时可忽略。
+                try:
+                    snapshots = parallel_env.get_runner_snapshots()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[parallel] get_runner_snapshots failed: %s: %s (fallback 0/False)",
+                        type(e).__name__, e,
+                    )
+                    snapshots = [
+                        {"floor": 0, "act": 1, "game_won": False}
+                        for _ in range(len(sub_rollouts))
+                    ]
+
                 # 每个 sub-rollout 也打 heartbeat（subprocess 内 [combat] 等日志已分别写 stderr）
                 for i, rollout in enumerate(sub_rollouts):
                     ep_idx = seeds[i]
@@ -1030,22 +1044,25 @@ def main() -> None:
                         )
                         continue
                     ep_reward = sum(s.reward for s in rollout)
-                    # parallel 模式拿不到 env.runner（在子进程里），floor/beat_boss 等
-                    # 跨进程同步代价大，暂时不记。如需要 phase 后续加 get_runner_snapshot
-                    # cmd 把字段一次性传回。
+                    snap = snapshots[i] if i < len(snapshots) else {}
+                    final_floor = int(snap.get("floor", 0) or 0)
+                    final_act = int(snap.get("act", 1) or 1)
+                    beat_boss = bool(snap.get("game_won", False))
                     batch_rollouts.extend(rollout)
                     batch_meta.append({
                         "ep": ep_idx,
                         "steps": len(rollout),
                         "reward_sum": ep_reward,
-                        "final_floor": 0,
-                        "final_act": 1,
-                        "beat_boss": False,
+                        "final_floor": final_floor,
+                        "final_act": final_act,
+                        "beat_boss": beat_boss,
                         "secs": round_secs / n_envs_eff,  # 摊到每 ep
                     })
                     logger.info(
-                        "[heartbeat] ep=%d (parallel) steps=%d round_secs=%.1f reward=%.3f",
+                        "[heartbeat] ep=%d (parallel) steps=%d round_secs=%.1f reward=%.3f "
+                        "floor=%d beat_boss=%s",
                         ep_idx, len(rollout), round_secs, ep_reward,
+                        final_floor, beat_boss,
                     )
 
             # ----------- 串行尾巴（remainder）-----------

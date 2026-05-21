@@ -798,6 +798,41 @@ class V8Env:
         """底层 GameRunner（外部只读访问，方便 debug；trainer 不应直接改 runner 状态）。"""
         return self._runner
 
+    def _build_runner_snapshot(self) -> Dict[str, Any]:
+        """提取 runner / run_state 关键字段，供 parallel worker 跨进程回传 trainer。
+
+        子进程内 V8Env 实例 caller 拿不到，但需要 final_floor / beat_boss 等做
+        [perf] / [heartbeat] 统计。pickle 单独 V8State 不够（缺 game_won），
+        把所需字段一次性打包成 dict 回传。
+
+        返回 dict 字段（全部可 pickle 的基础类型）：
+            floor, act, hp, max_hp, gold, game_won, deck_size, relics_size
+        runner 不存在时返回 0-填充的 dict（don't raise）。
+        """
+        runner = self._runner
+        if runner is None:
+            return {
+                "floor": 0,
+                "act": 1,
+                "hp": 0,
+                "max_hp": 0,
+                "gold": 0,
+                "game_won": False,
+                "deck_size": 0,
+                "relics_size": 0,
+            }
+        rs = getattr(runner, "run_state", None)
+        return {
+            "floor": int(getattr(rs, "floor", 0) or 0) if rs else 0,
+            "act": int(getattr(rs, "act", 1) or 1) if rs else 1,
+            "hp": int(getattr(rs, "current_hp", 0) or 0) if rs else 0,
+            "max_hp": int(getattr(rs, "max_hp", 0) or 0) if rs else 0,
+            "gold": int(getattr(rs, "gold", 0) or 0) if rs else 0,
+            "game_won": bool(getattr(runner, "game_won", False)),
+            "deck_size": len(getattr(rs, "deck", []) or []) if rs else 0,
+            "relics_size": len(getattr(rs, "relics", []) or []) if rs else 0,
+        }
+
     # ---------------------------------------------------------------------
     # Internal: 内部 loop 推进到元决策 phase
     # ---------------------------------------------------------------------

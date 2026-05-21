@@ -192,6 +192,9 @@ def _worker_main(
             elif cmd == "reset_perf_counters":
                 env.reset_perf_counters()
                 conn.send(("ok", None))
+            elif cmd == "get_runner_snapshot":
+                snap = env._build_runner_snapshot()
+                conn.send(("ok", snap))
             elif cmd == "ping":
                 conn.send(("ok", "pong"))
             elif cmd == "close":
@@ -386,6 +389,17 @@ class ParallelV8Env(V8EnvBase):
             ("reset_perf_counters",) for _ in range(self.n_envs)
         ]
         self._broadcast(cmds)
+
+    def get_runner_snapshots(self) -> List[Dict[str, Any]]:
+        """收集每个 worker 的 runner snapshot（floor / act / hp / game_won / ...）。
+
+        trainer 在每个 rollout 完成后调用一次，把字段填进 last_rollout_stats。
+        返回 List[dict]，len == n_envs，按 worker idx 顺序。
+        """
+        cmds: List[Tuple[Any, ...]] = [
+            ("get_runner_snapshot",) for _ in range(self.n_envs)
+        ]
+        return self._broadcast(cmds)  # type: ignore[return-value]
 
     def ping(self) -> List[str]:
         """smoke 用：每个 worker 回 'pong'。"""
