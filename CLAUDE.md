@@ -89,7 +89,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-20 -->
+<!-- last-verified: 2026-05-21 -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -393,6 +393,25 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   - **健康度**: 30 seed eval 全 completed，0 Traceback / 0 hang_confirmed / 0
     Mysterious Sphere COMBAT_WON loop
 
+- **`batch_v11` 完成 (2026-05-21, 真实有效训练但 parallel stats bug 让指标误报 0%)**:
+  从 v10 ep=896 续训 128 ep (ep 897→1024)，首次启用 `n_envs=4` 多环境并行。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v11/` 含 ep=928/960 + final。
+  - **关键发现**：parallel 模式下 `[perf]` / `[heartbeat]` 硬编码 `final_floor=0`
+    `beat_boss=False`（trainer 主进程拿不到子进程 runner.run_state），导致汇总指标
+    显示 0% 通关率。**实际 subprocess `[combat]` log 显示 44% game_won**——训练正常，
+    只是统计 bug。已修 (commit `b69a0bc`)：parallel_env 新增 `get_runner_snapshot` cmd
+    一次性回传 floor/act/hp/game_won 等字段。
+  - **n_envs=4 性能结论**：parallel 反而慢（multiprocessing 序列化 + deck_evaluator
+    pool 嵌套开销 + 主进程 forward 排队），下批先 fallback `n_envs=1` serial。
+    parallel 真训练前需重做 phase 2 设计（中央 pool / shared model forward 等）。
+
+- **`batch_v12` 启动 (2026-05-21 20:54, serial n_envs=1, 从 v11 ep=960 续训)**:
+  Output 目录 `sts_models/v8_ppo_batch_v12/`，从 `sts_models/v8_ppo_batch_v11/v8_ppo_ep960.pt`
+  续训（v11 已有效训练 96 ep，不丢有效权重）。参数 `num_episodes=1088 batch_size=32
+  ckpt_freq=32 eval_freq=128`（增量训 128 ep, ep 961→1088）。**不传 `--n_envs`，默认 1**
+  (serial path)。**本批是 v11 stats bug 修复后的首次真训练**，[heartbeat] / [perf]
+  现在能看到真实 floor / beat_boss 趋势。日志 `/tmp/v8_ppo_batch_v12.log`，PID 89364。
+
 - **`batch_v9` 完成 (2026-05-21 02:44, training trend slight dip + eval won_game 历史最高)**:
   从 v8 ep=640 续训 128 ep (ep 641→768)，~10.9h 训练 + ~2.4h final eval = 总 ~10.9h (39334s)。
   Ckpt 路径 `sts_models/v8_ppo_batch_v9/` 含 ep=672/704/736/768 final + 1 wall。
@@ -470,25 +489,24 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 运行中的训练进程（2026-05-21 状态快照）
 
-- **进程**：`batch_v11` 训练在 nohup 下运行，PID 82978（2026-05-21 17:23 启动）
-- **日志文件**：`/tmp/v8_ppo_batch_v11.log` 全程 append
-- **Output 目录**：`sts_models/v8_ppo_batch_v11/`
-- **续训源**：`sts_models/v8_ppo_batch_v10/v8_ppo_final.pt`（ep=896, won_game=0.43,
-  training per-batch 41/53/41/38%）
-- **参数**：`num_episodes=1024 batch_size=32 ckpt_freq=32 eval_freq=128 n_envs=4`
-  （增量训 128 ep, ep 897→1024）
-- **首次启用 n_envs=4 多环境并行**：rollout 用 4 个并行 env 收集，预期 wall-time
-  缩短 ~3-4x（v10 用 n_envs=1, 6.85h；v11 预期 ~2-3h 训练）
-- **预期完成**：~2-3h 训练 + ~1.5h final eval = 2026-05-21 21:00 - 22:30
-- **目的**：验证 n_envs=4 加速配置正确性 + 看 won_game 能否回到 0.50+ 区间；
-  v10 的 a1_boss_beat 下跌 (0.80→0.53) 可能与 SlimeBoss seed 比例有关，需多批 confirm
+- **进程**：`batch_v12` 训练在 nohup 下运行，PID 89364（2026-05-21 20:54 启动）
+- **日志文件**：`/tmp/v8_ppo_batch_v12.log` 全程 append
+- **Output 目录**：`sts_models/v8_ppo_batch_v12/`
+- **续训源**：`sts_models/v8_ppo_batch_v11/v8_ppo_ep960.pt`（v11 ep=960 ckpt，
+  v11 真实训练 OK 但 parallel stats bug 让指标误报；详见 `batch_v11` 完成条目）
+- **参数**：`num_episodes=1088 batch_size=32 ckpt_freq=32 eval_freq=128`
+  （**默认 n_envs=1 serial**, 不传 `--n_envs` flag, 增量训 128 ep, ep 961→1088）
+- **本批关键**: v11 parallel stats bug 已修 (commit `b69a0bc`)。serial 模式
+  [heartbeat] / [perf] 本来就有真实 floor/beat_boss，本批是修复 + serial 后首跑。
+  parallel 实测反而慢，先 fallback n_envs=1，并行 infra 等 phase 2 重做。
+- **预期完成**：训练 ~6-8h + final eval ~1-2h
 - **下一步**：训练完成后跑 30-seed final eval（自动）+ metrics 分析
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v11/`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v12/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v11.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v11.log | tail -1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v12.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v12.log | tail -1`
 
 ### batch_v7 历史快照
 
