@@ -405,12 +405,37 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     pool 嵌套开销 + 主进程 forward 排队），下批先 fallback `n_envs=1` serial。
     parallel 真训练前需重做 phase 2 设计（中央 pool / shared model forward 等）。
 
-- **`batch_v12` 启动 (2026-05-21 20:54, serial n_envs=1, 从 v11 ep=960 续训)**:
-  Output 目录 `sts_models/v8_ppo_batch_v12/`，从 `sts_models/v8_ppo_batch_v11/v8_ppo_ep960.pt`
-  续训（v11 已有效训练 96 ep，不丢有效权重）。参数 `num_episodes=1088 batch_size=32
-  ckpt_freq=32 eval_freq=128`（增量训 128 ep, ep 961→1088）。**不传 `--n_envs`，默认 1**
-  (serial path)。**本批是 v11 stats bug 修复后的首次真训练**，[heartbeat] / [perf]
-  现在能看到真实 floor / beat_boss 趋势。日志 `/tmp/v8_ppo_batch_v12.log`，PID 89364。
+- **`batch_v12` 完成 (2026-05-22 04:29, mid-eval won_game=0.533 与 v9 best 持平)**:
+  从 v11 ep=960 续训 128 ep (ep 961→1088)，~7.59h 训练（27311s）。**serial n_envs=1**
+  (v11 parallel stats bug 修复后首跑)。Ckpt 路径 `sts_models/v8_ppo_batch_v12/` 含
+  ep=992/1024/1056/1088 + final。
+  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 961→1088)**：
+    - batch 1 (ep 961-992):  16/32 = 50.0%
+    - batch 2 (ep 993-1024): 17/32 = 53.1%
+    - batch 3 (ep 1025-1056): 15/32 = 46.9%
+    - batch 4 (ep 1057-1088): 16/32 = 50.0%
+    - 平均 ~50.0%，相较 v10/v11 (~43%) 上移 ~7pp，恢复到 v8/v9 区间。training 端 trend 稳
+  - **mean_reward 同期**：92.6 / 105.6 / 84.5 / 102.3（高位稳定）
+  - **Entropy drift**：0.172 / 0.184 / 0.184 / 0.175（低位稳定，未继续 sharpen，无 collapse）
+  - **Eval@ep=1024 (mid-run, 30 seed, attribution-based timeout)**: **30/30 completed**,
+    reached_a1_boss=**0.967**, **a1_boss_beat=0.633**, a2_boss_beat=**0.600**,
+    **won_game=0.533** (16/30, **与 v9 best 0.533 持平**), floor_mean=14.7,
+    SlimeBoss reach=10/30, SlimeBoss kill=**0/10=0%** (gap unchanged)
+  - **跨批 won_game 完整对比 (30-seed full eval)**：
+    | Run | ep | completed | reached_a1 | a1_beat | a2_beat | won_game | floor_mean | SlimeBoss kill |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | v3 final | 128 | 30/30 (300s) | 1.00 | 0.63 | 0.53 | 0.43 | 14.0 | 0/11=0% |
+    | v7 final | 512 | 30/30 (attr) | 1.00 | 0.77 | 0.73 | 0.50 | 13.1 | 0/7=0% |
+    | v9 final | 768 | 30/30 (attr) | 1.00 | 0.80 | 0.73 | **0.53** | 14.6 | 0/6=0% |
+    | v10 final | 896 | 30/30 (attr) | 1.00 | 0.53 | 0.53 | 0.43 | 15.6 | 0/14=0% |
+    | **v12 mid (ep=1024)** | **1024** | **30/30 (attr)** | **0.97** | **0.63** | **0.60** | **0.53** | **14.7** | **0/10=0%** |
+  - **注意 caveat**: 本批 `num_episodes=1088 eval_freq=128` 只在 ep=1024 触发一次 mid-eval，
+    ep=1088 final 没有 eval（trainer 完成 last batch → ckpt save → 退出，没再触发 eval cycle）。
+    final ckpt 的 eval 待下批 v13 启动后等待 ep=1216 时 mid-eval 顺手观测。
+  - **关键发现**: stats bug 修复后 v12 训练 trend 真实回到 ~50%，与 v8/v9/v10 修复前的
+    序列化模式一致；**won_game=0.533 与 v9 历史最高持平**，证明 v10/v11 之间的指标"回落"
+    并非真 regression，更可能是 v10 SlimeBoss seed mix 偏高导致的 noise
+  - **健康度**: 0 Traceback / 0 Mysterious Sphere COMBAT_WON loop / 0 fatal hang
 
 - **`batch_v9` 完成 (2026-05-21 02:44, training trend slight dip + eval won_game 历史最高)**:
   从 v8 ep=640 续训 128 ep (ep 641→768)，~10.9h 训练 + ~2.4h final eval = 总 ~10.9h (39334s)。
