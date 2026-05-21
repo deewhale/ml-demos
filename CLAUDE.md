@@ -470,7 +470,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 运行中的训练进程（2026-05-21 状态快照）
 
-- **进程**：`batch_v11` 训练在 nohup 下运行（2026-05-21 17:22 启动）
+- **进程**：`batch_v11` 训练在 nohup 下运行，PID 82978（2026-05-21 17:23 启动）
 - **日志文件**：`/tmp/v8_ppo_batch_v11.log` 全程 append
 - **Output 目录**：`sts_models/v8_ppo_batch_v11/`
 - **续训源**：`sts_models/v8_ppo_batch_v10/v8_ppo_final.pt`（ep=896, won_game=0.43,
