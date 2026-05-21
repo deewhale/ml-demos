@@ -359,6 +359,40 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   - **健康度**: 30 seed eval 中 29 顺利完成 + 1 正确归因 hang，无 Traceback / 无
     Mysterious Sphere COMBAT_WON loop
 
+- **`batch_v10` 完成 (2026-05-21 17:13, training trend dip + eval won_game 小幅回落)**:
+  从 v9 ep=768 续训 128 ep (ep 769→896)，~6.85h 训练 + ~1.28h final eval = 总 ~6.85h
+  (24651s)。Ckpt 路径 `sts_models/v8_ppo_batch_v10/` 含 ep=800/832/864/896 final + 1 wall。
+  新加速配置生效 (`max_steps_per_episode=1500`, `deck_eval_freq=5`)，wall-time 较 v9
+  缩短 ~4h。
+  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 769→896)**：
+    - batch 1 (ep 769-800): 13/32 = 40.6%
+    - batch 2 (ep 801-832): 17/32 = 53.1%
+    - batch 3 (ep 833-864): 13/32 = 40.6%
+    - batch 4 (ep 865-896): 12/32 = 37.5%
+    - 平均 ~43.0%，与 v9 (~41.4%) 持平，仍低于 v8 末段 (~60.8%)
+  - **mean_reward 同期**：78.1 / 93.1 / 86.2 / 87.8（高位稳定）
+  - **Entropy drift**：0.217 → 0.220 → 0.176 → 0.176（继续 sharpen，再降）
+  - **Eval@ep=896 (final, 30 seed, attribution-based timeout)**: **30/30 completed**,
+    reached_a1_boss=**1.00**, **a1_boss_beat=0.53**, a2_boss_beat=**0.53**,
+    **won_game=0.43** (13/30, vs v9 0.53 **-10pp 小幅回落**), floor_mean=15.6,
+    SlimeBoss reach=14/30, SlimeBoss kill=**0/14=0%** (gap unchanged)
+  - **跨批 won_game 完整对比 (30-seed full eval)**：
+    | Run | ep | completed | reached_a1 | a1_beat | a2_beat | won_game | floor_mean | SlimeBoss kill |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | v3 final | 128 | 30/30 (300s) | 1.00 | 0.63 | 0.53 | 0.43 | 14.0 | 0/11=0% |
+    | v7 final | 512 | 30/30 (attr) | 1.00 | 0.77 | 0.73 | 0.50 | 13.1 | 0/7=0% |
+    | v8 final | 640 | 29/30 (attr) | 0.87 | 0.60 | N/A | 0.40 | 13.7 | N/A |
+    | v9 final | 768 | 30/30 (attr) | 1.00 | 0.80 | 0.73 | **0.53** | 14.6 | 0/6=0% |
+    | **v10 final** | **896** | **30/30 (attr)** | **1.00** | **0.53** | **0.53** | **0.43** | **15.6** | **0/14=0%** |
+  - **关键发现**: SlimeBoss reach 翻倍 (v9=6 → v10=14)，但 SlimeBoss kill 仍 0；
+    a1_boss_beat 从 v9 0.80 跌到 0.53，可能 v10 seed mix 中 SlimeBoss seed 占比变高
+    (47% vs 20%) → 0% SlimeBoss kill 直接拖低 a1_beat。**floor_mean 15.6 反创新高**
+    表明非 SlimeBoss seed 平均跑得更深
+  - **SlimeBoss**: eval kill 仍 0/14=0%（累计 6 个 run 共 ~52 reach 仍 0 kill）。
+    boss-aware encoding 已 plateau，eval 端 SlimeBoss gap 持续未解
+  - **健康度**: 30 seed eval 全 completed，0 Traceback / 0 hang_confirmed / 0
+    Mysterious Sphere COMBAT_WON loop
+
 - **`batch_v9` 完成 (2026-05-21 02:44, training trend slight dip + eval won_game 历史最高)**:
   从 v8 ep=640 续训 128 ep (ep 641→768)，~10.9h 训练 + ~2.4h final eval = 总 ~10.9h (39334s)。
   Ckpt 路径 `sts_models/v8_ppo_batch_v9/` 含 ep=672/704/736/768 final + 1 wall。
@@ -436,25 +470,25 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 运行中的训练进程（2026-05-21 状态快照）
 
-- **进程**：`batch_v10` 训练在 nohup 下运行，PID 71625（2026-05-21 10:22:35 启动）
-- **日志文件**：`/tmp/v8_ppo_batch_v10.log` 全程 append
-- **Output 目录**：`sts_models/v8_ppo_batch_v10/`
-- **续训源**：`sts_models/v8_ppo_batch_v9/v8_ppo_ep768.pt`（won_game=53%, training
-  trend 47/47/28/44% per-batch）
-- **参数**：`num_episodes=896 batch_size=32 ckpt_freq=32 eval_freq=128`
-  （增量训 128 ep, ep 769→896）
-- **新加速配置生效** (commit `83d14e1`)：`max_steps_per_episode=1500`,
-  `deck_eval_freq=5`（v9 用 max_steps=null + freq=1，v10 起统一新默认值）
-- **预期完成**：~10-12h 训练 + ~2.5h final eval = 2026-05-21 22:00 - 23:30
-- **目的**：用新加速配置 + 从历史最高 won_game (v9=0.53) 续训，看 eval won_game
-  是否能继续 push 上去；training 端 per-batch 是否能稳定回到 >50% 区间
+- **进程**：`batch_v11` 训练在 nohup 下运行（2026-05-21 17:22 启动）
+- **日志文件**：`/tmp/v8_ppo_batch_v11.log` 全程 append
+- **Output 目录**：`sts_models/v8_ppo_batch_v11/`
+- **续训源**：`sts_models/v8_ppo_batch_v10/v8_ppo_final.pt`（ep=896, won_game=0.43,
+  training per-batch 41/53/41/38%）
+- **参数**：`num_episodes=1024 batch_size=32 ckpt_freq=32 eval_freq=128 n_envs=4`
+  （增量训 128 ep, ep 897→1024）
+- **首次启用 n_envs=4 多环境并行**：rollout 用 4 个并行 env 收集，预期 wall-time
+  缩短 ~3-4x（v10 用 n_envs=1, 6.85h；v11 预期 ~2-3h 训练）
+- **预期完成**：~2-3h 训练 + ~1.5h final eval = 2026-05-21 21:00 - 22:30
+- **目的**：验证 n_envs=4 加速配置正确性 + 看 won_game 能否回到 0.50+ 区间；
+  v10 的 a1_boss_beat 下跌 (0.80→0.53) 可能与 SlimeBoss seed 比例有关，需多批 confirm
 - **下一步**：训练完成后跑 30-seed final eval（自动）+ metrics 分析
 
 接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v10/`
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v11/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v10.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v10.log | tail -1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v11.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v11.log | tail -1`
 
 ### batch_v7 历史快照
 
@@ -500,6 +534,8 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     reached_a1=1.00, floor_mean=14.6，含 boss-aware `boss_proj.*` 4 参数。**当前 best ckpt**
   - v7 final (`sts_models/v8_ppo_batch_v7/v8_ppo_final.pt`, ep=512) — won=0.50,
     30/30 seed eval (attr)，a1_beat=0.77, reached_a1=1.00
+  - v10 final (`sts_models/v8_ppo_batch_v10/v8_ppo_final.pt`, ep=896) — won=0.43,
+    30/30 seed eval (attr), a1_beat=0.53, a2_beat=0.53, reached_a1=1.00, floor_mean=15.6
   - v6 final (`sts_models/v8_ppo_batch_v6/v8_ppo_final.pt`, ep=384) — won=0.50,
     10/10 seed eval (600s)；30-seed 同维度 eval 未做
   - v3 final (`sts_models/v8_ppo_long_v3/v8_ppo_final.pt`, ep=128) — won=0.43, 30/30 seed eval (300s)
