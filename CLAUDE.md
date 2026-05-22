@@ -89,7 +89,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-21 -->
+<!-- last-verified: 2026-05-22 -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -477,6 +477,11 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
+- **StSRLSolver 持久 relic counter 不回写 + `get_pre_battle_effects()` 从未调用**
+  (2026-05-22 发现 + 同日修复, fork commit `e567c65d`):
+  NeowsLament 永远不递减（NEOW idx=0 → 全敌人 1 HP 全程持续），加上 8 个 boss/elite
+  的 atBattleStart buff 全部失效。让 RL 学了一年的 exploit 而不是 STS。详见上方
+  「Simulator bug 大爆发」段。**v3-v13 训练数据全部污染**，v14 从 trial100 重训。
 - **Mushrooms event handler 缺 phase filter** (2026-05-14 发现, 2026-05-15 修,
   **2026-05-15 integration validated**):
   v4 ep=127 deterministic eval 卡 15h / 6352 次同 event choice 后定位根因。
@@ -505,35 +510,86 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ### 已知 bug / 限制
 
-- **StSRLSolver Python engine `_get_mysterious_sphere_choices` 和
-  `_handle_mysterious_sphere` 缺 phase filter**（2026-05-12 发现，已在
-  `external/StSRLSolver/` 分支 `fix/mysterious-sphere-phase-filter` 修复，
-  commits `11b15c7a` + `f8006f30`）。上游已弃用整个 Python engine
-  （PR #136/#137），fix 仅本地，不能 push（fork 被 GitHub abuse-prevention 禁用了）。
-  **事实上我们 own 这个 fork**。
+- **StSRLSolver fork 不能 push to GitHub**：fork 被 abuse-prevention 禁用了，
+  所有 simulator 修复 commit 仅在本地存活。**事实上我们 own 这个 fork**，commits
+  全在 `external/StSRLSolver/` 分支 `fix/mysterious-sphere-phase-filter`：
+  - `11b15c7a` + `f8006f30`：Mysterious Sphere choices / handler 缺 phase filter
+    (2026-05-12)
+  - `b0626dc6`：Mushrooms choices / handler 缺 phase filter (2026-05-15)
+  - `e567c65d`：persistent relic counter writeback + enemy
+    `get_pre_battle_effects` wired (2026-05-22, **巨型 bug**, 让 NeowsLament
+    永远不递减 + 8 个 boss/elite atBattleStart buff 全部失效)
+  上游已弃用整个 Python engine（PR #136/#137 迁到 Rust），我们 checkout 还停留
+  在 legacy Python 代码。
 
 ## 运行中的训练进程（2026-05-22 状态快照）
 
-- **进程**：`batch_v13` 训练在 nohup 下运行，PID 2327（2026-05-22 05:13 启动）
-- **日志文件**：`/tmp/v8_ppo_batch_v13.log` 全程 append
-- **Output 目录**：`sts_models/v8_ppo_batch_v13/`
-- **续训源**：`sts_models/v8_ppo_batch_v12/v8_ppo_final.pt`（v12 ep=1088 final ckpt，
-  v12 mid-eval@ep=1024 won_game=0.533 与 v9 历史最高持平；详见 `batch_v12` 完成条目）
-- **参数**：`num_episodes=1216 batch_size=32 ckpt_freq=32 eval_freq=128`
-  （**默认 n_envs=1 serial**, 不传 `--n_envs` flag, 增量训 128 ep, ep 1089→1216）
-- **本批关键**: v12 plateau ~50% per-batch trend 延续验证。v12 ep=1216 续训 trend
-  与 v12 后期 (50% / 53.1% / 46.9% / 50%) 对比 → 看 boss-aware encoding 是否还有
-  上升空间，或彻底 plateau 等结构改动。
-- **预期完成**：训练 ~7-8h + final eval ~1.5-2h（按 v12 27311s ≈ 7.59h 基线推）
-- **下一步**：训练完成后等 ep=1216 mid-eval（eval_freq=128，1216 % 128 = 0
-  应触发）+ metrics 分析。**caveat**：v12 因为 1088 % 128 = 64 ≠ 0 所以没 final
-  eval，下批 v13 1216 % 128 = 0 应能拿到 final eval
+### Simulator bug 大爆发 + v3→v13 数据失效 (2026-05-22)
 
-接手 monitor 的检查清单：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v13/`
+调查 v10/v11/v12 plateau 时定位到 **StSRLSolver 2 个致命 bug**，让 NEOW idx=0
+(`three_enemy_kill`) 永久"全敌人 1 HP"。模型 100% NEOW pick idx=0 → 训练数据基本
+作废，**所有 v3-v13 训练（~140h compute）模型其实在学 exploit 不是 STS**。
+
+**Bug 1 — counter writeback 缺失** (`game.py` `_end_combat`)
+  - `_enter_combat` 把 `run_state.relics[i].counter` 灌到
+    `combat.state.relic_counters[relic_id]` (line 3862-3867)
+  - atBattleStart 触发的 NeowsLament handler 通过 `ctx.set_relic_counter` 减计数
+    （写到 combat 侧）
+  - `_end_combat` 没把 combat 侧 dict 写回 `run_state.relics` → counter 永远=3
+  - 影响范围：NeowsLament + Pen Nib / Nunchaku / Ink Bottle / Happy Flower /
+    Sundial / Incense Burner / Girya（所有持久 counter 遗物）
+  - 修复：`_end_combat` 在 `self.current_combat = None` 之前 iterate
+    `run_state.relics`，若对应 relic_id 在 combat counter dict 中且
+    `relic.counter != -1` → 回写
+
+**Bug 2 — `get_pre_battle_effects()` 从未被调用** (`combat_engine.py` `start_combat`)
+  - 8 个 enemy 类（BronzeAutomaton / AwakenedOne / TimeEater / Donu / Deca /
+    SpireShield / SpireSpear / CorruptHeart）声明了 pre-battle 加 buff，但
+    `start_combat` 没人 invoke
+  - 失效 buff：Artifact / Unawakened / Regen / Curiosity / Time Warp /
+    Invincible / BeatOfDeath / Surrounded
+  - 修复：`start_combat` 在 `execute_relic_triggers("atBattleStart")` 之前
+    （Java parity）调 `_apply_enemy_pre_battle_effects(state, enemy_objects)`，
+    snake_case→canonical-power-name 映射表见 `_PRE_BATTLE_STATUS_MAP`
+
+**修复 commit**：StSRLSolver fork `e567c65d` on branch
+`fix/mysterious-sphere-phase-filter`。**fork 不能 push**（被 GitHub abuse-prevention
+禁用，我们 own 这个 fork）。
+
+**验证**：
+- 单元测试 (`/tmp/test_simulator_fix.py`)：7/7 全通过（6 个 enemy 类 + JawWorm 反例 +
+  NeowsBlessing counter 3→2 全链路）
+- V8Env smoke (4 ep, 277s)：0 Traceback，0 guard_cap；ep=3 picked NEOW idx=0 后
+  **只有前 3 场战斗** turn_actions∈{1,2}（NeowsLament 正确生效窗口），第 4 场起
+  enemies 真实 HP，combats 14-34 actions
+
+### v13 杀 + v14 从 trial100 重训
+
+- **`batch_v13` 已 kill (2026-05-22 ~12:00)**：simulator bug 让 v3-v13 训练数据
+  污染，没必要继续。原本从 v12 final 续训，~6h 进度直接弃用。
+  Output 目录 `sts_models/v8_ppo_batch_v13/` 保留留档但不再使用。
+
+- **`batch_v14` 启动 (2026-05-22 11:54)**：simulator fix 后首次干净训练。
+  - **续训源**：`sts_models/v8_ppo_trial100/v8_ppo_ep96.pt`（trial100 ckpt 是
+    bug-exploit 程度最低的 baseline，trial100 那一阶段模型还没深度内化 NEOW idx=0
+    pattern）
+  - **参数**：`num_episodes=228 batch_size=32 ckpt_freq=32 eval_freq=128`
+    （n_envs=1 serial, 增量训 132 ep, ep 97→228）
+  - **PID**：14042（nohup, log `/tmp/v8_ppo_batch_v14.log`，output
+    `sts_models/v8_ppo_batch_v14/`）
+  - **注意**：trainer 报 "optimizer load_state_dict mismatch ... keeping fresh
+    optimizer state" + "model load_state_dict missing=4"（boss_proj.* 是 v6+ 加的，
+    trial100 ckpt 没有，保持随机初始化）。**Adam moments 重建 = 前 ~几百 step 学
+    习率/动量噪声偏大**，不阻塞但需观测前 1-2 batch 的 reward trajectory
+  - **预期完成**：~7-8h + ~1.5h final eval
+  - **本批关键**：fix 后从 trial100 续训能否打到/超过 v9 best (0.53 won_game)。
+    若 trial100 内化 exploit 太深，下批考虑彻底 fresh start (random init)
+
+接手 monitor 的检查清单（v14）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v14/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v13.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v13.log | tail -1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v14.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v14.log | tail -1`
 
 ### batch_v7 历史快照
 
