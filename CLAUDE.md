@@ -89,7 +89,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-22 -->
+<!-- last-verified: 2026-05-22 (batch_v15 启动) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -574,15 +574,13 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   avg 28s/max 118s，outlier 拖慢训练，决定 cut search budget 后重启 v14b。
   Output 目录 `sts_models/v8_ppo_batch_v14/`，ckpt 保留但不再续训。
 
-### v14b：search budget cut 后从 trial100 重训 (2026-05-22 14:57 启动)
+### v14b：search budget cut 后从 trial100 重训 (2026-05-22 14:57 启动 → 后续 kill)
 
 - **`batch_v14b` 启动**：v14 同基线 (trial100 ep96)，加 search budget cut。
   - **续训源**：`sts_models/v8_ppo_trial100/v8_ppo_ep96.pt`（同 v14，bug-exploit
     程度最低的 baseline）
   - **参数**：`num_episodes=228 batch_size=32 ckpt_freq=32 eval_freq=128`
     （n_envs=1 serial, 增量训 132 ep, ep 97→228）
-  - **PID**：18767（nohup, log `/tmp/v8_ppo_batch_v14b.log`，output
-    `sts_models/v8_ppo_batch_v14b/`）
   - **新差异**：env.py SOLVER_BUDGETS cut（commit 05894c4）—— elite
     base 500→250ms / cap 12000→1000ms，boss base 2000→500ms / cap 25000→10000ms。
     smoke 4 ep 验证 elite avg 27.7s → 7.5s (-73%)，单 ep wall ~52s。
@@ -590,8 +588,27 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     optimizer state" + "model load_state_dict missing=4"（boss_proj.* 是 v6+ 加的，
     trial100 ckpt 没有，保持随机初始化）。**Adam moments 重建 = 前 ~几百 step 学
     习率/动量噪声偏大**，不阻塞
-  - **预期完成**：~5-6h 训练 + ~1h final eval（比 v14 同长度快 ~30%）
-  - **本批关键**：search budget cut 是否影响 win-rate；若不影响则 v15 可直接复用
+  - **后续**：v14b 已 kill（output 目录已清），决定改 from-scratch 起 batch_v15。
+
+### v15：simulator fix 后第一次干净 from-scratch 训练 (2026-05-22 17:44 启动)
+
+- **`batch_v15` 启动**：**不 resume**，from-scratch（meta head 随机 init,
+  combat head 加载 `sts_models/v8_combat_head_v1.pt`）。
+  - **参数**：`num_episodes=128 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial)
+  - **PID**：24753（nohup, log `/tmp/v8_ppo_batch_v15.log`，output
+    `sts_models/v8_ppo_batch_v15/`）
+  - **新差异（P1-A + P1-D, commit 25efbdc）**：
+    - `deck_eval_freq` default 5 → 10：post-step evaluate_deck 频率减半，
+      profile 显示 deck_eval 占单 ep 时间 ~68%，砍一半 call 数节省 ~15s/ep
+    - `env.reset()` 不再 `clear_deck_cache()`：cache 跨 ep 复用（命中率
+      预期 5% → 30%+），节省 ~10s/ep；act 切换 / `close()` 路径仍清；
+      新加 `reset_cache_for_new_run()` 公共方法供需要 cold cache 场景调用
+  - **预期**：单 ep 43s → ~25s，128 ep ~1h 训练 + final eval
+  - **数据废弃声明**：v3-v14 训练数据全部失效（simulator counter writeback +
+    pre-battle effects bug 让模型学了 NeowsLament 1HP exploit）。v15 是 simulator
+    fix (`e567c65d`) + deck_eval 优化 (`25efbdc`) 后第一次从零干净训练。
+  - **下批训练规范**：每次 128 或 512 ep，ckpt_freq=32（user 已定）
 
 ### Bug audit 结论（2026-05-22, v14b 启动前做）
 
@@ -613,11 +630,12 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
    牌组强度（独立 simulator）+ HP loss + 节点收益（基于真实 hp/relic 变化）+
    floor/won bonus，pre-fix 训练里 reward 信号也基本干净
 
-接手 monitor 的检查清单（v14b）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v14b/`
+接手 monitor 的检查清单（v15）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v15/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v14b.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v14b.log | tail -1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v15.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v15.log | tail -1`
+- 验证 deck_eval 优化生效：`grep "freq=10" /tmp/v8_ppo_batch_v15.log | head -3`
 
 ### batch_v7 历史快照
 
