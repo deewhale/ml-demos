@@ -100,10 +100,15 @@ _META_PHASES = {
 
 
 # Solver 预算（与 v8_bot.SOLVER_BUDGETS 对齐，让战斗内搜索行为一致）
+# 2026-05-23: perf cut — v14 实测 boss avg 37s/max 169s、elite avg 28s/max 118s，
+# outlier 拖慢训练。base_ms / cap_ms 一起砍：
+#   elite 500ms/12000 → 250ms/1000  (per-turn cap 1s, base -50%)
+#   boss  2000ms/25000 → 500ms/10000 (per-turn cap 10s, base -75%)
+# monster 50ms 已经足够小，不动。
 SOLVER_BUDGETS = {
     "monster": (50.0, 5_000, 3_000),
-    "elite": (500.0, 20_000, 12_000),
-    "boss": (2_000.0, 50_000, 25_000),
+    "elite": (250.0, 20_000, 1_000),
+    "boss": (500.0, 50_000, 10_000),
 }
 
 
