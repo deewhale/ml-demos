@@ -663,7 +663,7 @@ _PARSER_DEFAULTS: Dict[str, Any] = {
     "eval_seeds": 30,
     "checkpoint_frequency": 500,
     "max_steps_per_episode": 1500,
-    "deck_eval_freq": 5,
+    "deck_eval_freq": 10,
     "n_envs": 1,
 }
 
@@ -697,7 +697,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=_PARSER_DEFAULTS["deck_eval_freq"],
         help="每 N 次 post-step evaluate_deck 才真跑一次，中间复用上次 deck_strength"
-             "（reward shaping signal 略微稀疏化，换 5-10%% 加速）。default=5。",
+             "（reward shaping signal 略微稀疏化，换加速）。default=10。",
     )
     parser.add_argument(
         "--smoke",
