@@ -569,27 +569,55 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   污染，没必要继续。原本从 v12 final 续训，~6h 进度直接弃用。
   Output 目录 `sts_models/v8_ppo_batch_v13/` 保留留档但不再使用。
 
-- **`batch_v14` 启动 (2026-05-22 11:54)**：simulator fix 后首次干净训练。
-  - **续训源**：`sts_models/v8_ppo_trial100/v8_ppo_ep96.pt`（trial100 ckpt 是
-    bug-exploit 程度最低的 baseline，trial100 那一阶段模型还没深度内化 NEOW idx=0
-    pattern）
+- **`batch_v14` 跑到 ep=222 后人为 kill (2026-05-22 14:11)**：simulator fix 后
+  首次干净训练，跑出 ckpt ep128/160/192。boss combat avg 37s/max 169s、elite
+  avg 28s/max 118s，outlier 拖慢训练，决定 cut search budget 后重启 v14b。
+  Output 目录 `sts_models/v8_ppo_batch_v14/`，ckpt 保留但不再续训。
+
+### v14b：search budget cut 后从 trial100 重训 (2026-05-22 14:57 启动)
+
+- **`batch_v14b` 启动**：v14 同基线 (trial100 ep96)，加 search budget cut。
+  - **续训源**：`sts_models/v8_ppo_trial100/v8_ppo_ep96.pt`（同 v14，bug-exploit
+    程度最低的 baseline）
   - **参数**：`num_episodes=228 batch_size=32 ckpt_freq=32 eval_freq=128`
     （n_envs=1 serial, 增量训 132 ep, ep 97→228）
-  - **PID**：14042（nohup, log `/tmp/v8_ppo_batch_v14.log`，output
-    `sts_models/v8_ppo_batch_v14/`）
+  - **PID**：18767（nohup, log `/tmp/v8_ppo_batch_v14b.log`，output
+    `sts_models/v8_ppo_batch_v14b/`）
+  - **新差异**：env.py SOLVER_BUDGETS cut（commit 05894c4）—— elite
+    base 500→250ms / cap 12000→1000ms，boss base 2000→500ms / cap 25000→10000ms。
+    smoke 4 ep 验证 elite avg 27.7s → 7.5s (-73%)，单 ep wall ~52s。
   - **注意**：trainer 报 "optimizer load_state_dict mismatch ... keeping fresh
     optimizer state" + "model load_state_dict missing=4"（boss_proj.* 是 v6+ 加的，
     trial100 ckpt 没有，保持随机初始化）。**Adam moments 重建 = 前 ~几百 step 学
-    习率/动量噪声偏大**，不阻塞但需观测前 1-2 batch 的 reward trajectory
-  - **预期完成**：~7-8h + ~1.5h final eval
-  - **本批关键**：fix 后从 trial100 续训能否打到/超过 v9 best (0.53 won_game)。
-    若 trial100 内化 exploit 太深，下批考虑彻底 fresh start (random init)
+    习率/动量噪声偏大**，不阻塞
+  - **预期完成**：~5-6h 训练 + ~1h final eval（比 v14 同长度快 ~30%）
+  - **本批关键**：search budget cut 是否影响 win-rate；若不影响则 v15 可直接复用
 
-接手 monitor 的检查清单（v14）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v14/`
+### Bug audit 结论（2026-05-22, v14b 启动前做）
+
+排查范围：deck_evaluator simulator、其他 multi-phase event handlers、relic
+counter writeback、reward shaping。所有项干净，不需要新 fix：
+
+1. **deck_evaluator 不走 GameRunner**：直接 `create_combat_from_enemies` 构造
+   combat，**不经 NEOW 流程** → NeowsBlessing 1HP bug 历史上从未影响牌组评分
+   信号（pre-fix 训练里 deck_evaluator reward 是干净的，只有 env-side
+   hp_loss / floor reward 被污染）
+2. **其他 event handlers**：DeadAdventurer / MaskedBandits / MindBloom 看了
+   choices + handlers，DeadAdventurer 虽是 multi-phase 但每次 search 都
+   推进 attempt_count + 消耗 rewards 队列必然终止；MaskedBandits / MindBloom
+   是 single-phase 选完直接进战斗或结束，不会循环。无需 phase filter
+3. **Counter writeback**：fork commit e567c65d 在 game.py `_end_combat` 已
+   cover 所有 counter relics（NeowsLament/PenNib/Nunchaku/InkBottle/
+   HappyFlower/Sundial/IncenseBurner/Girya/RedSkull 等）
+4. **reward.py**：无"打死敌人 +X"这种容易被 1HP bug exploit 的项，全是
+   牌组强度（独立 simulator）+ HP loss + 节点收益（基于真实 hp/relic 变化）+
+   floor/won bonus，pre-fix 训练里 reward 信号也基本干净
+
+接手 monitor 的检查清单（v14b）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v14b/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v14.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v14.log | tail -1`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v14b.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v14b.log | tail -1`
 
 ### batch_v7 历史快照
 
