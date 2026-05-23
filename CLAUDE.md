@@ -87,6 +87,47 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 - 训练脚本（`train_v*.py`）负责 simulator 集成和数据收集
 - 模型保存为 PyTorch state_dict 到 `sts_models/`
 
+## 训练迭代工作流（强制）
+
+训练是**持续迭代过程**，不是"跑完一批问要不要继续"。每批完成后自动按决策树执行：
+
+### 决策树
+
+| 情况 | 自动动作 |
+|---|---|
+| 数据有改善（任何 metric 涨）| 起下批同参续训 |
+| 训练过程出 bug（Traceback / hang / 数据异常）| 杀进程 → 翻 log → 修代码 → 重启续训 |
+| 数据涨不动（连续 ≥3 批无改善）| 归因分析（翻 log 找 root cause + 提假设 + 实施 A/B 测试）→ 继续训练 |
+| 系统级阻塞（OOM / disk / 模型架构必须改）| 报告 + 等用户指令 |
+| destructive 操作（删大量 ckpt / 回滚已 push commit）| 报告 + 等用户指令 |
+
+### 定时抽查（强制）
+
+之前因 simulator bug 浪费 120+ 小时训练。任何"加速"都得配套"防错"。
+
+**每 2-3 批训练完**：
+1. 派 sub-agent 拉最近批的 5 局完整 trace
+2. 对照 StS wiki 验证（敌人 hp / intent / 卡牌伤害 / relic 触发 / boss pre-battle effect）
+3. 任何不一致 → 立刻报告 + 停训查 bug
+
+**每 5 批 或 里程碑前后**（首次 act1 boss kill / 首次通关）：
+1. 派 sub-agent 起 STS + ModTheSpire 实机
+2. 用最新 ckpt 跑 10 局
+3. 对比训练 metrics（胜率 / 平均楼层 / 各 boss 表现）vs 实机
+4. drift > 30% → 报告 + 调查
+
+### 报告原则
+
+每批完成给简短报告，重点：
+- 哪些 metric 改善 / 持平 / 倒退（vs 上批 + vs baseline）
+- 模型行为变化（从 log 抽：选 AOE 卡偏好、避免某路径、deck 构筑特征等）
+- 距目标多远（A0 通关率、act 进展、SlimeBoss 单点等）
+- 已起的下批 PID（默认）
+
+**不问用户**："继续吗" / "选 A 还是 B" / "做 X 还是 Y"。决策按上面的树自动办。
+
+详见 memory: `feedback_continuous_iteration_no_interrupt.md` / `feedback_periodic_audit_required.md`
+
 ## 当前状态
 
 <!-- last-verified: 2026-05-22 (batch_v15 启动) -->
