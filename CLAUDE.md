@@ -522,6 +522,41 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   上游已弃用整个 Python engine（PR #136/#137 迁到 Rust），我们 checkout 还停留
   在 legacy Python 代码。
 
+## 运行中的训练进程（2026-05-23 状态快照）
+
+### batch_v15 完成 + v16 续训启动 (2026-05-23)
+
+- **`batch_v15` 完成 (2026-05-22 → 2026-05-23, simulator fix 后第一次干净 from-scratch)**：
+  128 ep, ~1.33h (4779s)，from-scratch (meta head 随机 init, combat head v1 加载)。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v15/` 含 ep=32/64/96/128 + final + summary。
+  - **Per-batch beat_boss_in_batch**: 0 / 0 / 0 / 0（4 batch 全 0，从零起步未触及 boss）
+  - **mean_reward**: -44.2 / -47.9 / -53.6 / -54.3（持续下降，但 reward shaping 被
+    simulator fix 后正常化，不再有 NeowsLament 1HP exploit 给的虚高 reward）
+  - **mean_floor**: 9.72 / 9.25 / 9.81 / 9.31（一直停在 act 1 中段，未推到 a1 boss）
+  - **Entropy drift**: 0.713 → 0.681 → 0.641 → 0.618（policy 在 sharpen，无 collapse）
+  - **Eval@ep=128 (30 seed)**: reached_boss=0.267 (8/30), **a1_beat=0.10 (3/30)**,
+    a2_beat=0.00, **won_game=0.00**, floor_mean=9.73, SlimeBoss reach=3 kill=0
+  - **基线已重建**：v15 是 simulator fix (`e567c65d`) 后第一次干净 RL 起步基线。
+    数字看着比 v3-v13 (won_game 30-53%) 低很多，但 v3-v13 数据全部污染。
+    v15 是真实 STS 信号下的 "ep=128 from-scratch" 表现，作为新基线锚点。
+
+- **`batch_v16` 启动 (2026-05-23, 续训, 持续迭代规范首次落地)**：
+  从 v15 final ckpt 续训。**应用 memory `feedback_continuous_iteration_no_interrupt`**：
+  batch 完成自动起下批，不再问 user "继续吗"。
+  - **续训源**：`sts_models/v8_ppo_batch_v15/v8_ppo_final.pt` (episodes_done=128)
+  - **参数**：`num_episodes=256 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 129→256)
+  - **PID**：60253（nohup）；log `/tmp/v8_ppo_batch_v16.log`；output
+    `sts_models/v8_ppo_batch_v16/`；exit signal file `/tmp/v8_ppo_batch_v16.exit`（如有）
+  - **预期**：~1.5-2h 训练 + final eval
+
+接手 monitor 的检查清单（v16）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v16/`
+- 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v16.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v16.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v16.log`（应见 start_episode=128）
+
 ## 运行中的训练进程（2026-05-22 状态快照）
 
 ### Simulator bug 大爆发 + v3→v13 数据失效 (2026-05-22)
