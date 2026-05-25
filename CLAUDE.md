@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-25 (batch_v17 启动 + v16 audit ALL CLEAR) -->
+<!-- last-verified: 2026-05-25 (batch_v18 启动 + v17 完成 a1_beat=10% 反弹) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -614,22 +614,38 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     - **MysteriousSphere COMBAT_WON loop = 0** (Mushrooms fix 持续生效)
     - 0 guard_cap, 0 Traceback
 
-- **`batch_v17` 启动 (2026-05-25, 续训, batch_v16 audit ALL CLEAR 后自动起下批)**：
-  从 v16 final ckpt 续训。
-  - **续训源**：`sts_models/v8_ppo_batch_v16/v8_ppo_final.pt` (episodes_done=256)
-  - **参数**：`num_episodes=384 batch_size=32 ckpt_freq=32 eval_freq=128`
-    (n_envs=1 serial, 增量训 128 ep, ep 257→384)
-  - **PID**：15876（nohup）；log `/tmp/v8_ppo_batch_v17.log`；output
-    `sts_models/v8_ppo_batch_v17/`；exit signal file `/tmp/v8_ppo_batch_v17.exit`（如有）
-  - **启动校验**：`[resume] start_episode=256, target=384 (将增量训 128 ep)`，0 Traceback
+- **`batch_v17` 完成 + v18 续训启动 (2026-05-25)**：
+  v17 训练 128 ep (ep 257→384) 完成，~1.8h 跑完无错。Ckpt 路径
+  `sts_models/v8_ppo_batch_v17/` 含 ep=288/320/352/384 + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback
+  - **Final eval (ep=384, 30 seeds)**:
+    reached_a1_boss=33%, **a1_boss_beat=10%**, a2_boss_beat=0%, won_game=0%,
+    floor_mean=9.9, boss_kills: Hexaghost=0/5, TheGuardian=0/2
+  - **趋势对比** (a1_boss_beat eval): v15=10% → v16=3%（回退）→ **v17=10%（反弹）**。
+    v16 → v17 反弹 + 不构成 3 批连续 plateau → 决策**继续起 v18 续训**
+  - **Per-batch 训练表现** (mean_reward / mean_floor / beat_boss_in_batch):
+    - batch ep=288: -21.08 / 8.84 / 0
+    - batch ep=320: -36.48 / 9.78 / 0
+    - batch ep=352: -37.39 / 10.0 / 0
+    - batch ep=384: -20.52 / 31.94 steps / 0
+    heartbeat 视角 0 final-boss kill；act-1 通过率从 eval 看 10%（与 v15 同档）
+
+- **`batch_v18` 启动 (2026-05-25, 续训, v17 a1_beat 反弹后自动起下批)**：
+  从 v17 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v17/v8_ppo_final.pt` (episodes_done=384)
+  - **参数**：`num_episodes=512 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 385→512)
+  - **PID**：86362（nohup）；log `/tmp/v8_ppo_batch_v18.log`；output
+    `sts_models/v8_ppo_batch_v18/`；exit signal file `/tmp/v8_ppo_batch_v18.exit`（如有）
+  - **启动校验**：`[resume] start_episode=384, target=512 (将增量训 128 ep)`，0 Traceback
   - **预期**：~2-2.5h 训练 + final eval
 
-接手 monitor 的检查清单（v17）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v17/`
+接手 monitor 的检查清单（v18）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v18/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v17.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v17.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v17.log`（应见 start_episode=256）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v18.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v18.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v18.log`（应见 start_episode=384）
 
 ## 运行中的训练进程（2026-05-22 状态快照）
 
