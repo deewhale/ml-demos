@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-26 (batch_v25 启动 + v24 完成 a1_beat=30% 与 v22 peak 持平, bimodal 模式确认) -->
+<!-- last-verified: 2026-05-26 (batch_v26 启动 + v25 完成 a1_beat=3.3% 历史最大单批 dip -26.7pp) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -158,31 +158,33 @@ CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 
 | Batch | ep | a1_boss_beat | won_game | floor_mean | completed | 备注 |
 |---|---|---|---|---|---|---|
-| **v22** | **1024** | **30.0%** | **0.00** | **9.03** | **30/30** | **+26.7pp 大幅反弹，历史 peak (超 v19 peak +10pp)，bimodal floor** |
 | v23 | 1152 | 16.7% | 0.00 | 9.73 | 30/30 | -13.3pp 单次 dip (类似 v19→v20 pattern) |
 | **v24** | **1280** | **30.0%** | **0.00** | **10.57** | **30/30** | **+13.3pp re-peak, 与 v22 持平; bimodal 模式确认（peak ~30% + dip ~15-17%）** |
+| **v25** | **1408** | **3.3%** | **0.00** | **11.83** | **30/30** | **-26.7pp 历史最大单批 dip (2x 之前最深), 与 v21 历史最低持平; 14 reach / 1 kill** |
 
-完整 v15-v24 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+完整 v15-v25 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
 
-- **`batch_v25` 启动 (2026-05-26, 续训, v24 a1_beat 回 peak 后自动起下批)**：
-  从 v24 final ckpt 续训。
-  - **续训源**：`sts_models/v8_ppo_batch_v24/v8_ppo_final.pt` (episodes_done=1280)
-  - **参数**：`num_episodes=1408 batch_size=32 ckpt_freq=32 eval_freq=128`
-    (n_envs=1 serial, 增量训 128 ep, ep 1281→1408)
-  - **PID**：`38084`（nohup）；log `/tmp/v8_ppo_batch_v25.log`；output
-    `sts_models/v8_ppo_batch_v25/`；exit signal file `/tmp/v8_ppo_batch_v25.exit`（如有）
-  - **启动校验**：`[resume] start_episode=1280, target=1408 (将增量训 128 ep)`，0 Traceback
+- **`batch_v26` 启动 (2026-05-26, 续训, v25 历史最大 dip 后自动起下批 + 监控点)**：
+  从 v25 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v25/v8_ppo_final.pt` (episodes_done=1408)
+  - **参数**：`num_episodes=1536 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1409→1536)
+  - **PID**：`43437`（nohup）；log `/tmp/v8_ppo_batch_v26.log`；output
+    `sts_models/v8_ppo_batch_v26/`；exit signal file `/tmp/v8_ppo_batch_v26.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1408, target=1536 (将增量训 128 ep)`，0 Traceback
   - **预期**：~2-2.5h 训练 + final eval
-  - **监控决策**：v22/v24 双 peak 30% 确认稳定上限，v25 看是否能冲破 30% 天花板;
-    若 v25 ≥ 35% 则 trend 继续上行, 若再次 dip 到 15-20% 则 bimodal 区间稳定
-    (考虑 reward shaping / SlimeBoss-specific 改动突破 plateau)
+  - **关键监控点**: v26 a1_beat < 15% → 触发归因调查 (N=2 连续大 regression alarming)
+    - 候选归因: reward shaping 影响 / Adam moment 漂移 / entropy collapse / lr too high
+    - 备选回滚 ckpt: v22 final (ep=1024) / v24 final (ep=1280) — 两个 peak ckpt 可作 baseline
+  - **监控决策**：v26 ≥ 20% → stochastic dip, v25 是 outlier (类似 v19/v22 pattern);
+    v26 ∈ [15%, 20%] → bimodal 抖动, 再观望 1 批; v26 < 15% → 立刻进归因
 
-接手 monitor 的检查清单（v25）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v25/`
+接手 monitor 的检查清单（v26）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v26/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v25.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v25.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v25.log`（应见 start_episode=1280）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v26.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v26.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v26.log`（应见 start_episode=1408）
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。

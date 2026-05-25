@@ -852,3 +852,45 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **监控决策**：v22/v24 双 peak 30% 确认稳定上限，v25 看是否能冲破 30% 天花板;
     若 v25 ≥ 35% 则 trend 继续上行, 若再次 dip 到 15-20% 则 bimodal 区间稳定
     (考虑 reward shaping / SlimeBoss-specific 改动突破 plateau)
+
+- **`batch_v25` 完成 + v26 续训启动 (2026-05-26, 历史最大单批 dip -26.7pp)**：
+  v25 训练 128 ep (ep 1281→1408) 完成，~137 min 总 wall (8211s)，PID 38084
+  exited cleanly。Ckpt 路径 `sts_models/v8_ppo_batch_v25/` 含 ep=1312/1344/1376/1408
+  + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 0 guard_cap
+  - **Final eval (ep=1408, 30 seeds, attribution-based timeout)**:
+    completed_seeds=**30/30** (0 timeout), reached_boss_rate=**0.467** (14/30, 与 v23 持平),
+    **a1_boss_beat_rate=0.0333** (1/30, **-26.7pp vs v24's 30%, 历史最大单批 dip**),
+    a2_boss_beat_rate=0.00, **won_game_rate=0.00**, floor_mean=**11.83**
+    (vs v24=10.57 反升, vs v23=9.73)
+  - **Boss reach/kill counts**: The Guardian reach=4/kill=0, Slime Boss reach=5/kill=0,
+    Hexaghost reach=4/kill=0 (总 reach=13, 全 0 kill — metric gap 持续未变)
+  - **趋势对比** (a1_boss_beat eval, 11 batches): v15=10% → v16=3% → v17=10% →
+    v18=13.3% → v19=20% → v20=7% → v21=3.3% → v22=30% (peak) → v23=16.7% (dip) →
+    v24=30% (re-peak) → **v25=3.3% (max dip, 与 v21 历史最低持平)**
+  - **历史最大 dip flag**: 单批回落 -26.7pp 是之前最深 dip 的 ~2x (v22→v23=-13.3pp,
+    v19→v20=-13pp)。floor_mean 反升 11.83 + reached_boss 维持 0.467 → 不是模型彻底
+    崩溃 (能跑到 boss 房), 但 boss 战斗执行能力骤降 (14 reach 中 13 房只 1 kill)
+  - **第 4 次 dip-recovery pattern**: v19/v20, v22/v23, v24/v25 三次 peak → dip,
+    但 v25 dip 深度异常。单批 dip 不触发 plateau (N=3 连续低 才触发归因);
+    若 v26 仍 < 15% → N=2 连续大 regression alarming, 触发归因调查
+  - **健康度**: 30 seed eval 全 completed，0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v26` 启动 (2026-05-26, 续训, v25 max dip 后自动起下批 + 监控点设置)**：
+  从 v25 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v25/v8_ppo_final.pt` (episodes_done=1408)
+  - **参数**：`num_episodes=1536 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1409→1536)
+  - **PID**：`43437`（nohup）；log `/tmp/v8_ppo_batch_v26.log`；
+    output `sts_models/v8_ppo_batch_v26/`；exit signal file
+    `/tmp/v8_ppo_batch_v26.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1408, target=1536 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+  - **关键监控点**: 若 v26 a1_beat 仍 < 15% → 触发归因调查 (N=2 连续大 regression)
+    - 候选归因: reward shaping 影响 / Adam moment 漂移 / entropy collapse / lr too high
+    - 备选回滚 ckpt: v22 final (ep=1024) / v24 final (ep=1280) — 两个 peak ckpt
+      可作回滚 baseline
+  - **监控决策**：v26 ≥ 20% → 确认是 stochastic dip, v25 是 outlier (类似 v19/v22 pattern);
+    v26 在 [15%, 20%] → bimodal 区间继续抖动, 可再观望 1 批; v26 < 15% → 立刻进归因
