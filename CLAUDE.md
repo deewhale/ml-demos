@@ -563,7 +563,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   上游已弃用整个 Python engine（PR #136/#137 迁到 Rust），我们 checkout 还停留
   在 legacy Python 代码。
 
-## 运行中的训练进程（2026-05-23 状态快照）
+## 运行中的训练进程（2026-05-25 状态快照）
 
 ### batch_v15 完成 + v16 续训启动 (2026-05-23)
 
@@ -640,12 +640,39 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   - **启动校验**：`[resume] start_episode=384, target=512 (将增量训 128 ep)`，0 Traceback
   - **预期**：~2-2.5h 训练 + final eval
 
-接手 monitor 的检查清单（v18）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v18/`
+- **`batch_v18` 完成 + v19 续训启动 (2026-05-25)**：
+  v18 训练 128 ep (ep 385→512) 完成，~1.98h (7133s) 跑完无错。Ckpt 路径
+  `sts_models/v8_ppo_batch_v18/` 含 ep=416/448/480/512 + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 0 guard_cap / 0 MysteriousSphere COMBAT_WON loop
+  - **Final eval (ep=512, 30 seeds, attribution-based timeout)**:
+    reached_a1_boss=40%, **a1_boss_beat=13.3%**, a2_boss_beat=0%, won_game=0%,
+    floor_mean=10.5, avg_steps=34, mean_reward=-0.063；boss kills 中仅 Hexaghost
+    出现击杀（其他 boss 0）
+  - **趋势对比** (a1_boss_beat eval): v15=10% → v16=3% → v17=10% → **v18=13.3%
+    (+3.3pp vs v17，连续 2 批回升)**
+  - **v17/v18 audit (2026-05-25) ALL CLEAR**:
+    - Cultist 战 turn_actions 最长 58 turn 正常，无 player.Strength 异常累积征兆
+    - NeowsLament combat #4+ 敌人 HP 恢复正常 (simulator fix `e567c65d` 生效)
+    - 敌人 roster 全合法（无非法 enemy ID）
+    - Event stalls = 0, guard_cap rate < 1%
+    - 0 Traceback / 0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v19` 启动 (2026-05-25, 续训, v18 a1_beat 持续上涨后自动起下批)**：
+  从 v18 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v18/v8_ppo_final.pt` (episodes_done=512)
+  - **参数**：`num_episodes=640 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 513→640)
+  - **PID**：2259（nohup）；log `/tmp/v8_ppo_batch_v19.log`；output
+    `sts_models/v8_ppo_batch_v19/`；exit signal file `/tmp/v8_ppo_batch_v19.exit`（如有）
+  - **启动校验**：`[resume] start_episode=512, target=640 (将增量训 128 ep)`，0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+
+接手 monitor 的检查清单（v19）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v19/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v18.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v18.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v18.log`（应见 start_episode=384）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v19.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v19.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v19.log`（应见 start_episode=512）
 
 ## 运行中的训练进程（2026-05-22 状态快照）
 
