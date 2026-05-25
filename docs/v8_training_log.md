@@ -32,7 +32,7 @@ v15 起为 simulator fix 后首个干净基线。
 - **`long_v3` 完成 (N=2/3)**: 2026-05-13 16:18 → 2026-05-14 06:29，14.18h，128 ep + 30 seed final eval。Action token fix 后首次 fresh start。Final 指标：
   - reached_a1_boss=**1.00** (+7pp vs v2b), **act1_boss_beat=0.63** (+6pp), act2_boss_beat=**0.53** (-4pp), **won_game=0.43** (+20pp，**near doubled**)
   - floor_mean=14.0 (+1.0), 30 seed 中 13 个完整通关 A0
-  - Per-batch beat_boss_in_batch: 8 / 4 / 11 / 13 (= 25% → 12.5% → 34.4% → 40.6%)，avg_reward 1.79 → -16.72 → 31.53 → 32.06 (batch 2 dip 后稳步上涨)
+  - Per-batch beat_boss_count: 8 / 4 / 11 / 13 (= 25% → 12.5% → 34.4% → 40.6%)，avg_reward 1.79 → -16.72 → 31.53 → 32.06 (batch 2 dip 后稳步上涨)
   - SlimeBoss 仍是瓶颈: **0/11 kills** in eval（v2b 10.5% → v3 0%，30 seed 全是 SlimeBoss seed → 验证 boss-aware encoding gap 仍存在）
   - 健康度: 0 Traceback, 6 guard_cap / 128 ep = 4.7%
   - Ckpt 路径 `sts_models/v8_ppo_long_v3/`，含 ep=32/64/96/128/final + 1 wall_ckpt
@@ -79,7 +79,7 @@ v15 起为 simulator fix 后首个干净基线。
   06:21 训练 + final eval 全部完成，~24.9h（89630s）。160 ep 增量训练 + 2 次 eval@ep=128/256。
   Ckpt 路径 `sts_models/v8_ppo_batch_v5_resume2/` 含 ep=128/160/192/224/256 + final
   + 3 wall。**核心结论：plateau 已严格确认，N=3 framework 触发 escalation**。
-  - **Per-batch beat_boss_in_batch (5 连续 batch)**：
+  - **Per-batch beat_boss_count (5 连续 batch)**：
     - batch 1 (ep 97-128): 14/32 = 43.8%
     - batch 2 (ep 129-160): 13/32 = 40.6%
     - batch 3 (ep 161-192): 14/32 = 43.8%
@@ -119,7 +119,7 @@ v15 起为 simulator fix 后首个干净基线。
   Ckpt 路径 `sts_models/v8_ppo_batch_v6/` 含 ep=288/320/352/384 + final + 3 wall。
   **核心结论**：boss-aware encoding 在 training 信号上有效（SlimeBoss 训练胜率 0%→8.5%），
   但 eval 端未表现，整体仍 plateau。
-  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 257→384)**：
+  - **Per-batch beat_boss_count (4 连续 batch, ep 257→384)**：
     - batch 1 (ep 257-288): 20/32 = 62.5%
     - batch 2 (ep 289-320): 17/32 = 53.1%
     - batch 3 (ep 321-352): 15/32 = 46.9%
@@ -192,7 +192,7 @@ v15 起为 simulator fix 后首个干净基线。
   full eval)**: 从 v6 ep=384 续训 128 ep (ep 385→512)，~12h 训练 + ~2.1h final eval
   全部完成，~12.0h 训练 + 2.1h eval = 总 14.1h（43295s）。Ckpt 路径
   `sts_models/v8_ppo_batch_v7/` 含 ep=416/448/480/512 + final + 1 wall。
-  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 385→512)**：
+  - **Per-batch beat_boss_count (4 连续 batch, ep 385→512)**：
     - batch 1 (ep 385-416): 13/32 = 40.6%
     - batch 2 (ep 417-448): 15/32 = 46.9%
     - batch 3 (ep 449-480): 21/32 = **65.6%** (高点)
@@ -239,7 +239,7 @@ v15 起为 simulator fix 后首个干净基线。
 - **`batch_v8` 完成 (2026-05-20, 训练 trend up + 首次 hang_confirmed 实战触发)**:
   从 v7 ep=512 续训 128 ep (ep 513→640)。Ckpt 路径 `sts_models/v8_ppo_batch_v8/`
   含 ep=640 final。
-  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 513→640)**：
+  - **Per-batch beat_boss_count (4 连续 batch, ep 513→640)**：
     - batch 1: 53%
     - batch 2: 59%
     - batch 3: 59%
@@ -264,7 +264,7 @@ v15 起为 simulator fix 后首个干净基线。
   (24651s)。Ckpt 路径 `sts_models/v8_ppo_batch_v10/` 含 ep=800/832/864/896 final + 1 wall。
   新加速配置生效 (`max_steps_per_episode=1500`, `deck_eval_freq=5`)，wall-time 较 v9
   缩短 ~4h。
-  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 769→896)**：
+  - **Per-batch beat_boss_count (4 连续 batch, ep 769→896)**：
     - batch 1 (ep 769-800): 13/32 = 40.6%
     - batch 2 (ep 801-832): 17/32 = 53.1%
     - batch 3 (ep 833-864): 13/32 = 40.6%
@@ -309,7 +309,7 @@ v15 起为 simulator fix 后首个干净基线。
   从 v11 ep=960 续训 128 ep (ep 961→1088)，~7.59h 训练（27311s）。**serial n_envs=1**
   (v11 parallel stats bug 修复后首跑)。Ckpt 路径 `sts_models/v8_ppo_batch_v12/` 含
   ep=992/1024/1056/1088 + final。
-  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 961→1088)**：
+  - **Per-batch beat_boss_count (4 连续 batch, ep 961→1088)**：
     - batch 1 (ep 961-992):  16/32 = 50.0%
     - batch 2 (ep 993-1024): 17/32 = 53.1%
     - batch 3 (ep 1025-1056): 15/32 = 46.9%
@@ -340,7 +340,7 @@ v15 起为 simulator fix 后首个干净基线。
 - **`batch_v9` 完成 (2026-05-21 02:44, training trend slight dip + eval won_game 历史最高)**:
   从 v8 ep=640 续训 128 ep (ep 641→768)，~10.9h 训练 + ~2.4h final eval = 总 ~10.9h (39334s)。
   Ckpt 路径 `sts_models/v8_ppo_batch_v9/` 含 ep=672/704/736/768 final + 1 wall。
-  - **Per-batch beat_boss_in_batch (4 连续 batch, ep 641→768)**：
+  - **Per-batch beat_boss_count (4 连续 batch, ep 641→768)**：
     - batch 1 (ep 641-672): 15/32 = 46.9%
     - batch 2 (ep 673-704): 15/32 = 46.9%
     - batch 3 (ep 705-736): 9/32 = 28.1% (dip)
@@ -562,7 +562,7 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
 - **`batch_v15` 完成 (2026-05-22 → 2026-05-23, simulator fix 后第一次干净 from-scratch)**：
   128 ep, ~1.33h (4779s)，from-scratch (meta head 随机 init, combat head v1 加载)。
   Ckpt 路径 `sts_models/v8_ppo_batch_v15/` 含 ep=32/64/96/128 + final + summary。
-  - **Per-batch beat_boss_in_batch**: 0 / 0 / 0 / 0（4 batch 全 0，从零起步未触及 boss）
+  - **Per-batch beat_boss_count**: 0 / 0 / 0 / 0（4 batch 全 0，从零起步未触及 boss）
   - **mean_reward**: -44.2 / -47.9 / -53.6 / -54.3（持续下降，但 reward shaping 被
     simulator fix 后正常化，不再有 NeowsLament 1HP exploit 给的虚高 reward）
   - **mean_floor**: 9.72 / 9.25 / 9.81 / 9.31（一直停在 act 1 中段，未推到 a1 boss）
@@ -615,7 +615,7 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
     floor_mean=9.9, boss_kills: Hexaghost=0/5, TheGuardian=0/2
   - **趋势对比** (a1_boss_beat eval): v15=10% → v16=3%（回退）→ **v17=10%（反弹）**。
     v16 → v17 反弹 + 不构成 3 批连续 plateau → 决策**继续起 v18 续训**
-  - **Per-batch 训练表现** (mean_reward / mean_floor / beat_boss_in_batch):
+  - **Per-batch 训练表现** (mean_reward / mean_floor / beat_boss_count):
     - batch ep=288: -21.08 / 8.84 / 0
     - batch ep=320: -36.48 / 9.78 / 0
     - batch ep=352: -37.39 / 10.0 / 0
@@ -679,3 +679,35 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
     `/tmp/v8_ppo_batch_v20.exit`（如有）
   - **启动校验**：`[resume] start_episode=640, target=768 (将增量训 128 ep)`
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v20` 完成 + v21 续训启动 (2026-05-25)**：
+  v20 训练 128 ep (ep 641→768) 完成，~100 min 总 wall (6015.6s)，PID 11503 exited
+  cleanly。Ckpt 路径 `sts_models/v8_ppo_batch_v20/` 含 ep=672/704/736/768 + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 0 hang_confirmed
+  - **Final eval (ep=768, 30 seeds, attribution-based timeout)**:
+    completed_seeds=**30/30** (0 timeout), reached_a1_boss_rate=**0.30** (9/30),
+    **a1_boss_beat_rate=0.07** (2/30), a2_boss_beat_rate=0.00,
+    **won_game_rate=0.00**, floor_mean=10.2
+  - **Boss reach/kill counts**: Hexaghost reach=2/kill=0, Slime Boss reach=1/kill=0,
+    The Guardian reach=4/kill=0 (总 reach=7, 全 0 kill — 与 v19 同源 explicit-kill
+    counter 与 a1_boss_beat_rate 定义差异)
+  - **趋势对比** (a1_boss_beat eval, 6 batches): v15=10% → v16=3% → v17=10% →
+    v18=13.3% → v19=20% → **v20=7% (-13pp vs v19, 单批回落)**
+  - **回归 flag**: 单批回落不触发 plateau (需 3 批连续无改善)。v21 监控决策：若也
+    回落/持平 → 进入归因调查模式 (3-batch plateau rule)
+  - **健康度**: 30 seed eval 全 completed，0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v21` 启动 (2026-05-25, 续训, v20 a1_beat 单批回落后自动起下批)**：
+  从 v20 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v20/v8_ppo_final.pt` (episodes_done=768)
+  - **参数**：`num_episodes=896 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 769→896)
+  - **PID**：`18042`（nohup）；log `/tmp/v8_ppo_batch_v21.log`；
+    output `sts_models/v8_ppo_batch_v21/`；exit signal file
+    `/tmp/v8_ppo_batch_v21.exit`（如有）
+  - **启动校验**：`[resume] start_episode=768, target=896 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+  - **监控决策**：若 v21 a1_boss_beat 也 ≤ 10% (相对 v19 的 20% 持平或回落) →
+    构成 3-batch plateau (v20+v21+下批)，进入归因调查模式

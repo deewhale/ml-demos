@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-25 (batch_v20 启动 + v19 完成 a1_beat=20% 创 simulator-fix 后新高) -->
+<!-- last-verified: 2026-05-25 (batch_v21 启动 + v20 完成 a1_beat=7% 单批回落) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -150,7 +150,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ### V8 RL 训练日志
 
-完整训练历史（trial100 / long_v1-v4 / batch_v5-v19）已归档至 [docs/v8_training_log.md](docs/v8_training_log.md)。
+完整训练历史（trial100 / long_v1-v4 / batch_v5-v20）已归档至 [docs/v8_training_log.md](docs/v8_training_log.md)。
 
 CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 
@@ -158,28 +158,30 @@ CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 
 | Batch | ep | a1_boss_beat | won_game | floor_mean | completed | 备注 |
 |---|---|---|---|---|---|---|
-| v17 | 384 | 10.0% | 0.00 | 9.9 | 30/30 | v16 回退后反弹 |
 | v18 | 512 | 13.3% | 0.00 | 10.5 | 30/30 | 连续 2 批回升 |
-| **v19** | **640** | **20.0%** | **0.00** | **9.93** | **30/30** | **+6.7pp，连续 3 批回升，simulator-fix 后新高** |
+| v19 | 640 | 20.0% | 0.00 | 9.93 | 30/30 | +6.7pp，simulator-fix 后新高 |
+| **v20** | **768** | **7.0%** | **0.00** | **10.2** | **30/30** | **-13pp 单批回落 (flag for v21)** |
 
-完整 v15-v19 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+完整 v15-v20 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
 
-- **`batch_v20` 启动 (2026-05-25, 续训, v19 a1_beat=20% 创 simulator-fix 后新高自动起下批)**：
-  从 v19 final ckpt 续训。
-  - **续训源**：`sts_models/v8_ppo_batch_v19/v8_ppo_final.pt` (episodes_done=640)
-  - **参数**：`num_episodes=768 batch_size=32 ckpt_freq=32 eval_freq=128`
-    (n_envs=1 serial, 增量训 128 ep, ep 641→768)
-  - **PID**：`11503`（nohup）；log `/tmp/v8_ppo_batch_v20.log`；output
-    `sts_models/v8_ppo_batch_v20/`；exit signal file `/tmp/v8_ppo_batch_v20.exit`（如有）
-  - **启动校验**：`[resume] start_episode=640, target=768 (将增量训 128 ep)`
+- **`batch_v21` 启动 (2026-05-25, 续训, v20 a1_beat 单批回落后自动起下批)**：
+  从 v20 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v20/v8_ppo_final.pt` (episodes_done=768)
+  - **参数**：`num_episodes=896 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 769→896)
+  - **PID**：`18042`（nohup）；log `/tmp/v8_ppo_batch_v21.log`；output
+    `sts_models/v8_ppo_batch_v21/`；exit signal file `/tmp/v8_ppo_batch_v21.exit`（如有）
+  - **启动校验**：`[resume] start_episode=768, target=896 (将增量训 128 ep)`，0 Traceback
   - **预期**：~2-2.5h 训练 + final eval
+  - **监控决策**：v20 单批回落（13.3% → 20% → 7%），不触发 plateau。若 v21 a1_boss_beat
+    也 ≤ 10%（持平 v15/v17 水平或继续回落）→ 3 批连续无改善 → 进入归因调查模式
 
-接手 monitor 的检查清单（v20）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v20/`
+接手 monitor 的检查清单（v21）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v21/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v20.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v20.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v20.log`（应见 start_episode=640）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v21.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v21.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v21.log`（应见 start_episode=768）
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
