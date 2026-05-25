@@ -782,3 +782,37 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **预期**：~2-2.5h 训练 + final eval
   - **监控决策**：v22 新高后看 v23 是否能维持 a1_beat ≥ 20% 区间; 若 v23 大幅回落 (≤ 10%)
     可能 v22 是 noise spike, 需 v24 进一步确认
+
+- **`batch_v23` 完成 + v24 续训启动 (2026-05-26, v22 peak 后 stochastic dip)**：
+  v23 训练 128 ep (ep 1025→1152) 完成，~125 min 总 wall (7507.6s)，PID 28987
+  exited cleanly。Ckpt 路径 `sts_models/v8_ppo_batch_v23/` 含 ep=1056/1088/1120/1152
+  + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 0 hang_confirmed / 0 guard_cap
+  - **Final eval (ep=1152, 30 seeds, attribution-based timeout)**:
+    completed_seeds=**30/30** (0 timeout), reached_boss_rate=**0.467** (14/30, vs v22=0.57 -10pp),
+    **a1_boss_beat_rate=0.167** (5/30, **-13.3pp vs v22 peak 30%**),
+    a2_boss_beat_rate=0.00, **won_game_rate=0.00**, floor_mean=**9.73** (vs v22=9.03)
+  - **Boss reach/kill counts**: Slime Boss reach=7/kill=0, Hexaghost reach=1/kill=0,
+    The Guardian reach=1/kill=0 (总 reach=9, 全 0 kill — metric gap 持续)
+  - **趋势对比** (a1_boss_beat eval, 9 batches): v15=10% → v16=3% → v17=10% →
+    v18=13.3% → v19=20% → v20=7% → v21=3.3% → v22=30% (peak) → **v23=16.7%
+    (-13.3pp vs v22, 单次回落)**
+  - **回落归因 (类似 v19→v20)**: v22 peak 后 -13.3pp 单次 dip，pattern 与 v19→v20
+    一致（peak → -13pp single batch dip → 后续大反弹）。未触发 3-batch plateau
+    rule (仅 1 批回落)，按持续迭代规范继续起 v24
+  - **健康度**: 30 seed eval 全 completed，0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v24` 启动 (2026-05-26, 续训, v23 单次 dip 后自动起下批)**：
+  从 v23 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v23/v8_ppo_final.pt` (episodes_done=1152)
+  - **参数**：`num_episodes=1280 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1153→1280)
+  - **PID**：`33643`（nohup）；log `/tmp/v8_ppo_batch_v24.log`；
+    output `sts_models/v8_ppo_batch_v24/`；exit signal file
+    `/tmp/v8_ppo_batch_v24.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1152, target=1280 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+  - **监控决策**：若 v24 反弹回 ≥ 20% 则确认 v23 是 stochastic dip (类似 v20 模式);
+    若 v24 持平/继续 ≤ 17% 则连续 2 批回落，需在 v25 前后准备归因调查
