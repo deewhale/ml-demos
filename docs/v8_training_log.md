@@ -816,3 +816,39 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **预期**：~2-2.5h 训练 + final eval
   - **监控决策**：若 v24 反弹回 ≥ 20% 则确认 v23 是 stochastic dip (类似 v20 模式);
     若 v24 持平/继续 ≤ 17% 则连续 2 批回落，需在 v25 前后准备归因调查
+
+- **`batch_v24` 完成 + v25 续训启动 (2026-05-26, a1_beat=30% 回 v22 peak, 确认 bimodal)**：
+  v24 训练 128 ep (ep 1153→1280) 完成，~135 min 总 wall (8114s)，PID 33643
+  exited cleanly。Ckpt 路径 `sts_models/v8_ppo_batch_v24/` 含 ep=1184/1216/1248/1280
+  + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 2 guard_cap (正常范围)
+  - **Final eval (ep=1280, 30 seeds, attribution-based timeout)**:
+    completed_seeds=**30/30** (0 timeout), reached_boss_rate=**0.567** (17/30, 回 v22 水平 0.57),
+    **a1_boss_beat_rate=0.30** (9/30, **+13.3pp vs v23, 与 v22 peak 持平**),
+    a2_boss_beat_rate=0.00, **won_game_rate=0.00**, floor_mean=**10.57**
+    (vs v23=9.73, vs v22=9.03 略升)
+  - **Boss reach/kill counts**: The Guardian reach=3/kill=0, Slime Boss reach=3/kill=0,
+    Hexaghost reach=2/kill=0 (总 reach=8, 全 0 kill — metric gap 持续未变)
+  - **趋势对比** (a1_boss_beat eval, 10 batches): v15=10% → v16=3% → v17=10% →
+    v18=13.3% → v19=20% → v20=7% → v21=3.3% → v22=30% (peak) → v23=16.7% (dip) →
+    **v24=30% (re-peak, 与 v22 持平)**
+  - **Bimodal 模式确认**: v22 / v24 两个 peak 持平 30%, v23 中间 dip 16.7% — 整体
+    在 ~30% 稳定区间 + stochastic ~5-15% dip 之间震荡。v22 不是 noise spike, v23
+    不是 policy collapse, 而是训练 stochastic 的 bimodal 抖动 (类似 v19/v20 pattern)
+  - **健康度**: 30 seed eval 全 completed，0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v25` 启动 (2026-05-26, 续训, v24 a1_beat 回 peak 后自动起下批)**：
+  从 v24 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v24/v8_ppo_final.pt` (episodes_done=1280)
+  - **参数**：`num_episodes=1408 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1281→1408)
+  - **PID**：`38084`（nohup）；log `/tmp/v8_ppo_batch_v25.log`；
+    output `sts_models/v8_ppo_batch_v25/`；exit signal file
+    `/tmp/v8_ppo_batch_v25.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1280, target=1408 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+  - **监控决策**：v22/v24 双 peak 30% 确认稳定上限，v25 看是否能冲破 30% 天花板;
+    若 v25 ≥ 35% 则 trend 继续上行, 若再次 dip 到 15-20% 则 bimodal 区间稳定
+    (考虑 reward shaping / SlimeBoss-specific 改动突破 plateau)
