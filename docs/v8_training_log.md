@@ -744,3 +744,41 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **关键决策**：若 v22 仍回落/持平 → 触发归因调查 (3-batch plateau rule 实质命中)。
     候选方向: reward shaping 强化 / lower lr / entropy bonus 调高防 policy collapse /
     回滚到 v19 ckpt 重训用更稳超参
+
+- **`batch_v22` 完成 + v23 续训启动 (2026-05-25, a1_beat=30% 新历史高点, 大幅反弹)**：
+  v22 训练 128 ep (ep 897→1024) 完成，~139 min 总 wall (8330.3s)，PID 23805 exited
+  cleanly。Ckpt 路径 `sts_models/v8_ppo_batch_v22/` 含 ep=928/960/992/1024 + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 0 hang_confirmed / 1 guard_cap (正常范围)
+  - **Final eval (ep=1024, 30 seeds, attribution-based timeout)**:
+    completed_seeds=**30/30** (0 timeout), reached_boss_rate=**0.57** (17/30, 几乎翻倍 vs v21=0.30),
+    **a1_boss_beat_rate=0.30** (9/30, **+26.7pp vs v21, +10pp vs v19 peak 20%**),
+    a2_boss_beat_rate=0.00, **won_game_rate=0.00**, floor_mean=**9.03** (vs v21=11.17, **下降**)
+  - **Boss reach/kill counts**: Hexaghost reach=3/kill=0, Slime Boss reach=4/kill=0,
+    The Guardian reach=1/kill=0 (总 reach=8, 全 0 kill — metric gap 持续, kill 计数
+    与 a1_boss_beat_rate 同源差异未变)
+  - **趋势对比** (a1_boss_beat eval, 8 batches): v15=10% → v16=3% → v17=10% →
+    v18=13.3% → v19=20% (prev peak) → v20=7% → v21=3.3% (lowest) → **v22=30%
+    (+26.7pp vs v21, 新历史高点, 超 v19 peak +10pp)**
+  - **bimodal floor_mean 观察**: floor_mean=9.03 比 v21=11.17 **下降** 2.14, 但
+    reached_boss_rate 几乎翻倍 (0.30→0.57)。表明 v22 seed 分布是 bimodal: 要么早死,
+    要么打到 boss 并大幅提升 a1 kill 概率。policy 在「冒险打深」和「稳保 floor 10」
+    之间向前者偏移
+  - **回归 flag 解除**: v20/v21 连续 2 批 regression 被 v22 大幅反弹打破，证实是
+    **training stochastic dip 而非 policy collapse**。不再需要进入归因调查模式
+    (v19 peak 之后的「连续 2 批回落」trigger 已被 v22 反弹否决)
+  - **健康度**: 30 seed eval 全 completed，0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v23` 启动 (2026-05-25, 续训, v22 a1_beat=30% 新历史高点后自动起下批)**：
+  从 v22 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v22/v8_ppo_final.pt` (episodes_done=1024)
+  - **参数**：`num_episodes=1152 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1025→1152)
+  - **PID**：`28987`（nohup）；log `/tmp/v8_ppo_batch_v23.log`；
+    output `sts_models/v8_ppo_batch_v23/`；exit signal file
+    `/tmp/v8_ppo_batch_v23.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1024, target=1152 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+  - **监控决策**：v22 新高后看 v23 是否能维持 a1_beat ≥ 20% 区间; 若 v23 大幅回落 (≤ 10%)
+    可能 v22 是 noise spike, 需 v24 进一步确认
