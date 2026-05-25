@@ -711,3 +711,36 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **预期**：~2-2.5h 训练 + final eval
   - **监控决策**：若 v21 a1_boss_beat 也 ≤ 10% (相对 v19 的 20% 持平或回落) →
     构成 3-batch plateau (v20+v21+下批)，进入归因调查模式
+
+- **`batch_v21` 完成 + v22 续训启动 (2026-05-25, 连续 2 批 regression flag)**：
+  v21 训练 128 ep (ep 769→896) 完成，~108 min 总 wall (6475.6s)，PID 18042 exited
+  cleanly。Ckpt 路径 `sts_models/v8_ppo_batch_v21/` 含 ep=800/832/864/896 + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 0 hang_confirmed
+  - **Final eval (ep=896, 30 seeds, attribution-based timeout)**:
+    completed_seeds=**30/30** (0 timeout), reached_boss_rate=**0.30** (9/30),
+    **a1_boss_beat_rate=0.0333** (1/30), a2_boss_beat_rate=0.00,
+    **won_game_rate=0.00**, floor_mean=11.17
+  - **Boss reach/kill counts**: Slime Boss reach=3/kill=0, The Guardian reach=2/kill=0,
+    Hexaghost reach=3/kill=0 (总 reach=8, 全 0 kill — 持续 metric gap)
+  - **趋势对比** (a1_boss_beat eval, 7 batches): v15=10% → v16=3% → v17=10% →
+    v18=13.3% → v19=20% (peak) → v20=7% → **v21=3.3% (-3.7pp vs v20, 连续 2 批回落)**
+  - **回归 flag**: **连续 2 批 regression** (v19→v20 -13pp, v20→v21 -3.7pp)，
+    v21 已**低于 v15 起点 (10%)**，policy collapse 嫌疑大。
+    严格 3-batch plateau rule 还差 1 批 (v22)，但实质已是 plateau/collapse 模式
+  - **健康度**: 30 seed eval 全 completed，0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v22` 启动 (2026-05-25, 续训, v21 连续 2 批回落后自动起下批)**：
+  从 v21 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v21/v8_ppo_final.pt` (episodes_done=896)
+  - **参数**：`num_episodes=1024 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 897→1024)
+  - **PID**：`23805`（nohup）；log `/tmp/v8_ppo_batch_v22.log`；
+    output `sts_models/v8_ppo_batch_v22/`；exit signal file
+    `/tmp/v8_ppo_batch_v22.exit`（如有）
+  - **启动校验**：`[resume] start_episode=896, target=1024 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+  - **关键决策**：若 v22 仍回落/持平 → 触发归因调查 (3-batch plateau rule 实质命中)。
+    候选方向: reward shaping 强化 / lower lr / entropy bonus 调高防 policy collapse /
+    回滚到 v19 ckpt 重训用更稳超参
