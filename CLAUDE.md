@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-22 (batch_v15 启动) -->
+<!-- last-verified: 2026-05-25 (batch_v17 启动 + v16 audit ALL CLEAR) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -591,12 +591,45 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
     `sts_models/v8_ppo_batch_v16/`；exit signal file `/tmp/v8_ppo_batch_v16.exit`（如有）
   - **预期**：~1.5-2h 训练 + final eval
 
-接手 monitor 的检查清单（v16）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v16/`
+- **`batch_v16` 完成 + v17 续训启动 (2026-05-25)**：
+  v16 训练 128 ep (ep 129→256) 完成，从 v15 final 续训。Ckpt 路径
+  `sts_models/v8_ppo_batch_v16/` 含 ep=160/192/224/256 + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 0 guard_cap / 0 MysteriousSphere COMBAT_WON loop
+  - **Per-batch 表现 (基于 heartbeat beat_boss=True，仅捕获 final boss 胜利)**：
+    heartbeat 视角 0 beat_boss，但 `[deck] room=boss` 日志显示
+    **5 个 act 1 boss kill**（ep=167 Hexaghost, ep=205 Hexaghost,
+    ep=227 TheGuardian, ep=237 TheGuardian, ep=255 TheGuardian）→ act 1 通过率
+    **3.9% (5/128)**，仍处于 simulator-fix 后早期学习阶段
+  - **Per-boss eval （training 内）**: Hexaghost 2/16=12.5%，TheGuardian 3/8=37.5%,
+    SlimeBoss **0/16=0%**（SlimeBoss bottleneck 持续，未 boss-aware encoding 改动）
+  - **Audit (5 ep 抽查 ep=130/160/190/220/250)**: ALL CLEAR。
+    - Cultist 战 turn_actions 分布健康（102/117 = 1 turn 解决，最长 27 turn）→
+      无 player.Strength 异常累积征兆
+    - GremlinNob / Lagavulin / Hexaghost / SlimeBoss / TheGuardian 战斗长度合理（13-44 turn）
+    - 敌人 roster 与 wiki 一致（Louse / SpikeSlime / Cultist / JawWorm / FungiBeast /
+      Sentry / Lagavulin / Hexaghost / SlimeBoss / TheGuardian 等），act 2+ enemy
+      (SphericGuardian / Byrd / Champ) 偶发出现，**无非法 enemy ID**
+    - Event 多样性正常（Mushrooms 27 / AccursedBlacksmith 21 / GoldenIdol 19 等），
+      328 个 `resolved->MAP_NAVIGATION` + 14 个 `combat_started`，**0 个 event stuck**
+    - **MysteriousSphere COMBAT_WON loop = 0** (Mushrooms fix 持续生效)
+    - 0 guard_cap, 0 Traceback
+
+- **`batch_v17` 启动 (2026-05-25, 续训, batch_v16 audit ALL CLEAR 后自动起下批)**：
+  从 v16 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v16/v8_ppo_final.pt` (episodes_done=256)
+  - **参数**：`num_episodes=384 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 257→384)
+  - **PID**：15876（nohup）；log `/tmp/v8_ppo_batch_v17.log`；output
+    `sts_models/v8_ppo_batch_v17/`；exit signal file `/tmp/v8_ppo_batch_v17.exit`（如有）
+  - **启动校验**：`[resume] start_episode=256, target=384 (将增量训 128 ep)`，0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+
+接手 monitor 的检查清单（v17）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v17/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v16.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v16.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v16.log`（应见 start_episode=128）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v17.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v17.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v17.log`（应见 start_episode=256）
 
 ## 运行中的训练进程（2026-05-22 状态快照）
 
