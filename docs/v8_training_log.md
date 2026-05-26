@@ -1206,3 +1206,36 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **观察重点**：dip 后关键观测批次, 过往 dip (batch_v25/v21) 后 1-2 批
     通常回弹; 如果 batch_v34 a1_beat 仍 < 15% → 触发严肃归因调查
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v34` 完成 + v35 续训启动 (2026-05-27, dip 后回弹但未回 peak)**：
+  v34 训练 128 ep (ep 2433→2560) 完成，elapsed_sec=1143.68 (final eval)，
+  0 Traceback。Ckpt 路径 `sts_models/v8_ppo_batch_v34/` 含 ep=2464/2496/2528/2560
+  + final + v8_ppo_summary.json。
+  - **Final eval (ep=2560, 30 seeds)**:
+    - completed_seeds=30/30, reached_boss_rate=**0.40** (12/30)
+    - **act1_boss_beat_rate=0.167** (5/30, **+10pp 回弹 vs batch_v33 6.67%**)
+    - **act2_boss_beat_rate=0.00** (batch_v32 首次 3.3% 未保持)
+    - **won_game_rate=0.00**
+    - floor_mean=9.17, floor_max=16
+  - **Boss reach/kill counts**: Slime Boss reach=3, Hexaghost reach=2, Guardian reach=2
+    (total reach=7), boss_kill 全 0 (metric gap persists)
+  - **跨批 a1_boss_beat trend (20 批)**: …→ batch_v30=30% → batch_v31=23.3% →
+    batch_v32=16.7% → batch_v33=6.67% (dip) → **batch_v34=16.7%** (回弹)
+  - **关键观察**: dip 后回弹符合过往规律 (类似 batch_v25→26, batch_v21→22),
+    但 batch_v34 没回 peak 30%, 处于 plateau 中位区间; act 2 boss 突破未保持,
+    33/34 批仍 0%; 通关率 0% 持续
+  - **健康度**: 0 Traceback / 30 seed eval 全 completed / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v35` 启动 (2026-05-27, 续训, dip 回弹后继续观察)**：
+  从 v34 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v34/v8_ppo_final.pt` (episodes_done=2560)
+  - **参数**：`num_episodes=2688 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2561→2688)
+  - **PID**：`8610`（nohup）；log `/tmp/v8_ppo_batch_v35.log`；
+    output `sts_models/v8_ppo_batch_v35/`；exit signal file
+    `/tmp/v8_ppo_batch_v35.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2560, target=2688 (将增量训 128 ep)`，
+    0 Traceback
+  - **观察重点**：回弹后能否继续上行回到 23-30% peak 区间, 或维持 plateau 中位
+  - **预期**：~2-2.5h 训练 + final eval
