@@ -944,3 +944,47 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
     v27 完成后**强烈建议 user 介入决定归因方向**，autonomous loop 不再自动起 v28。
     需 user 决策: 继续标准续训 / reward shaping / entropy bonus 调整 / 回滚 v22 或 v24
     peak ckpt 重训。
+
+- **`batch_v27` 完成 + v28 续训启动 (2026-05-26, plateau 内持续小幅恢复)**：
+  v27 训练 128 ep (ep 1537→1664) 完成，~142 min (8521s)，0 Traceback / 1 guard_cap
+  (~0.8%, 正常范围)，PID 48252 已干净退出。Ckpt 路径 `sts_models/v8_ppo_batch_v27/`
+  含 ep=1568/1600/1632/1664 + final + v8_ppo_summary.json。
+  - **Final eval (ep=1664, 30 seeds, attribution-based timeout)**:
+    - reached_boss_rate=**0.60** (18/30, **+10pp vs batch_v26 0.50**)
+    - **act1_boss_beat_rate=0.167** (5/30, **+3.3pp vs batch_v26 0.133**, 持续恢复
+      但仍远低于 batch_v22 peak 0.30)
+    - act2_boss_beat_rate=**0.00**, won_game_rate=**0.00**
+    - floor_mean=12.1 (vs batch_v26 11.93 微升)
+    - boss_reach_counts: Slime Boss=3, Hexaghost=7, The Guardian=3 (total 13,
+      **Hexaghost-heavy 不同于以往**, 之前几批 Guardian/Slime 占主导)
+    - boss_kill_counts: 全部 0 (metric gap 持续, 5 个 a1_beat 全部来自非典型 boss
+      路径或 eval seed mix 差异)
+    - completed_seeds=30/30
+  - **跨批 a1_boss_beat 趋势 (13 batch)**：
+    ... → batch_v22=**30%** (peak) → batch_v23=16.7% → batch_v24=30% (回 peak) →
+    batch_v25=3.3% (max dip) → batch_v26=13.3% (反弹) → **batch_v27=16.7%** (+3.3pp,
+    连续 2 批小幅恢复但仍 plateau 内)
+  - **判定**：N=3 plateau 仍触发中（v22 peak 之后 5 批未超 peak）。v27 vs v26 +3.3pp
+    + reached_boss +10pp 显示**模型在小幅恢复**，但 won_game / a2_beat 持续 0，
+    eval 端未突破。继续 plateau 状态 → **等 user 决策归因方向**。
+  - **实机测试基础设施 (2026-05-26 已搭好)**：
+    - `tools/run_real_test.sh` — 实机测试入口脚本
+    - `v8_play_real.py` — multi-game 自动化实机对战，支持连续多局
+    - 已知问题待修: subscreen handling (GRID / SHOP / multi-phase EVENT) — 子屏幕
+      下 action dispatch 不完整, 跑实机时会卡在某些 event 子页面。修复后可做
+      training metrics vs 实机对照验证
+  - **健康度**: 30 seed eval 全 completed (0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop), 训练 1 guard_cap 在正常范围
+
+- **`batch_v28` 启动 (2026-05-26, 续训, plateau 内自动起下批)**：
+  从 v27 final ckpt 续训。**autonomous loop 在 plateau 内继续小步迭代**，
+  等 user 决策归因方向期间维持训练节奏。
+  - **续训源**：`sts_models/v8_ppo_batch_v27/v8_ppo_final.pt` (episodes_done=1664)
+  - **参数**：`num_episodes=1792 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1665→1792)
+  - **PID**：`60472`（nohup）；log `/tmp/v8_ppo_batch_v28.log`；
+    output `sts_models/v8_ppo_batch_v28/`；exit signal file
+    `/tmp/v8_ppo_batch_v28.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1664, target=1792 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
