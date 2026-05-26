@@ -1239,3 +1239,46 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
     0 Traceback
   - **观察重点**：回弹后能否继续上行回到 23-30% peak 区间, 或维持 plateau 中位
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v35` 完成 + v36 续训启动 (2026-05-27, ⚠ 历史最低水平之一 + post-fix 5 批未回 peak)**：
+  v35 训练 128 ep (ep 2561→2688) 完成，elapsed_sec=963.78 (final eval)，0 Traceback。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v35/` 含 ep=2592/2624/2656/2688 + final +
+  v8_ppo_summary.json。
+  - **Final eval (ep=2688, 30 seeds)**:
+    - completed_seeds=30/30, reached_boss_rate=**0.333** (10/30)
+    - **act1_boss_beat_rate=0.0333** (1/30, **历史最低水平之一, 与 batch_v25/v21 持平**)
+    - **act2_boss_beat_rate=0.00**
+    - **won_game_rate=0.00**
+    - floor_mean=10.07, floor_max=16
+  - **Boss reach/kill counts**: Slime Boss reach=3, The Guardian reach=3,
+    Hexaghost reach=3 (均衡 mix, total reach=9 但 boss_kill 全 0)
+  - **跨批 a1_boss_beat trend (21 批, 重点看 simulator fix 后区间)**:
+    …→ batch_v30=30% (peak4) → batch_v31=23.3% → batch_v32=16.7% → batch_v33=6.67%
+    → batch_v34=16.7% → **batch_v35=3.33%** (post-fix 5 批: 23.3/16.7/6.67/16.7/3.33,
+    平均 13.3%, **5 批均未回 fix 前 peak 30%**)
+  - **⚠ ESCALATION 信号**: 模拟器 Question Card / Busted Crown bug fix
+    (commit `1413d69f` on fork) 后已 5 批训练 (batch_v31 - v35), 全部 < 25%, 平均 13.3%,
+    vs fix 前 batch_v22-v30 多次回 peak 30% 水平
+  - **候选解释**:
+    - A) 噪声 — 5 批可能不足, 之前 6 批连续 dip 也出现过
+    - B) 模拟器 fix 改了选卡数量, 模型早期学的"会多给/少给"假设失效, 需重新校准
+    - C) 真 policy collapse 但与 simulator fix 无关 (时机巧合)
+  - **按规范判定**: N=3 plateau 严格触发 (post-fix 5 批全部低于 peak); user 之前说
+    "训练没改算正常" 但 simulator fix **改变了 dynamics**, 此条件不再严格成立
+  - **健康度**: 0 Traceback / 30 seed eval 全 completed / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v36` 启动 (2026-05-27, 续训, ⚠ post-fix 关键观测批次)**：
+  从 v35 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v35/v8_ppo_final.pt` (episodes_done=2688)
+  - **参数**：`num_episodes=2816 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2689→2816)
+  - **PID**：`11957`（nohup）；log `/tmp/v8_ppo_batch_v36.log`；
+    output `sts_models/v8_ppo_batch_v36/`；exit signal file
+    `/tmp/v8_ppo_batch_v36.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2688, target=2816 (将增量训 128 ep)`，
+    0 Traceback
+  - **⚠ ESCALATION FLAG**: batch_v36 是 dip 后是否回弹的关键观测批次;
+    如果仍 < 20% → 强烈建议 user 介入讨论归因方向 (回滚 simulator fix /
+    回 ckpt v22/v24/v28/v30 peak 重训 / 其他)
+  - **预期**：~2-2.5h 训练 + final eval
