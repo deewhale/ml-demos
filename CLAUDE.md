@@ -191,6 +191,16 @@ autonomous loop 在 plateau 内继续小步迭代 (v30 已起), **等 user 决�
 - 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v30.log`（应见 start_episode=1920）
 
 ### 已修复 bug
+- **StSRLSolver 问题卡 / 破碎王冠选卡数量重复加减**
+  (2026-05-25 发现 + 同日修复, fork commit `1413d69f`):
+  `reward_handler._generate_card_reward` 在调 `generate_card_rewards` 前预先按
+  Question Card +1 / Busted Crown -2 算了一次 `num_cards`，但
+  `generate_card_rewards` 内部又按 `has_*` flag 算了一次，重复加减。结果：
+  单问题卡 5 张（应 4）/ 单破碎王冠 1 张（min clamp 兜住碰巧对）/ 同时拿 1
+  张（应 2）。修复：删 `reward_handler` 里的预先计算，统一让 `generate_card_rewards`
+  处理。268 个 reward / relic_card test 全过 + 4 case 端到端验证全过。**影响 ~1%
+  选卡决策**（拿到 Question Card 或 Busted Crown 的局），训练数据轻污染但远小于
+  NeowsLament / Mushrooms 这类系统性 bug。
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
 - **StSRLSolver 持久 relic counter 不回写 + `get_pre_battle_effects()` 从未调用**
   (2026-05-22 发现 + 同日修复, fork commit `e567c65d`):
@@ -234,6 +244,8 @@ autonomous loop 在 plateau 内继续小步迭代 (v30 已起), **等 user 决�
   - `e567c65d`：persistent relic counter writeback + enemy
     `get_pre_battle_effects` wired (2026-05-22, **巨型 bug**, 让 NeowsLament
     永远不递减 + 8 个 boss/elite atBattleStart buff 全部失效)
+  - `1413d69f`：reward_handler 问题卡 / 破碎王冠选卡数量重复加减
+    (2026-05-25, ~1% 选卡决策受影响)
   上游已弃用整个 Python engine（PR #136/#137 迁到 Rust），我们 checkout 还停留
   在 legacy Python 代码。
 
