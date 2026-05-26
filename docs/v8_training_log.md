@@ -1172,3 +1172,37 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **观察重点**：act 2 boss 维度首次突破后能否持续累积 / a1_boss_beat 是否
     回到 23-30% plateau 区间
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v33` 完成 + v34 续训启动 (2026-05-27, ⚠ 连续 3 批回落, 接近历史最低)**：
+  v33 训练 128 ep (ep 2305→2432) 完成，elapsed ~2100s 训练 + 1219.98s eval，
+  0 Traceback。Ckpt 路径 `sts_models/v8_ppo_batch_v33/` 含 ep=2336/2368/2400/2432
+  + final + v8_ppo_summary.json。
+  - **Final eval (ep=2432, 30 seeds)**:
+    - completed_seeds=30/30, reached_boss_rate=**0.433** (13/30)
+    - **act1_boss_beat_rate=0.0667** (2/30, **-10pp vs batch_v32 16.7%, 连续 3 批回落**)
+    - **act2_boss_beat_rate=0.00** (vs batch_v32 历史首次 3.3% **未保持**)
+    - **won_game_rate=0.00**
+    - floor_mean=10.77, floor_max=16
+  - **Boss reach/kill counts**: Guardian reach=3, Slime Boss reach=4, Hexaghost reach=4
+    (total reach=11), boss_kill 全 0 (metric gap persists)
+  - **跨批 a1_boss_beat trend (19 批)**: …→ batch_v22=30% (peak1) → batch_v24=30% (peak2)
+    → batch_v28=30% (peak3) → batch_v30=30% (peak4) → batch_v31=23.3% → batch_v32=16.7%
+    → **batch_v33=6.67%** (连续 3 批回落, 接近 batch_v25=3.3% / batch_v21=3.3% 历史 dip)
+  - **关键观察**: 模拟器 bug 修复后 (batch_v31+) 连续 3 批回落, 但波动幅度类似过往 dip 模式;
+    按过往规律 dip 后通常 1-2 批回弹, 如果 batch_v34 仍 < 15% → 严肃考虑归因调查
+  - **健康度**: 0 Traceback / 30 seed eval 全 completed / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v34` 启动 (2026-05-27, 续训, dip 后关键观测批次)**：
+  从 v33 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v33/v8_ppo_final.pt` (episodes_done=2432)
+  - **参数**：`num_episodes=2560 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2433→2560)
+  - **PID**：`4810`（nohup）；log `/tmp/v8_ppo_batch_v34.log`；
+    output `sts_models/v8_ppo_batch_v34/`；exit signal file
+    `/tmp/v8_ppo_batch_v34.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2432, target=2560 (将增量训 128 ep)`，
+    0 Traceback
+  - **观察重点**：dip 后关键观测批次, 过往 dip (batch_v25/v21) 后 1-2 批
+    通常回弹; 如果 batch_v34 a1_beat 仍 < 15% → 触发严肃归因调查
+  - **预期**：~2-2.5h 训练 + final eval
