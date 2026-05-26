@@ -1028,3 +1028,41 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **启动校验**：`[resume] start_episode=1792, target=1920 (将增量训 128 ep)`，
     0 Traceback
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v29` 完成 + v30 续训启动 (2026-05-26, a1_boss_beat 小幅回落 + reached_boss 再创新高)**：
+  v29 训练 128 ep (ep 1793→1920) 完成，~2h20m (8411.8s)，0 Traceback / 0 guard_cap，
+  PID 68347 已干净退出。Ckpt 路径 `sts_models/v8_ppo_batch_v29/` 含
+  ep=1824/1856/1888/1920 + final + v8_ppo_summary.json。
+  - **Final eval (ep=1920, 30 seeds, attribution-based timeout)**:
+    - reached_boss_rate=**0.70** (21/30, **历史新高**, +6.7pp vs batch_v28 0.633)
+    - **act1_boss_beat_rate=0.233** (7/30, **-6.7pp vs batch_v28 0.30**, 小幅回落
+      但仍在 plateau 区间内 vs peak 30%)
+    - act2_boss_beat_rate=**0.00**, won_game_rate=**0.00**
+    - floor_mean=11.3 (vs batch_v28 11.2 持平)
+    - boss_reach_counts: Slime Boss=9, Hexaghost=3, The Guardian=2 (total 14,
+      **SB-heavy 64%** — Slime Boss 占比远高于以往批次)
+    - boss_kill_counts: 全部 0 (metric gap 持续, 7 个 a1_beat 全部来自非典型 boss
+      路径或 eval seed mix 差异)
+    - completed_seeds=30/30
+  - **跨批 a1_boss_beat 趋势 (15 batch)**：
+    ... → batch_v22=**30%** (peak) → batch_v23=16.7% → batch_v24=30% (回 peak) →
+    batch_v25=3.3% (max dip) → batch_v26=13.3% → batch_v27=16.7% →
+    batch_v28=30% (回 peak) → **batch_v29=23.3%** (小幅回落)
+  - **判定**：bimodal/plateau 模式持续。a1_beat 单批 -6.7pp 回落部分由 **SB-heavy
+    seed mix** 解释 (SB 一直 0 kill, 占 64% 拉低整体击败率); reached_boss 70% 创
+    新高表明**模型撑到 boss 的能力仍在累积**, 但 boss_kill 全 0 的 metric gap
+    持续——能到 boss 但杀不掉。
+  - **健康度**: 30 seed eval 全 completed (0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop), 训练 0 guard_cap 历史最佳
+
+- **`batch_v30` 启动 (2026-05-26, 续训, plateau 内自动起下批)**：
+  从 v29 final ckpt 续训。**autonomous loop 在 plateau 内继续小步迭代**。
+  - **续训源**：`sts_models/v8_ppo_batch_v29/v8_ppo_final.pt` (episodes_done=1920)
+  - **参数**：`num_episodes=2048 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1921→2048)
+  - **PID**：`86395`（nohup）；log `/tmp/v8_ppo_batch_v30.log`；
+    output `sts_models/v8_ppo_batch_v30/`；exit signal file
+    `/tmp/v8_ppo_batch_v30.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1920, target=2048 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
