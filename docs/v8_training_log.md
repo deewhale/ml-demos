@@ -1066,3 +1066,39 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **启动校验**：`[resume] start_episode=1920, target=2048 (将增量训 128 ep)`，
     0 Traceback
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v30` 完成 + v31 续训启动 (2026-05-26, a1_boss_beat 回到 peak 30%)**：
+  v30 训练 128 ep (ep 1921→2048) + final eval 全部完成，~2.5h 训练 (9125.6s)，
+  0 Traceback，PID 86395 已干净退出。Ckpt 路径 `sts_models/v8_ppo_batch_v30/` 含
+  ep=1952/1984/2016/2048 + final + summary。
+  - **Final eval (ep=2048, 30 seeds)**:
+    - reached_boss_rate=**0.633** (19/30, 与 batch_v28 持平, vs batch_v29 0.70 微降 -6.7pp)
+    - **act1_boss_beat_rate=0.30** (9/30, **回 peak**, +6.7pp vs batch_v29 0.233)
+    - act2_boss_beat_rate=0.00
+    - won_game_rate=0.00 (metric gap 持续)
+    - floor_mean=10.57
+    - boss_reach_counts: TheGuardian=1, Hexaghost=5, SlimeBoss=4 (total 10, 较均衡 mix)
+    - boss_kill_counts: 全 0 (metric gap)
+    - completed_seeds=30/30
+  - **趋势 (a1_boss_beat eval, 最近 5 批)**：
+    batch_v26=23% → batch_v27=27% → **batch_v28=30%** (peak) →
+    batch_v29=23.3% (回落) → **batch_v30=30%** (回 peak)
+    plateau 在 23-30% 区间内波动，**未突破上限**
+  - **健康度**: 30 seed eval 全 completed (0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop), 训练 0 guard_cap
+
+- **`batch_v31` 启动 (2026-05-26, 续训, 模拟器 Question Card / Busted Crown bug 修复后第一批)**：
+  从 v30 final ckpt 续训。**关键差异**: 这是 StSRLSolver fork commit `1413d69f`
+  (主项目 commit `ee09e150`) Question Card / Busted Crown bug 修复后的第一批训练。
+  修复影响 ~1% 选卡决策，主要是问题卡 + 破碎王冠组合下的卡牌奖励分支。
+  - **续训源**：`sts_models/v8_ppo_batch_v30/v8_ppo_final.pt` (episodes_done=2048)
+  - **参数**：`num_episodes=2176 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2049→2176)
+  - **PID**：`90806`（nohup）；log `/tmp/v8_ppo_batch_v31.log`；
+    output `sts_models/v8_ppo_batch_v31/`；exit signal file
+    `/tmp/v8_ppo_batch_v31.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2048, target=2176 (将增量训 128 ep)`，
+    0 Traceback
+  - **观察重点**：bug 修复影响面 ~1%，预期数据波动在噪声范围内；连续 2-3 批
+    观察是否有微小 trend 变化
+  - **预期**：~2-2.5h 训练 + final eval
