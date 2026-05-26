@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-26 (batch_v28 启动 + v27 完成 a1_beat=16.7%; plateau 内持续小幅恢复, ESCALATION 仍待 user 决策) -->
+<!-- last-verified: 2026-05-26 (batch_v29 启动 + v28 完成 a1_beat=30% 回到 peak + reached_boss=63.3% 历史新高; plateau bimodal 模式继续, ESCALATION 仍待 user 决策) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -158,36 +158,37 @@ CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 
 | Batch | ep | a1_boss_beat | won_game | floor_mean | completed | 备注 |
 |---|---|---|---|---|---|---|
-| **v25** | **1408** | **3.3%** | **0.00** | **11.83** | **30/30** | **-26.7pp 历史最大单批 dip (2x 之前最深), 与 v21 历史最低持平; 14 reach / 1 kill** |
 | **v26** | **1536** | **13.3%** | **0.00** | **11.93** | **30/30** | **+10pp 小幅回升但远低于 peak; N=3 plateau 严格触发 (v23-v26 未超 v22 peak)** |
 | **v27** | **1664** | **16.7%** | **0.00** | **12.1** | **30/30** | **+3.3pp 连续 2 批小幅恢复; reached_boss=60% (+10pp); Hexaghost-heavy seed mix; plateau 持续** |
+| **v28** | **1792** | **30%** | **0.00** | **11.2** | **30/30** | **+13.3pp 回到 peak 30% (第 3 次); reached_boss=63.3% 历史新高; boss_kill 仍全 0 (能到 boss 杀不掉)** |
 
-完整 v15-v27 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+完整 v15-v28 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
 
-**[ESCALATION] N=3 plateau 触发, 归因方向待 user 决策**: v22 peak 30% 后, v23/v24/v25/v26/v27
-连续 5 批未超 peak (16.7% / 30% / 3.3% / 13.3% / 16.7%, bimodal 抖动但 ceiling 卡 30%)。
-autonomous loop 在 plateau 内继续小步迭代 (v28 已起), **等 user 决策归因方向**:
-- 候选: reward shaping drift / entropy collapse / Adam moment 漂移 / 回滚 v22 或 v24 peak ckpt
-- A/B 候选: 平行从 v22 / v24 重训对比 trajectory 稳定性; entropy bonus +20% 看是否减少 dip
+**[ESCALATION] N=3 plateau 触发, 归因方向待 user 决策**: v22 peak 30% 后, v23-v28
+连续 6 批 bimodal 抖动 (16.7% / 30% / 3.3% / 13.3% / 16.7% / **30%**), ceiling 卡 30%
+不突破。won_game 持续 0%, boss_kill 持续全 0 (能到 boss 杀不掉)。
+autonomous loop 在 plateau 内继续小步迭代 (v29 已起), **等 user 决策归因方向**:
+- 候选: reward shaping drift / entropy collapse / Adam moment 漂移 / 回滚 v22/v24/v28 peak ckpt
+- A/B 候选: 平行从 peak ckpt 重训对比 trajectory 稳定性; entropy bonus +20% 看是否减少 dip
 - 实机测试基础设施已搭好 (`tools/run_real_test.sh` + multi-game `v8_play_real.py`),
   待修 subscreen handling (GRID/SHOP/multi-phase EVENT) 后可做 training vs 实机对照验证
 
-- **`batch_v28` 启动 (2026-05-26, 续训, plateau 内自动起下批)**：
-  从 v27 final ckpt 续训。**autonomous loop 在 plateau 内继续小步迭代, 等 user 决策归因方向**。
-  - **续训源**：`sts_models/v8_ppo_batch_v27/v8_ppo_final.pt` (episodes_done=1664)
-  - **参数**：`num_episodes=1792 batch_size=32 ckpt_freq=32 eval_freq=128`
-    (n_envs=1 serial, 增量训 128 ep, ep 1665→1792)
-  - **PID**：`60472`（nohup）；log `/tmp/v8_ppo_batch_v28.log`；output
-    `sts_models/v8_ppo_batch_v28/`；exit signal file `/tmp/v8_ppo_batch_v28.exit`（如有）
-  - **启动校验**：`[resume] start_episode=1664, target=1792 (将增量训 128 ep)`，0 Traceback
+- **`batch_v29` 启动 (2026-05-26, 续训, plateau 内自动起下批)**：
+  从 v28 final ckpt 续训。**autonomous loop 在 plateau 内继续小步迭代, 等 user 决策归因方向**。
+  - **续训源**：`sts_models/v8_ppo_batch_v28/v8_ppo_final.pt` (episodes_done=1792)
+  - **参数**：`num_episodes=1920 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1793→1920)
+  - **PID**：`68347`（nohup）；log `/tmp/v8_ppo_batch_v29.log`；output
+    `sts_models/v8_ppo_batch_v29/`；exit signal file `/tmp/v8_ppo_batch_v29.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1792, target=1920 (将增量训 128 ep)`，0 Traceback
   - **预期**：~2-2.5h 训练 + final eval
 
-接手 monitor 的检查清单（v28）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v28/`
+接手 monitor 的检查清单（v29）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v29/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v28.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v28.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v28.log`（应见 start_episode=1664）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v29.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v29.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v29.log`（应见 start_episode=1792）
 
 ### 已修复 bug
 - **Action token mode-collapse bug** (2026-05-13): `v8/action_space.py` CARD_REWARD / EVENT / SHOP 三个 phase 的 token 字符串现在注入 card_name / event choice text / shop item name。**v2b ckpt 的 token-prior 已失效**，下批训练 fresh start。
