@@ -1102,3 +1102,35 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **观察重点**：bug 修复影响面 ~1%，预期数据波动在噪声范围内；连续 2-3 批
     观察是否有微小 trend 变化
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v31` 完成 + v32 续训启动 (2026-05-26, 模拟器 bug 修复后第一批, SB-heavy seed 拖低 a1_beat)**：
+  v31 训练 128 ep (ep 2049→2176) 完成，elapsed 8398.5s (~2.3h)，0 Traceback。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v31/` 含 ep=2080/2112/2144/2176 + final +
+  v8_ppo_summary.json。这是 StSRLSolver fork commit `1413d69f` (Question Card /
+  Busted Crown bug 修复) 后的第一批训练。
+  - **Final eval (ep=2176, 30 seed, attribution-based timeout)**:
+    completed_seeds=30/30, reached_boss_rate=**0.567** (17/30, 微降 vs v30 63.3%),
+    **act1_boss_beat_rate=0.233** (7/30, **-6.7pp vs v30 30%**, 同 v29 水平),
+    act2_boss_beat_rate=0.00, **won_game_rate=0.00**, floor_mean=10.6
+  - **Boss reach/kill counts**: Guardian reach=2 kill=0, Hexaghost reach=2 kill=0,
+    **Slime Boss reach=6** kill=0 (total reach=10, **SB-heavy 60%**)
+  - **跨批 a1_boss_beat trend (17 批)**: … → batch_v28=30% → batch_v29=23.3% →
+    batch_v30=30% → **batch_v31=23.3%**。持续在 23-30% 区间波动 6 批了
+  - **回落部分原因**: SB-heavy seed mix (6/10 boss 遭遇 = 60% Slime Boss) 拖低
+    a1_beat，因 SlimeBoss 累计 0 kill（boss-aware encoding 在 eval 端持续无效）
+  - **模拟器 bug 修复影响**: 对这批训练 trend 无明显影响（修复只影响 ~1% 选卡，
+    符合预期；信号被 SB-heavy seed noise 完全掩盖）
+  - **健康度**: 0 Traceback / 30 seed eval 全 completed / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v32` 启动 (2026-05-26, 续训, plateau 继续观察)**：
+  从 v31 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v31/v8_ppo_final.pt` (episodes_done=2176)
+  - **参数**：`num_episodes=2304 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2177→2304)
+  - **PID**：`95493`（nohup）；log `/tmp/v8_ppo_batch_v32.log`；
+    output `sts_models/v8_ppo_batch_v32/`；exit signal file
+    `/tmp/v8_ppo_batch_v32.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2176, target=2304 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
