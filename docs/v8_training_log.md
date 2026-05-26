@@ -1134,3 +1134,41 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **启动校验**：`[resume] start_episode=2176, target=2304 (将增量训 128 ep)`，
     0 Traceback
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v32` 完成 + v33 续训启动 (2026-05-26, ★ 历史首次 act 2 boss 突破 ★)**：
+  v32 训练 128 ep (ep 2177→2304) 完成，elapsed ~7694s (~2.1h)，0 Traceback。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v32/` 含 ep=2208/2240/2272/2304 + final +
+  v8_ppo_summary.json。
+  - **★ 里程碑：整个 V8 RL 训练历史首次 act 2 boss 击败 ★**
+    - **act2_boss_beat_rate=0.0333** (1/30, **首次非零**，v3-v31 全部为 0)
+    - 来自 floor advancement 信号（boss_kill_counts 维度仍全 0，metric gap 持续）
+  - **Final eval (ep=2304, 30 seeds)**:
+    - completed_seeds=30/30, reached_boss_rate=**0.40** (12/30, 较低 vs v31 56.7%)
+    - **act1_boss_beat_rate=0.167** (5/30, **-6.7pp vs batch_v31 23.3%**)
+    - **act2_boss_beat_rate=0.0333** (1/30, **历史首次非零**)
+    - **won_game_rate=0.00** (没人过 act 3 心脏)
+    - floor_mean=9.9, floor_max=16, elapsed_sec=1389.66
+  - **Boss reach/kill counts**: Hexaghost reach=2, Slime Boss reach=4, Guardian reach=1
+    (total reach=7, 比 v31 reach=10 偏低), boss_kill 全 0 (metric gap persists)
+  - **跨批 a1_boss_beat trend (18 批)**: … → batch_v28=30% → batch_v29=23.3% →
+    batch_v30=30% → batch_v31=23.3% → **batch_v32=16.7%**。整体回落但
+    **act2 维度首次突破**说明深局推进能力在累积
+  - **健康度**: 0 Traceback / 30 seed eval 全 completed / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+  - **按规范应做实机对照测试**：里程碑触发（首次 act 2 boss 突破），按
+    `feedback_periodic_audit_required` 应派 sub-agent 起 STS + ModTheSpire 实机
+    用 ep=2304 ckpt 跑 10 局对照训练 metric
+
+- **`batch_v33` 启动 (2026-05-26, 续训, act 2 boss 突破后继续累积)**：
+  从 v32 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v32/v8_ppo_final.pt` (episodes_done=2304)
+  - **参数**：`num_episodes=2432 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2305→2432)
+  - **PID**：`99912`（nohup）；log `/tmp/v8_ppo_batch_v33.log`；
+    output `sts_models/v8_ppo_batch_v33/`；exit signal file
+    `/tmp/v8_ppo_batch_v33.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2304, target=2432 (将增量训 128 ep)`，
+    0 Traceback
+  - **观察重点**：act 2 boss 维度首次突破后能否持续累积 / a1_boss_beat 是否
+    回到 23-30% plateau 区间
+  - **预期**：~2-2.5h 训练 + final eval

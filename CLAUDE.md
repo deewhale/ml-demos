@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-26 (batch_v32 启动 + v31 完成 a1_beat=23.3% SB-heavy seed 拖低; 模拟器 Question Card / Busted Crown bug 修复后第一批无明显信号; plateau 6 批 23-30% 区间波动, ESCALATION 仍待 user 决策) -->
+<!-- last-verified: 2026-05-27 (batch_v33 启动 + v32 完成 ★ 历史首次 act 2 boss 突破 1/30 = 3.3% ★; a1_beat=16.7% 回落; reached_boss=40% 偏低; 按规范应做实机对照测试) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -158,39 +158,45 @@ CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 
 | Batch | ep | a1_boss_beat | won_game | floor_mean | completed | 备注 |
 |---|---|---|---|---|---|---|
-| **v29** | **1920** | **23.3%** | **0.00** | **11.3** | **30/30** | **-6.7pp 小幅回落 (SB-heavy seed mix 64% 拉低); reached_boss=70% 再创新高; boss_kill 仍全 0; plateau 持续** |
 | **v30** | **2048** | **30%** | **0.00** | **10.57** | **30/30** | **+6.7pp 回 peak 30% (第 4 次); reached_boss=63.3% 持平 v28; boss_reach mix 均衡 (G=1/Hex=5/SB=4); boss_kill 仍全 0** |
 | **v31** | **2176** | **23.3%** | **0.00** | **10.6** | **30/30** | **-6.7pp 回落 (模拟器 bug 修复后第一批, 无明显信号); SB-heavy 60% 拖低; reached_boss=56.7%; boss_kill 仍全 0** |
+| **v32** | **2304** | **16.7%** | **0.00** | **9.9** | **30/30** | **★ 历史首次 act2_boss_beat=3.3% (1/30 非零) ★; a1_beat -6.7pp 回落; reached_boss=40% 偏低; boss_kill 仍全 0 (metric gap)** |
 
-完整 v15-v31 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+完整 v15-v32 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
 
-**[ESCALATION] N=3 plateau 触发, 归因方向待 user 决策**: v22 peak 30% 后, v23-v31
-连续 9 批 bimodal 抖动 (16.7% / 30% / 3.3% / 13.3% / 16.7% / 30% / 23.3% / 30% / **23.3%**), ceiling 卡 30%
+**★ 里程碑提醒 (batch_v32 ep=2304) ★**: V8 RL 训练历史**首次** act 2 boss 突破
+(1/30 = 3.3%, v3-v31 全部为 0)。按 `feedback_periodic_audit_required` 规范，
+里程碑触发应派 sub-agent 起 STS + ModTheSpire 实机用 `v8_ppo_batch_v32/v8_ppo_final.pt`
+跑 10 局对照训练 metric (drift > 30% 立即报告)。
+
+**[ESCALATION] N=3 plateau 触发, 归因方向待 user 决策**: v22 peak 30% 后, v23-v32
+连续 10 批 bimodal 抖动 (16.7% / 30% / 3.3% / 13.3% / 16.7% / 30% / 23.3% / 30% / 23.3% / **16.7%**), ceiling 卡 30%
 不突破。won_game 持续 0%, boss_kill 持续全 0 (能到 boss 杀不掉)。
-autonomous loop 在 plateau 内继续小步迭代 (v32 已起), **等 user 决策归因方向**:
+**但 batch_v32 出现首次 act 2 boss 突破 (3.3%) → 深局推进能力在累积**。
+autonomous loop 在 plateau 内继续小步迭代 (v33 已起), **等 user 决策归因方向**:
 - 候选: reward shaping drift / entropy collapse / Adam moment 漂移 / 回滚 v22/v24/v28/v30 peak ckpt
 - A/B 候选: 平行从 peak ckpt 重训对比 trajectory 稳定性; entropy bonus +20% 看是否减少 dip
 - 实机测试基础设施已搭好 (`tools/run_real_test.sh` + multi-game `v8_play_real.py`),
   待修 subscreen handling (GRID/SHOP/multi-phase EVENT) 后可做 training vs 实机对照验证
 
-- **`batch_v32` 启动 (2026-05-26, 续训, plateau 内继续观察)**：
-  从 v31 final ckpt 续训。v31 模拟器 bug 修复后第一批数据无明显信号
-  (a1_beat 23.3%, SB-heavy seed 拖低), 继续起下批观察 trend。
-  - **续训源**：`sts_models/v8_ppo_batch_v31/v8_ppo_final.pt` (episodes_done=2176)
-  - **参数**：`num_episodes=2304 batch_size=32 ckpt_freq=32 eval_freq=128`
-    (n_envs=1 serial, 增量训 128 ep, ep 2177→2304)
-  - **PID**：`95493`（nohup）；log `/tmp/v8_ppo_batch_v32.log`；output
-    `sts_models/v8_ppo_batch_v32/`；exit signal file `/tmp/v8_ppo_batch_v32.exit`（如有）
-  - **启动校验**：`[resume] start_episode=2176, target=2304 (将增量训 128 ep)`，0 Traceback
-  - **观察重点**: plateau 6 批 23-30% 区间波动, 看 v32 是否再回 30% 还是继续抖动
+- **`batch_v33` 启动 (2026-05-26, 续训, act 2 boss 首次突破后继续累积)**：
+  从 v32 final ckpt 续训。batch_v32 出现历史首次 act 2 boss 突破 (1/30),
+  继续起下批观察该信号是否持续累积。
+  - **续训源**：`sts_models/v8_ppo_batch_v32/v8_ppo_final.pt` (episodes_done=2304)
+  - **参数**：`num_episodes=2432 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2305→2432)
+  - **PID**：`99912`（nohup）；log `/tmp/v8_ppo_batch_v33.log`；output
+    `sts_models/v8_ppo_batch_v33/`；exit signal file `/tmp/v8_ppo_batch_v33.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2304, target=2432 (将增量训 128 ep)`，0 Traceback
+  - **观察重点**: act 2 boss 维度首次突破后能否持续累积; a1_beat 是否回到 23-30% plateau
   - **预期**：~2-2.5h 训练 + final eval
 
-接手 monitor 的检查清单（v32）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v32/`
+接手 monitor 的检查清单（v33）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v33/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v32.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v32.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v32.log`（应见 start_episode=2176）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v33.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v33.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v33.log`（应见 start_episode=2304）
 
 ### 已修复 bug
 - **StSRLSolver 问题卡 / 破碎王冠选卡数量重复加减**
