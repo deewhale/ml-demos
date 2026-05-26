@@ -894,3 +894,53 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
       可作回滚 baseline
   - **监控决策**：v26 ≥ 20% → 确认是 stochastic dip, v25 是 outlier (类似 v19/v22 pattern);
     v26 在 [15%, 20%] → bimodal 区间继续抖动, 可再观望 1 批; v26 < 15% → 立刻进归因
+
+- **`batch_v26` 完成 + v27 续训启动 (2026-05-26, N=3 plateau 严格触发 + ESCALATION)**：
+  v26 训练 128 ep (ep 1409→1536) 完成，~142 min 总 wall (8511s)，PID 43437
+  exited cleanly。Ckpt 路径 `sts_models/v8_ppo_batch_v26/` 含 ep=1440/1472/1504/1536
+  + final + summary。
+  - **训练侧**: 128 ep, 0 Traceback / 0 guard_cap
+  - **Final eval (ep=1536, 30 seeds, attribution-based timeout)**:
+    completed_seeds=**30/30** (0 timeout), reached_boss_rate=**0.50** (15/30, 与 v24 持平),
+    **a1_boss_beat_rate=0.133** (4/30, **+10pp vs v25 但远低于 v22/v24 peak 30%**),
+    a2_boss_beat_rate=0.00, **won_game_rate=0.00**, floor_mean=**11.93**
+    (vs v25=11.83, 持平)
+  - **Boss reach/kill counts**: Slime Boss reach=7/kill=0, The Guardian reach=2/kill=0,
+    Hexaghost reach=2/kill=0 (总 reach=11, 全 0 kill — metric gap 持续未变;
+    Slime Boss 累计 reach 7 仍 0 kill, boss-aware encoding 未在 eval 端发挥作用)
+  - **趋势对比** (a1_boss_beat eval, 12 batches): v15=10% → v16=3% → v17=10% →
+    v18=13.3% → v19=20% → v20=7% → v21=3.3% → v22=30% (peak) → v23=16.7% → v24=30%
+    (re-peak) → v25=3.3% → **v26=13.3%** (v25 dip 后小幅回升但远低于 peak)
+  - **[ESCALATION] N=3 plateau 严格触发**: v23/v24/v25/v26 连续 4 批未超 v22 peak 30%。
+    v26 (13.3%) 触发先前设的 < 15% 归因监控阈值。bimodal 抖动 + 整体 ceiling 仍卡在
+    30% peak。**归因方向所需的架构级决策属于用户决策范围**:
+    - **候选归因方向 (供用户讨论)**:
+      1. Reward shaping 影响：v22 之后 step reward 是否有 implicit drift？
+      2. Entropy collapse：v22 时 entropy ~0.21，v26 时是否更低？需 grep 验证
+      3. Adam moment 累积漂移：长 chain resume 后 momentum 偏离最优区域
+      4. Bimodal exploration：v22/v24 peak 时找到稳定 trajectory，dip 时 trajectory
+         多样化但失败率高
+      5. Boss-aware encoding 还需强化（Slime Boss 累计 reach 7 仍 0 kill）
+    - **A/B 测试候选**:
+      - 平行从 v22 ep=1024 重训 N batch vs v24 ep=1280 重训 N batch，看哪条 trajectory 更稳
+      - 调 entropy bonus +20% vs current，看是否能减少 dip 深度
+    - **回滚 baseline ckpt**: v22 final (ep=1024) / v24 final (ep=1280) 双 peak
+  - **健康度**: 30 seed eval 全 completed，0 timeout / 0 Traceback / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v27` 启动 (2026-05-26, 续训, autonomous loop 继续起标准续训 + ESCALATION FLAG)**：
+  从 v26 final ckpt 续训。**autonomous loop 继续起 v27 标准续训，但下批完成后强烈
+  建议由 user 介入决定归因方向**。
+  - **续训源**：`sts_models/v8_ppo_batch_v26/v8_ppo_final.pt` (episodes_done=1536)
+  - **参数**：`num_episodes=1664 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 1537→1664)
+  - **PID**：`48252`（nohup）；log `/tmp/v8_ppo_batch_v27.log`；
+    output `sts_models/v8_ppo_batch_v27/`；exit signal file
+    `/tmp/v8_ppo_batch_v27.exit`（如有）
+  - **启动校验**：`[resume] start_episode=1536, target=1664 (将增量训 128 ep)`，
+    0 Traceback
+  - **预期**：~2-2.5h 训练 + final eval
+  - **[ESCALATION FLAG]**: N=3 plateau 已严格触发 (v23/v24/v25/v26 未超 v22 peak)。
+    v27 完成后**强烈建议 user 介入决定归因方向**，autonomous loop 不再自动起 v28。
+    需 user 决策: 继续标准续训 / reward shaping / entropy bonus 调整 / 回滚 v22 或 v24
+    peak ckpt 重训。
