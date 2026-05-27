@@ -1361,3 +1361,49 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
   - **预期波动**: 模型从 v37 ckpt resume, 但 reward 信号源变了, 前几个 eval
     周期 (ep=3072/3200/3328) 可能 dip 然后回升
   - **预期总时长**: ~3 小时 (vs 旧 reward 同长度 ~14 小时)
+
+- **`batch_v38` 中止 (2026-05-27, ⚠ 跑 928/1024 ep 后 hang 在 Guardian boss 战, 91% 完成)**:
+  新 reward (commit `8b9485a`) 第一批数据。ep 2945→3872 共 928 ep 完成,
+  ep=3882 进 Guardian boss combat (floor=16 act=1, hp=32/80) 后 36+ 分钟无心跳,
+  CPU 仍 ~33% 但无 log 推进, 按规范 30+min 无 heartbeat 立刻杀 (PID 23005, kill at 23:13)。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v38/` 含 ep=2976/3008/3040/.../3872 (无 final.pt)。
+  - **训练侧**: 928 ep, 0 Traceback (训练 loop 健康, hang 在 search 引擎深度搜索时
+    陷入循环, 不是 PPO / env 路径的 bug)
+  - **7 个中间评估 (eval_freq=128, ep 3072→3840)**:
+    - ep=3072: a1=13.3% reach=46.7% floor=10.8 (新 reward 适应期)
+    - ep=3200: a1=13.3% reach=53.3% floor=11.6
+    - ep=3328: **a1=40.0% reach=70.0% floor=9.4** (峰值, 新 reward 适应后冲高)
+    - ep=3456: a1=26.7% reach=60.0% floor=10.8
+    - ep=3584: a1=26.7% reach=50.0% floor=10.4
+    - ep=3712: a1=16.7% reach=53.3% floor=11.4
+    - ep=3840: a1=20.0% reach=53.3% floor=11.2
+    - **均值**: a1≈22%, reach≈55%, floor≈10.8
+  - **跨 reward 对比**: 旧 reward 后期 (v31-v37) a1_beat 均值 ~17.6%; 新 reward
+    7 评估均值 22% 略高, 峰值 40% 也高于旧 reward peak 30% (v36)。**初步信号:
+    real-combat reward 在 a1_beat 维度比 simulation-based 略好, 但 peak 不持续**
+  - **hang 详情**:
+    - ep=3882 进 Guardian boss combat (hp=32/80) 后 36+ 分钟无 log 输出
+    - CPU 仍在用 (~33%) 但 heartbeat 卡死, ckpt 进度也不再增加
+    - **怀疑**: 搜索引擎在深度搜索 Guardian 致死分支 (低 hp + boss 多 intent) 时
+      陷入循环, 不是 event handler / env 死循环 (`[event] enter/exit` 干净)
+    - 按规范 (memory `feedback_hung_process_kill_immediately`): 30+min 无心跳
+      触发立刻 kill
+  - **判定**: 继续从 ep=3872 续训 (v39), 数据有改善 (a1_beat trend up), hang 在
+    boss combat 是新发现的潜在 bug 但不阻塞训练, 后续观察是否再现; 不动 reward
+    设置, 累计更多新 reward 数据后再判定
+
+- **`batch_v39` 启动 (2026-05-27, 续训, 从 v38 hang 救出, 1024 ep 长跑)**：
+  从 v38 ep=3872 ckpt 续训 (v38 hang 在 ep=3882, 用 ep=3872 是最后干净 ckpt)。
+  - **续训源**：`sts_models/v8_ppo_batch_v38/v8_ppo_ep3872.pt` (episodes_done=3872,
+    NOT final.pt because v38 hang 没生成 final.pt)
+  - **参数**：`num_episodes=4896 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, **增量训 1024 ep**, ep 3873→4896)
+  - **PID**：`88369`（nohup）；log `/tmp/v8_ppo_batch_v39.log`；output
+    `sts_models/v8_ppo_batch_v39/`；exit signal file `/tmp/v8_ppo_batch_v39.exit`（如有）
+  - **启动校验**：`[resume] start_episode=3872, target=4896 (将增量训 1024 ep)`，
+    0 Traceback
+  - **观察重点**:
+    1. v38 hang 现象是否再现 (Guardian boss 深搜索循环)
+    2. a1_beat 是否维持 22% 均值, peak 40% 能否持续
+    3. act 2 boss 突破 / won_game 破零
+  - **预期总时长**: ~3 小时 (新 reward ~10.7s/ep)
