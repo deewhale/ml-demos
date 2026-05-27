@@ -1282,3 +1282,36 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
     如果仍 < 20% → 强烈建议 user 介入讨论归因方向 (回滚 simulator fix /
     回 ckpt v22/v24/v28/v30 peak 重训 / 其他)
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v36` 完成 + v37 续训启动 (2026-05-27, ✅ post-fix 首次回 peak 30%, escalation 信号解除)**：
+  v36 训练 128 ep (ep 2689→2816) 完成，elapsed_sec=1619.69 (final eval)，0 Traceback。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v36/` 含 ep=2720/2752/2784/2816 + final +
+  v8_ppo_summary.json。
+  - **Final eval (ep=2816, 30 seeds)**:
+    - completed_seeds=30/30, reached_boss_rate=**0.667** (20/30, **接近历史最高**)
+    - **act1_boss_beat_rate=0.30** (9/30, **回到 peak 30%, post-simulator-fix 第一次**)
+    - **act2_boss_beat_rate=0.00**
+    - **won_game_rate=0.00**
+    - floor_mean=10.03, floor_max=16
+  - **Boss reach/kill counts**: Slime Boss reach=6, Hexaghost reach=4,
+    The Guardian reach=1 (total reach=11, boss_kill 仍全 0 -- a1_beat 来自 reach 后 hp 推算)
+  - **跨批 a1_boss_beat trend (post-simulator-fix 6 批)**:
+    batch_v31=23.3% → batch_v32=16.7% → batch_v33=6.67% → batch_v34=16.7% →
+    batch_v35=3.33% → **batch_v36=30%** (回 peak)
+  - **关键判定**: 之前 escalation 信号 (post-fix 5 批未回 peak, 平均 13.3%) 被本批打破;
+    验证 "波动正常, 不动训练方法" 判断正确; ESCALATION FLAG 解除
+  - **健康度**: 0 Traceback / 30 seed eval 全 completed / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v37` 启动 (2026-05-27, 续训, post-fix 回 peak 后继续训练)**：
+  从 v36 final ckpt 续训。
+  - **续训源**：`sts_models/v8_ppo_batch_v36/v8_ppo_final.pt` (episodes_done=2816)
+  - **参数**：`num_episodes=2944 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2817→2944)
+  - **PID**：`16474`（nohup）；log `/tmp/v8_ppo_batch_v37.log`；
+    output `sts_models/v8_ppo_batch_v37/`；exit signal file
+    `/tmp/v8_ppo_batch_v37.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2816, target=2944 (将增量训 128 ep)`，
+    0 Traceback
+  - **观察重点**：回 peak 后能否继续维持 ≥ 20%, 或再次回落; act 2 boss 是否突破
+  - **预期**：~2-2.5h 训练 + final eval

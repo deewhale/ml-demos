@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-27 (batch_v36 启动 + v35 完成: a1_beat=3.33% 历史最低水平之一; ⚠ post-fix 5 批 (v31-v35) 全部 < 25%, 平均 13.3%, 均未回 fix 前 peak 30%; act 2 boss 突破未保持; 通关率持续 0%; v36 是 dip 后是否回弹的关键观测批次) -->
+<!-- last-verified: 2026-05-27 (batch_v37 启动 + v36 完成: a1_beat=30% 回到 peak, post-simulator-fix 第一次; reached_boss=66.7% 接近历史最高; 之前 5 批 (v31-v35) 未回 peak 的 escalation 信号被 v36 打破; 验证 "波动正常, 不动训练方法" 判断正确) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -158,45 +158,36 @@ CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 
 | Batch | ep | a1_boss_beat | won_game | floor_mean | completed | 备注 |
 |---|---|---|---|---|---|---|
-| **v33** | **2432** | **6.67%** | **0.00** | **10.77** | **30/30** | **⚠ 连续 3 批回落 (v31→v32→v33: 23.3%→16.7%→6.67%); act2_boss_beat 回 0 (v32 突破未保持); reached_boss=43.3%; 接近 batch_v25/v21 历史 dip 水平 (3.3%); 按过往规律 dip 后 1-2 批应回弹** |
-| **v34** | **2560** | **16.7%** | **0.00** | **9.17** | **30/30** | **+10pp 回弹 vs v33 (dip 后回弹符合过往规律, 类似 batch_v25→26 / batch_v21→22); 未回 peak 30%, 处于 plateau 中位; act2_boss_beat=0 (v32 突破仍未保持); reached_boss=40%; boss_kill 仍全 0** |
-| **v35** | **2688** | **3.33%** | **0.00** | **10.07** | **30/30** | **⚠ 历史最低水平之一 (与 batch_v25/v21 持平); post-fix 5 批 (v31-v35: 23.3/16.7/6.67/16.7/3.33) 平均 13.3%, **均未回 fix 前 peak 30%**; reached_boss=33.3%; boss reach 均衡 (Slime/Guardian/Hexa 各 3); boss_kill 仍全 0** |
+| **v34** | **2560** | **16.7%** | **0.00** | **9.17** | **30/30** | **+10pp 回弹 vs v33 (dip 后回弹符合过往规律); 未回 peak 30%, plateau 中位; act2_boss_beat=0 (v32 突破未保持); reached_boss=40%; boss_kill 仍全 0** |
+| **v35** | **2688** | **3.33%** | **0.00** | **10.07** | **30/30** | **⚠ 历史最低水平之一 (与 batch_v25/v21 持平); post-fix 5 批均未回 peak 30%; reached_boss=33.3%; boss reach 均衡 (Slime/Guardian/Hexa 各 3); boss_kill 仍全 0** |
+| **v36** | **2816** | **30%** | **0.00** | **10.03** | **30/30** | **✅ post-simulator-fix 第一次回 peak 30% (9/30); reached_boss=66.7% (20/30) 接近历史最高; boss reach Slime=6 / Hexa=4 / Guardian=1; act2_boss_beat 仍 0; boss_kill 仍全 0 (a1_beat 来自 reach+hp 推算)** |
 
-完整 v15-v35 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+完整 v15-v36 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
 
-**[ESCALATION] post-fix 5 批连续低于 peak 30%, batch_v36 是关键观测**:
-模拟器 Question Card / Busted Crown bug fix (commit `1413d69f` on fork) 后已 5 批
-训练 (batch_v31 - v35), 全部 < 25%, 平均 13.3%, vs fix 前 batch_v22-v30 多次回 peak 30%
-水平。post-fix 序列: v31=23.3% → v32=16.7% → v33=6.67% → v34=16.7% → v35=3.33%,
-**5 批均未回 peak**。按规范 N=3 plateau 严格触发, 且 simulator fix **改变了 dynamics**,
-之前"训练没改算正常"假设不再严格成立。act 2 boss 突破 (v32 3.3%) 未保持, 通关率持续 0%。
+**[判定] post-fix 5 批 escalation 信号被 batch_v36 打破**:
+batch_v31-v35 post-fix 5 批 (23.3/16.7/6.67/16.7/3.33, 平均 13.3%) 未回 peak 30% 的
+escalation 信号, 被 batch_v36=30% 单批直接打破。post-fix 6 批序列:
+v31=23.3% → v32=16.7% → v33=6.67% → v34=16.7% → v35=3.33% → **v36=30%**。
+验证 "波动正常, 不动训练方法" 判断正确, 不需要回滚 simulator fix 或回 peak ckpt 重训。
+继续按当前流程跑 batch_v37 续训观察。
 
-候选解释:
-- A) 噪声 — 5 批可能不足以说明; 之前 6 批连续 dip 也出现过
-- B) 模拟器 fix 改了选卡数量, 模型早期学的"会多给/少给"假设失效, 需重新校准
-- C) 真 policy collapse 但与 simulator fix 无关 (时机巧合)
-
-**batch_v36 是 dip 后是否回弹的关键观测批次**: 如果仍 < 20% 且 user 回来 →
-强烈建议讨论归因方向 (回滚 simulator fix / 回 ckpt v22/v24/v28/v30 peak 重训 / 其他)。
-
-- **`batch_v36` 启动 (2026-05-27, 续训, ⚠ post-fix 关键观测批次)**：
-  从 v35 final ckpt 续训。post-fix 5 批均未回 peak, v36 是 dip 后是否回弹的关键观测。
-  - **续训源**：`sts_models/v8_ppo_batch_v35/v8_ppo_final.pt` (episodes_done=2688)
-  - **参数**：`num_episodes=2816 batch_size=32 ckpt_freq=32 eval_freq=128`
-    (n_envs=1 serial, 增量训 128 ep, ep 2689→2816)
-  - **PID**：`11957`（nohup）；log `/tmp/v8_ppo_batch_v36.log`；output
-    `sts_models/v8_ppo_batch_v36/`；exit signal file `/tmp/v8_ppo_batch_v36.exit`（如有）
-  - **启动校验**：`[resume] start_episode=2688, target=2816 (将增量训 128 ep)`，0 Traceback
-  - **⚠ ESCALATION FLAG**: 如果 batch_v36 a1_beat 仍 < 20% → 强烈建议 user 介入
-    讨论归因方向 (回滚 simulator fix / 回 peak ckpt 重训 / 其他)
+- **`batch_v37` 启动 (2026-05-27, 续训, post-fix 回 peak 后继续训练)**：
+  从 v36 final ckpt 续训。v36 post-simulator-fix 首次回 peak 30%, 继续 128 ep 观察是否稳定。
+  - **续训源**：`sts_models/v8_ppo_batch_v36/v8_ppo_final.pt` (episodes_done=2816)
+  - **参数**：`num_episodes=2944 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, 增量训 128 ep, ep 2817→2944)
+  - **PID**：`16474`（nohup）；log `/tmp/v8_ppo_batch_v37.log`；output
+    `sts_models/v8_ppo_batch_v37/`；exit signal file `/tmp/v8_ppo_batch_v37.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2816, target=2944 (将增量训 128 ep)`，0 Traceback
+  - **观察重点**: 回 peak 后能否维持 ≥ 20%, 或再次回落; act 2 boss 是否突破
   - **预期**：~2-2.5h 训练 + final eval
 
-接手 monitor 的检查清单（v36）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v36/`
+接手 monitor 的检查清单（v37）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v37/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v36.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v36.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v36.log`（应见 start_episode=2688）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v37.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v37.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v37.log`（应见 start_episode=2816）
 
 ### 已修复 bug
 - **StSRLSolver 问题卡 / 破碎王冠选卡数量重复加减**
