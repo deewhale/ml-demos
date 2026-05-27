@@ -5,19 +5,19 @@
 - Step 粒度 = 一个**元决策**（NEOW / MAP / EVENT / SHOP / REST / TREASURE /
   CARD_REWARDS / BOSS_REWARDS）。
 - 战斗内由 env 内部跑 StSRLSolver TurnSolver 完成（**不暴露给 RL trajectory**）。
-- 战斗结束触发 evaluate_deck（post-battle check），驱动 step reward。
+- 战斗结束触发 compute_combat_reward（基于真实战斗结果），单次塞进当步 step reward。
 
-设计原则对照（docs/v8_design_principles.md）：
-- 战斗内是搜索主导，model 暂不参与（用户原话第 2 点：搜索 + model 联合，
-  本 env 先把搜索部分接通；model prior 推理留给 trainer 接入预训练好的战斗 head）
-- 元决策才写入 RL trajectory（PPO 学元决策）
-- 不复活 v8_strategy 启发式（元决策 action 由外部 model 选 idx，env 只负责执行）
-- evaluate_deck 在战斗结束后触发（用户原话"战斗之后"做 check）
+2026-05-25 改动：去掉 deck_evaluator 模拟战评分。
+- 之前每步元决策都会跑一次 evaluate_deck（12 场模拟战），跟实战脱节、还很慢。
+- 现在每场真实战斗结束直接给评分：赢没赢 / 血损 / 回合数 / 伤害比。
+- 不累加：分数只在战斗结束那一步 emit，由 RL 自身 GAE 反推到选卡 / 走路决策。
+- deck_evaluator.py 文件保留但 env 不再调用（web / 历史训练日志可能引用）。
 
 实现状态：
 - reset / step 完整接 GameRunner（不 stub）
 - 战斗内：runner.take_action(CombatAction) by TurnSolver（与 v8_bot 同套搜索预算）
-- post-battle 自动触发 evaluate_deck
+- 战斗 enter/exit 在 _log_combat_enter / _log_combat_exit 处快照，exit 时算
+  combat_reward 缓存到 _pending_combat_reward，下次 step() 算 reward 时塞进去
 - node_reward detect：?事件成功 / 商店买 relic / 休息使用 / 宝箱开 relic 简单识别
 
 不在本文件内：
@@ -57,10 +57,10 @@ from packages.training.turn_solver import TurnSolverAdapter  # noqa: E402
 # V8 内部模块
 from v8.state import V8State
 from v8.action_space import get_available_actions
-from v8.deck_evaluator import evaluate_deck, clear_cache as clear_deck_cache
 from v8.reward import (
     compute_step_reward,
     compute_final_reward,
+    compute_combat_reward,
     NODE_REWARD_EVENT_SUCCESS,
     NODE_REWARD_SHOP_RELIC,
     NODE_REWARD_REST_USE,
@@ -351,7 +351,7 @@ class V8Env:
     - reset() 创建 GameRunner，推进到第一个元决策 phase（一般是 NEOW）
     - step(idx) 把 model 选的 idx 转成 GameAction，take_action，然后内部 loop
       推进直到下一个元决策 phase（或游戏结束）。战斗中由 TurnSolver 处理。
-    - reward 按 v8/reward.py 的 compute_step_reward 计算（依赖 evaluate_deck 触发）
+    - reward 按 v8/reward.py 的 compute_step_reward 计算（每场真实战斗结束 emit 一次 combat_reward）
     """
 
     def __init__(
@@ -370,10 +370,9 @@ class V8Env:
             combat_net_wrapper: 可选 V8CombatNetWrapper（让 model 在战斗 search
                 里参与 leaf 评估）。None 时 fallback 到原纯搜索（hand-rolled heuristic）。
                 设计原则：用户原话第 2 点"搜索+模型联合"，wrapper 是 hook。
-            deck_eval_freq: post-step evaluate_deck 的频率（每 N 次 post-step 才真跑一次，
-                中间复用上次 _prev_deck_strength）。默认 10（profile 后从 5 调到 10，
-                deck_eval 占单 ep 时间 ~68% → freq 翻倍直接砍一半 call 数）。
-                初始 reset() 内的 evaluate_deck 不受影响（开局必须有 baseline）。
+            deck_eval_freq: 兼容遗留参数（2026-05-25 改用真实战斗 reward 后已停用）。
+                保留参数签名以兼容 trainer / parallel_env / pretrain 等 caller，
+                内部不再触发任何模拟战。
         """
         self.character = character
         self.ascension = ascension
@@ -381,9 +380,8 @@ class V8Env:
         self.max_steps_per_episode = max_steps_per_episode
         self._solver_budgets = solver_budgets or SOLVER_BUDGETS
         self._combat_net_wrapper = combat_net_wrapper
+        # 遗留字段（兼容 trainer / parallel_env / pretrain 调用签名），内部不再触发模拟战
         self.deck_eval_freq = max(1, int(deck_eval_freq))
-        # 计数器：每次 post-step evaluate_deck 触发点 +1，% freq == 0 时真跑
-        self._post_step_eval_counter: int = 0
 
         # 每局重置的运行时状态
         self._runner: Optional[GameRunner] = None
@@ -392,7 +390,10 @@ class V8Env:
 
         # reward 计算需要的历史
         self._prev_state: Optional[V8State] = None
-        self._prev_deck_strength: Optional[Dict[str, float]] = None
+
+        # 真实战斗 reward 缓存：_log_combat_exit 算好，step() 下次 reward 计算时取出
+        # 一次性塞进去。单 step 内多场战斗（罕见 e.g. event→combat→event→combat）会累加。
+        self._pending_combat_reward: float = 0.0
 
         # 节点 reward detect 需要的快照（step 开始时记录）
         self._step_start_phase: Optional[Any] = None
@@ -416,6 +417,8 @@ class V8Env:
         self._combat_enter_max_hp: int = 0
         self._combat_enter_floor: int = 0
         self._combat_enter_turn_actions: int = 0  # 进入 combat 时 _actions_taken 值
+        # 真实战斗 reward 需要的额外快照
+        self._combat_enter_enemy_total_max_hp: int = 0  # 进入战斗时所有敌人 max_hp 之和
 
         # [floor] 日志：每次 floor 变化时打一次（含所有 room 类型）
         self._last_logged_floor: int = -1
@@ -441,7 +444,8 @@ class V8Env:
         self._event_stall_threshold: int = 30
 
         # 性能 / 调用计数（per-episode；trainer 读 delta）
-        self.eval_deck_calls: int = 0      # evaluate_deck 调用次数
+        # eval_deck_calls / eval_deck_time_sec 保留为 0，2026-05-25 已不再触发 evaluate_deck
+        self.eval_deck_calls: int = 0
         self.eval_deck_time_sec: float = 0.0
         self.env_step_time_sec: float = 0.0  # env.step 累计耗时（不含 caller）
         self.combat_search_calls: int = 0  # combat turn 调用 adapter.pick_action 次数
@@ -455,34 +459,21 @@ class V8Env:
         self._episode_idx = int(episode_idx)
 
     def reset_perf_counters(self) -> None:
-        """trainer 每集开始前调用，清空 per-episode 计数器（cache hits/misses 由
-        deck_evaluator 自己的全局 counter 统计，这里只清 env 内部累计）。"""
+        """trainer 每集开始前调用，清空 per-episode 计数器。"""
         self.eval_deck_calls = 0
         self.eval_deck_time_sec = 0.0
         self.env_step_time_sec = 0.0
         self.combat_search_calls = 0
 
     def reset_cache_for_new_run(self) -> None:
-        """显式清空 deck_evaluator 全局 cache。
-
-        使用场景：
-        - 新 trainer 实例化 / 新 training run 启动
-        - 多 epoch 切换需要 cold cache 重测
-        - 测试代码隔离
-
-        正常单 run 内训练不要调（P1-D 优化要靠跨 ep 复用）。
-        """
-        clear_deck_cache()
+        """遗留 API（2026-05-25 deck_evaluator 已停用，此方法保持 no-op 兼容旧 caller）。"""
+        return None
 
     def reset(self, seed: int) -> V8State:
         """开始新局，推进到第一个元决策点（NEOW）。
 
-        触发首次 evaluate_deck（开局 deck 已知）。
-
-        注意（P1-D 优化）：不再每局 clear_deck_cache。同一 act 内不同 ep
-        会评估相似 deck 子集，跨 ep 命中显著提高 hit rate（5%→30%+）。
-        Cache 仍按 (deck_signature, act) 索引，act 切换路径（line ~680）
-        仍会清。需要手动清的场景调 reset_cache_for_new_run()。
+        2026-05-25 改动：不再触发首次 evaluate_deck（模拟战评分已去掉）。
+        开局 deck_strength 直接置 None，state encoder 内已有 None 兜底。
         """
 
         self._runner = GameRunner(
@@ -518,6 +509,7 @@ class V8Env:
         self._combat_enter_max_hp = 0
         self._combat_enter_floor = 0
         self._combat_enter_turn_actions = 0
+        self._combat_enter_enemy_total_max_hp = 0
         self._last_logged_floor = -1
         self._pending_deck_room = None
         self._last_event_phase = None
@@ -525,8 +517,8 @@ class V8Env:
         self._event_enter_max_hp = 0
         self._event_enter_relics_count = 0
         self._event_choice_count.clear()
-        # deck_eval_freq 节流计数器：每局清零，与 episode 边界对齐
-        self._post_step_eval_counter = 0
+        # 真实战斗 reward 缓存清零
+        self._pending_combat_reward = 0.0
         # perf 计数器在 reset 也清一遍（兼容 trainer 没调 reset_perf_counters 的情况）
         self.reset_perf_counters()
 
@@ -551,27 +543,9 @@ class V8Env:
         # 推进到第一个元决策 phase（NEOW 一般直接就是；保险起见 advance）
         self._advance_to_meta_decision()
 
-        # 构造初始 V8State
+        # 构造初始 V8State（2026-05-25：不再 evaluate_deck，deck_strength 留 None）
         state = _build_state_from_runner(self._runner)
-
-        # 开局 deck 已知 → 首次 evaluate_deck
-        ed_t0 = time.time()
-        try:
-            ds = evaluate_deck(
-                deck=state.deck,
-                relics=state.relics,
-                hp=state.hp,
-                max_hp=state.max_hp,
-                act=state.act,
-            )
-            state.deck_strength = ds
-            self._prev_deck_strength = ds
-        except Exception as e:  # noqa: BLE001
-            logger.warning("initial evaluate_deck failed: %s: %s", type(e).__name__, e)
-            state.deck_strength = None
-            self._prev_deck_strength = None
-        self.eval_deck_calls += 1
-        self.eval_deck_time_sec += time.time() - ed_t0
+        state.deck_strength = None
 
         self._current_state = state
         self._prev_state = state
@@ -685,59 +659,11 @@ class V8Env:
         if stall_terminated:
             info["error"] = "event_stall"
 
-        # 如果发生过战斗，post-battle 触发 evaluate_deck
+        # 推进结束 → 构造 next_state（2026-05-25：不再调 evaluate_deck，deck_strength 留 None）
         next_state = _build_state_from_runner(self._runner)
-
-        # act 切换则清 cache（标准敌人换了）
-        cur_act = next_state.act
-        if cur_act != self._last_act_for_cache:
-            clear_deck_cache()
-            self._last_act_for_cache = cur_act
-
-        # 触发 evaluate_deck 时机：
-        #   1. 战斗刚结束（battle_happened=True）
-        #   2. CARD_REWARDS phase 后 deck 可能变了（cache miss 自动重算）
-        #   3. SHOP 后 deck 可能变了
-        #   4. REST upgrade 后 deck 可能变了
-        # 简化：每次 phase 切到元决策 phase（非 COMBAT）都尝试一次 evaluate_deck，
-        # 但被 deck_eval_freq 节流（每 N 次才真跑，中间复用 _prev_deck_strength），
-        # 内部 cache 命中重复 case 进一步压成本。
-        # next_state.deck_strength 总是给一个非 None 值（fallback prev），避免 model 端 None 分支。
-        next_deck_strength: Optional[Dict[str, float]] = self._prev_deck_strength
-        if not self._runner.game_over:
-            self._post_step_eval_counter += 1
-            should_eval = (self._post_step_eval_counter % self.deck_eval_freq) == 0
-            if should_eval:
-                ed_t0 = time.time()
-                try:
-                    next_deck_strength = evaluate_deck(
-                        deck=next_state.deck,
-                        relics=next_state.relics,
-                        hp=next_state.hp,
-                        max_hp=next_state.max_hp,
-                        act=next_state.act,
-                    )
-                    next_state.deck_strength = next_deck_strength
-                    info["deck_strength_evaluated"] = True
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("post-step evaluate_deck failed: %s: %s", type(e).__name__, e)
-                    next_state.deck_strength = self._prev_deck_strength
-                self.eval_deck_calls += 1
-                self.eval_deck_time_sec += time.time() - ed_t0
-                # [deck_eval] 日志：每次真跑一次 evaluate_deck 落一行（freq 限频后的实际触发点）
-                logger.info(
-                    "[deck_eval] ep=%s floor=%d act=%d post_step_counter=%d freq=%d",
-                    self._episode_idx,
-                    int(getattr(self._runner.run_state, "floor", 0) or 0),
-                    int(getattr(self._runner.run_state, "act", 1) or 1),
-                    self._post_step_eval_counter,
-                    self.deck_eval_freq,
-                )
-            else:
-                # 节流跳过：复用 prev_deck_strength（保持 reward shaping 不污染、model 不见 None）
-                next_state.deck_strength = self._prev_deck_strength
-                info["deck_strength_evaluated"] = False
-                info["deck_strength_throttled"] = True
+        next_state.deck_strength = None
+        self._last_act_for_cache = next_state.act
+        info["deck_strength_evaluated"] = False
 
         # node_reward detect
         node_reward = _detect_node_reward(
@@ -749,13 +675,17 @@ class V8Env:
         )
         info["node_reward"] = node_reward
 
-        # 计算 step reward
+        # 拿出本 step 期间累计的真实战斗 reward（_log_combat_exit 算好缓存的）
+        combat_reward = float(self._pending_combat_reward)
+        self._pending_combat_reward = 0.0
+        info["combat_reward"] = combat_reward
+
+        # 计算 step reward（真实战斗结果分 + hp_loss 罚 + 节点收益）
         step_reward = compute_step_reward(
             prev_state=self._prev_state if self._prev_state is not None else next_state,
             next_state=next_state,
-            prev_deck_strength=self._prev_deck_strength,
-            next_deck_strength=next_deck_strength,
             node_reward=node_reward,
+            combat_reward=combat_reward,
         )
 
         # done 判定
@@ -782,7 +712,6 @@ class V8Env:
 
         # 更新 prev 历史
         self._prev_state = next_state
-        self._prev_deck_strength = next_deck_strength
         self._current_state = next_state
 
         info["phase_after"] = next_state.phase
@@ -799,13 +728,12 @@ class V8Env:
         return get_available_actions(self._current_state, runner=self._runner)
 
     def close(self) -> None:
-        """清理资源：清 deck cache + 清 runner / adapter 引用。"""
-        clear_deck_cache()
+        """清理资源：清 runner / adapter 引用。"""
         self._runner = None
         self._adapter = None
         self._current_state = None
         self._prev_state = None
-        self._prev_deck_strength = None
+        self._pending_combat_reward = 0.0
 
     @property
     def state(self) -> Optional[V8State]:
@@ -944,7 +872,7 @@ class V8Env:
     # ---------------------------------------------------------------------
 
     def _log_combat_enter(self) -> None:
-        """[combat] enter 日志（每场战斗起始打一次）。"""
+        """[combat] enter 日志（每场战斗起始打一次）+ 记录战斗 reward 快照。"""
         assert self._runner is not None
         rs = self._runner.run_state
         enemies = _combat_enemies_brief(self._runner)
@@ -954,6 +882,10 @@ class V8Env:
         self._combat_enter_max_hp = int(getattr(rs, "max_hp", 0) or 0)
         self._combat_enter_floor = int(getattr(rs, "floor", 0) or 0)
         self._combat_enter_turn_actions = self._actions_taken
+        # 真实战斗 reward 快照：所有敌人 max_hp 之和（damage_ratio 分母）
+        self._combat_enter_enemy_total_max_hp = sum(
+            int(e.get("max_hp", 0) or 0) for e in enemies
+        )
         try:
             room_type = self._runner.current_room_type or "monster"
         except Exception:  # noqa: BLE001
@@ -968,19 +900,78 @@ class V8Env:
         )
 
     def _log_combat_exit(self, *, reason: str) -> None:
-        """[combat] exit 日志（战斗结束触发）。
+        """[combat] exit 日志（战斗结束触发）+ 算本场 combat_reward 累加到 _pending_combat_reward。
 
-        副作用：胜利且 room=elite/boss 时，置 self._pending_deck_room
-        让 _advance_to_meta_decision 在 reward 处理完落到 MAP 时补打 [deck]。
+        副作用：
+        - 胜利且 room=elite/boss 时，置 self._pending_deck_room
+          让 _advance_to_meta_decision 在 reward 处理完落到 MAP 时补打 [deck]。
+        - 算本场 combat_reward 加到 _pending_combat_reward（下次 step() 取出来一次性塞 reward）。
         """
         assert self._runner is not None
         rs = self._runner.run_state
         hp_after = int(getattr(rs, "current_hp", 0) or 0)
         turn_actions = self._actions_taken - self._combat_enter_turn_actions
+
+        # ----- 真实战斗 reward 计算 -----
+        # turns: 优先 current_combat.state.turn（StSRLSolver 内部回合计数器）；
+        # current_combat 退出 COMBAT 时可能已被清；保底用 turn_actions（model 决策步数）。
+        turns = 0
+        try:
+            cc = getattr(self._runner, "current_combat", None)
+            if cc is not None:
+                st = getattr(cc, "state", None)
+                if st is not None:
+                    turns = int(getattr(st, "turn", 0) or 0)
+        except Exception:  # noqa: BLE001
+            turns = 0
+        if turns <= 0:
+            # current_combat 已被清 → 用 turn_actions（粗略）。
+            # 实测每回合至少 1 action（end_turn），多则 5+，turn_actions 比真实 turn 偏高，
+            # 这只在 victory 后 phase 已切走时 fallback，量级仍合理。
+            turns = max(1, turn_actions)
+
+        hp_lost = max(self._combat_enter_hp - hp_after, 0)
+        won = (reason == "victory")
+        # damage_dealt：胜利 = 全敌人 max_hp 干完；非胜利 = enter_total - 剩余 enemies hp 总和
+        enemy_total_max = int(self._combat_enter_enemy_total_max_hp or 0)
+        if won:
+            damage_dealt = enemy_total_max
+        else:
+            # 拿剩余敌人 hp 总和（current_combat 可能还活着）
+            remaining_hp = 0
+            try:
+                cc = getattr(self._runner, "current_combat", None)
+                if cc is not None:
+                    st = getattr(cc, "state", None)
+                    if st is not None:
+                        for e in getattr(st, "enemies", []) or []:
+                            remaining_hp += max(int(getattr(e, "hp", 0) or 0), 0)
+            except Exception:  # noqa: BLE001
+                remaining_hp = 0
+            damage_dealt = max(enemy_total_max - remaining_hp, 0)
+
+        try:
+            combat_reward = compute_combat_reward(
+                won=won,
+                hp_lost=hp_lost,
+                turns=turns,
+                damage_dealt=damage_dealt,
+                enemy_total_max_hp=enemy_total_max,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "compute_combat_reward failed: %s: %s; fallback 0",
+                type(e).__name__, e,
+            )
+            combat_reward = 0.0
+        self._pending_combat_reward += combat_reward
+
         logger.info(
-            "[combat] exit ep=%s reason=%s floor=%d hp_before=%d hp_after=%d turn_actions=%d",
+            "[combat] exit ep=%s reason=%s floor=%d hp_before=%d hp_after=%d "
+            "turn_actions=%d turns=%d damage=%d/%d combat_reward=%.2f",
             self._episode_idx, reason, self._combat_enter_floor,
             self._combat_enter_hp, hp_after, turn_actions,
+            turns, damage_dealt, enemy_total_max, combat_reward,
         )
         # 胜利 + elite/boss → 准备 [deck] 日志（等 reward 处理完）
         if reason == "victory":
@@ -993,6 +984,7 @@ class V8Env:
             if rt_str in ("elite", "boss"):
                 self._pending_deck_room = rt_str
         self._in_combat = False
+        self._combat_enter_enemy_total_max_hp = 0
 
     def _current_room_type_str(self) -> str:
         """把 runner.get_current_room_type() / current_room_type 归一成
