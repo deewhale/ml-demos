@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-27 (batch_v37 启动 + v36 完成: a1_beat=30% 回到 peak, post-simulator-fix 第一次; reached_boss=66.7% 接近历史最高; 之前 5 批 (v31-v35) 未回 peak 的 escalation 信号被 v36 打破; 验证 "波动正常, 不动训练方法" 判断正确) -->
+<!-- last-verified: 2026-05-27 (batch_v38 启动 + v37 完成: ⚠ reward 重构后第一批; v37 a1_beat=16.7% + act2_boss_beat=3.33% (历史第二次破零); v38 起切换 real-combat reward (commit 8b9485a), 1024 ep 长跑, 训练速度 ~5x 提速 (50s/ep → 11s/ep), 信号源从 simulation-based 改为真实战斗结果) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -158,36 +158,47 @@ CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 
 | Batch | ep | a1_boss_beat | won_game | floor_mean | completed | 备注 |
 |---|---|---|---|---|---|---|
-| **v34** | **2560** | **16.7%** | **0.00** | **9.17** | **30/30** | **+10pp 回弹 vs v33 (dip 后回弹符合过往规律); 未回 peak 30%, plateau 中位; act2_boss_beat=0 (v32 突破未保持); reached_boss=40%; boss_kill 仍全 0** |
 | **v35** | **2688** | **3.33%** | **0.00** | **10.07** | **30/30** | **⚠ 历史最低水平之一 (与 batch_v25/v21 持平); post-fix 5 批均未回 peak 30%; reached_boss=33.3%; boss reach 均衡 (Slime/Guardian/Hexa 各 3); boss_kill 仍全 0** |
 | **v36** | **2816** | **30%** | **0.00** | **10.03** | **30/30** | **✅ post-simulator-fix 第一次回 peak 30% (9/30); reached_boss=66.7% (20/30) 接近历史最高; boss reach Slime=6 / Hexa=4 / Guardian=1; act2_boss_beat 仍 0; boss_kill 仍全 0 (a1_beat 来自 reach+hp 推算)** |
+| **v37** | **2944** | **16.7%** | **0.00** | **12.53** | **30/30** | **⚠ 旧 reward (simulation-based deck_evaluator) 训练的最后一批; act2_boss_beat=3.33% (历史第二次破零, 上次为 batch_v32); reached_boss=66.7% (持续高位); floor_mean=12.53 (相对高); boss reach 均衡 Slime=5 / Hexa=4 / Guardian=6; boss_kill 仍全 0** |
 
-完整 v15-v36 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+完整 v15-v37 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
 
-**[判定] post-fix 5 批 escalation 信号被 batch_v36 打破**:
-batch_v31-v35 post-fix 5 批 (23.3/16.7/6.67/16.7/3.33, 平均 13.3%) 未回 peak 30% 的
-escalation 信号, 被 batch_v36=30% 单批直接打破。post-fix 6 批序列:
-v31=23.3% → v32=16.7% → v33=6.67% → v34=16.7% → v35=3.33% → **v36=30%**。
-验证 "波动正常, 不动训练方法" 判断正确, 不需要回滚 simulator fix 或回 peak ckpt 重训。
-继续按当前流程跑 batch_v37 续训观察。
+**[重大变更] reward 信号源切换 (commit `8b9485a`, 2026-05-27)**:
+batch_v37 是 simulation-based reward (deck_evaluator) 训练的最后一批; batch_v38
+起切换为 **real-combat-based reward**。改动：
+- 去掉 `deck_evaluator.evaluate_deck()` 模拟战评分 (post-step deck reward)
+- 加真实战斗结束 reward:
+  `(won ? +30 : -30) - 1.0*hp_lost - 0.5*turns + 5.0*damage_ratio`
+- 信号源从 "干净环境模拟战能赢的卡" → "真实游戏当前 relic/血量/状态下能赢的卡"
+- 训练速度预期 ~5x 提升 (smoke 11s/ep vs 旧 50s/ep), 1024 ep 预计 ~3h vs 旧
+  ~14h
 
-- **`batch_v37` 启动 (2026-05-27, 续训, post-fix 回 peak 后继续训练)**：
-  从 v36 final ckpt 续训。v36 post-simulator-fix 首次回 peak 30%, 继续 128 ep 观察是否稳定。
-  - **续训源**：`sts_models/v8_ppo_batch_v36/v8_ppo_final.pt` (episodes_done=2816)
-  - **参数**：`num_episodes=2944 batch_size=32 ckpt_freq=32 eval_freq=128`
-    (n_envs=1 serial, 增量训 128 ep, ep 2817→2944)
-  - **PID**：`16474`（nohup）；log `/tmp/v8_ppo_batch_v37.log`；output
-    `sts_models/v8_ppo_batch_v37/`；exit signal file `/tmp/v8_ppo_batch_v37.exit`（如有）
-  - **启动校验**：`[resume] start_episode=2816, target=2944 (将增量训 128 ep)`，0 Traceback
-  - **观察重点**: 回 peak 后能否维持 ≥ 20%, 或再次回落; act 2 boss 是否突破
-  - **预期**：~2-2.5h 训练 + final eval
+**预期波动**: batch_v38 从 v37 ckpt resume 但 reward 信号源完全变了, 模型需要适应;
+前几个 eval 周期 (ep=3072/3200/3328) 可能 dip 然后回升。v38 后续多批次比较时,
+v37 作为 sim-reward 最后一批的 baseline。
 
-接手 monitor 的检查清单（v37）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v37/`
+- **`batch_v38` 启动 (2026-05-27, 续训, ⚠ 新 reward 第一批, 1024 ep 长跑)**：
+  从 v37 final ckpt 续训。**reward 信号源从 simulation-based 改为 real-combat-based**
+  (commit `8b9485a`)。批次规模 8x vs 之前 128 ep。
+  - **续训源**：`sts_models/v8_ppo_batch_v37/v8_ppo_final.pt` (episodes_done=2944)
+  - **参数**：`num_episodes=3968 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, **增量训 1024 ep**, ep 2945→3968)
+  - **PID**：`23005`（nohup）；log `/tmp/v8_ppo_batch_v38.log`；output
+    `sts_models/v8_ppo_batch_v38/`；exit signal file `/tmp/v8_ppo_batch_v38.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2944, target=3968 (将增量训 1024 ep)`，
+    0 Traceback; 首 ep heartbeat `eval_deck_calls=0` (确认新 reward 生效, 不再
+    调 deck_evaluator)
+  - **训练速度**: 首 ep ~10.7s/ep (vs 旧 reward ~50s/ep, ~5x 提速符合预期)
+  - **预期总时长**: ~3h 训练 + final eval
+
+接手 monitor 的检查清单（v38）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v38/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v37.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v37.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v37.log`（应见 start_episode=2816）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v38.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v38.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v38.log`（应见 start_episode=2944）
+- 验证新 reward 生效：heartbeat 应见 `eval_deck_calls=0`
 
 ### 已修复 bug
 - **StSRLSolver 问题卡 / 破碎王冠选卡数量重复加减**

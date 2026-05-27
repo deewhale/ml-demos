@@ -1315,3 +1315,49 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
     0 Traceback
   - **观察重点**：回 peak 后能否继续维持 ≥ 20%, 或再次回落; act 2 boss 是否突破
   - **预期**：~2-2.5h 训练 + final eval
+
+- **`batch_v37` 完成 + v38 续训启动 (2026-05-27, ⚠ 旧 reward 最后一批 + act2 boss 历史第二次破零)**：
+  v37 训练 128 ep (ep 2817→2944) 完成，elapsed_sec=1562.51 (final eval)，0 Traceback。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v37/` 含 ep=2848/2880/2912/2944 + final +
+  v8_ppo_summary.json。**这是 simulation-based reward (deck_evaluator) 训练的最后一批**;
+  v38 起切换为 real-combat reward (commit `8b9485a`)。
+  - **Final eval (ep=2944, 30 seeds)**:
+    - completed_seeds=30/30, reached_boss_rate=**0.667** (20/30, 持续高位)
+    - **act1_boss_beat_rate=0.167** (5/30, 与 batch_v34 持平, 较 v36 peak 30% 小幅回落)
+    - **act2_boss_beat_rate=0.0333** (1/30, **历史第二次非零, 上次为 batch_v32**)
+    - **won_game_rate=0.00**
+    - floor_mean=12.53 (历史相对高), floor_max ≥ 17 (含 act 2)
+  - **Boss reach/kill counts**: Slime Boss reach=5, Hexaghost reach=4,
+    The Guardian reach=6 (total reach=15, 均衡 mix); boss_kill_counts 全 0
+    (a1_beat 来自 reach 后 hp 推算)
+  - **跨批 a1_boss_beat trend (post-simulator-fix 7 批)**:
+    batch_v31=23.3% → v32=16.7% → v33=6.67% → v34=16.7% → v35=3.33% →
+    **v36=30%** → v37=16.7% (peak 后小幅回落, 仍在合理区间)
+  - **关键判定**: a1_beat 在 16.7%-30% 区间波动正常; act 2 boss 第二次破零
+    (v32 之后再现, 中间 4 批为 0) 是 "deep play" 信号; 这是 sim reward 最后一批,
+    数据可作 baseline 与 v38 起的 real-combat reward 对比
+  - **健康度**: 0 Traceback / 30 seed eval 全 completed / 0 hang_confirmed /
+    0 MysteriousSphere COMBAT_WON loop
+
+- **`batch_v38` 启动 (2026-05-27, 续训, ⚠ 新 reward 第一批, 1024 ep 长跑)**：
+  从 v37 final ckpt 续训。**重大变更**: reward 信号源从 simulation-based 切换
+  为 real-combat-based (commit `8b9485a`)。
+  - **续训源**：`sts_models/v8_ppo_batch_v37/v8_ppo_final.pt` (episodes_done=2944)
+  - **参数**：`num_episodes=3968 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, **增量训 1024 ep**, ep 2945→3968, 批次规模 8x vs 之前 128 ep)
+  - **PID**：`23005`（nohup）；log `/tmp/v8_ppo_batch_v38.log`；
+    output `sts_models/v8_ppo_batch_v38/`；exit signal file
+    `/tmp/v8_ppo_batch_v38.exit`（如有）
+  - **启动校验**：`[resume] start_episode=2944, target=3968 (将增量训 1024 ep)`，
+    0 Traceback; 首 ep `eval_deck_calls=0` (确认新 reward 生效, 不再调
+    deck_evaluator)
+  - **Reward 改动详情** (commit `8b9485a`):
+    - 去掉 `deck_evaluator.evaluate_deck()` 模拟战评分 (post-step deck reward)
+    - 加真实战斗结束 reward:
+      `(won ? +30 : -30) - 1.0*hp_lost - 0.5*turns + 5.0*damage_ratio`
+    - 信号源从 "干净环境模拟战能赢的卡" → "真实游戏当前 relic/血量/状态下能赢的卡"
+  - **训练速度**: smoke test 11s/ep (vs 旧 reward 50s/ep, ~5x 提速); 实际首批
+    heartbeat ~10.7s/ep 验证一致
+  - **预期波动**: 模型从 v37 ckpt resume, 但 reward 信号源变了, 前几个 eval
+    周期 (ep=3072/3200/3328) 可能 dip 然后回升
+  - **预期总时长**: ~3 小时 (vs 旧 reward 同长度 ~14 小时)
