@@ -130,7 +130,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-27 (batch_v39 启动 + v38 hang 中止: v38 新 reward 第一批跑 928/1024 ep 后 ep=3882 hang 在 Guardian boss combat 36+ min, 立刻杀; 7 个中间评估 a1_beat 均值 22%, 峰值 40% (ep=3328); v39 从 v38 ep=3872 续训再训 1024 ep) -->
+<!-- last-verified: 2026-05-28 (batch_v40 启动 + v39 完成: v39 新奖励第二批 1024 ep 全部跑完 + 8 中间评估, a1_beat 均值 32.1% (新奖励时代单批最高), 峰值 40% 连续两次 (ep=4480/4608), 整批 0 hang 0 Traceback; v40 从 v39 final 续训再训 1024 ep) -->
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -158,11 +158,12 @@ CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 
 | Batch | ep | a1_boss_beat | won_game | floor_mean | completed | 备注 |
 |---|---|---|---|---|---|---|
-| **v36** | **2816** | **30%** | **0.00** | **10.03** | **30/30** | **✅ post-simulator-fix 第一次回 peak 30% (9/30); reached_boss=66.7% (20/30) 接近历史最高; boss reach Slime=6 / Hexa=4 / Guardian=1; act2_boss_beat 仍 0; boss_kill 仍全 0 (a1_beat 来自 reach+hp 推算)** |
 | **v37** | **2944** | **16.7%** | **0.00** | **12.53** | **30/30** | **⚠ 旧 reward (simulation-based deck_evaluator) 训练的最后一批; act2_boss_beat=3.33% (历史第二次破零, 上次为 batch_v32); reached_boss=66.7% (持续高位); floor_mean=12.53 (相对高); boss reach 均衡 Slime=5 / Hexa=4 / Guardian=6; boss_kill 仍全 0** |
 | **v38** | **3872** | **~22% (均值)** | **0.00** | **~10.8 (均值)** | **N/A** | **⚠ 新 reward (real-combat) 第一批; 跑 928/1024 ep 后 ep=3882 hang 在 Guardian boss combat 36+ min 立刻杀; 7 中间评估 (ep 3072→3840): a1 = 13/13/40/27/27/17/20%, 峰值 40% (ep=3328); 比旧 reward 后期均值 (~17.6%) 略高; 无 final eval; ckpt 至 ep=3872** |
+| **v39** | **4896** | **32.1% (均值)** | **0.00** | **~10.4 (均值)** | **N/A (8 中间评估)** | **✅ 新 reward 第二批 1024 ep 完整跑完; 8 中间评估 (ep 3968→4864) a1 = 27/33/30/37/40/40/30/20%, 均值 32.1% 创新奖励时代单批最高; 峰值 40% 在 ep=4480/4608 连续两次 (旧奖励 peak 30%); reach 均值 69.4%; act2_boss_beat / won_game 全程 0; 0 Traceback / 0 hang (v38 Guardian 现象未复现)** |
+| **v40** | **5920 (target)** | **训练中** | **训练中** | **训练中** | **训练中** | **⏳ 从 v39 final 续训 (新奖励第三批), num_episodes=5920 batch_size=32 ckpt_freq=32 eval_freq=128 增量 1024 ep, PID 12627, log /tmp/v8_ppo_batch_v40.log; 观察 a1_beat 32% 均值能否守住 / peak 40% 是否持续 / act2_boss / won_game 破零; v38 Guardian hang 仍属潜在风险** |
 
-完整 v15-v38 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+完整 v15-v40 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
 
 **[重大变更] reward 信号源切换 (commit `8b9485a`, 2026-05-27)**:
 batch_v37 是 simulation-based reward (deck_evaluator) 训练的最后一批; batch_v38
@@ -178,41 +179,39 @@ batch_v37 是 simulation-based reward (deck_evaluator) 训练的最后一批; ba
 前几个 eval 周期 (ep=3072/3200/3328) 可能 dip 然后回升。v38 后续多批次比较时,
 v37 作为 sim-reward 最后一批的 baseline。
 
-- **`batch_v38` hang 中止 (2026-05-27, 新 reward 第一批跑 928/1024 ep 后 hang)**:
-  从 v37 final 续训 (ep 2945→4 目标 3968)。**reward 信号源切换为 real-combat-based**
-  (commit `8b9485a`)。
-  - **完成进度**: 928 ep (ep 2945→3872), 91% 完成
-  - **hang 位置**: ep=3882 进 Guardian boss combat (floor=16 act=1, hp=32/80) 后
-    36+ 分钟无 heartbeat 输出, CPU 仍 ~33% 但 log 不再推进
-  - **杀进程**: PID 23005, kill at 23:13 (规范: 30+min 无心跳立刻杀)
-  - **怀疑根因**: 搜索引擎在深度搜索 Guardian 致死分支时陷入循环
-    (`[event]` log 干净, 不是 env handler 死循环, 0 Traceback)
-  - **7 个中间评估** (eval_freq=128, ep 3072→3840) a1_beat: 13/13/40/27/27/17/20%,
-    均值 22%, 峰值 40% (ep=3328); 比旧 reward 后期均值 ~17.6% 略高
-  - **Ckpt 状态**: `sts_models/v8_ppo_batch_v38/` 至 ep=3872, 无 final.pt
+- **`batch_v39` 完成 (2026-05-28, 新奖励第二批 1024 ep 完整跑完, 创单批均值新高)**:
+  从 v38 ep=3872 续训完 1024 ep (ep 3873→4896) + 8 次中间评估全部完成, PID 88369 干净退出。
+  - **训练侧**: 1024 ep, 0 Traceback, 0 hang (v38 Guardian 深搜索 hang 现象未复现)
+  - **8 次中间评估 a1_boss_beat** (ep 3968→4864): 27/33/30/37/**40/40**/30/20%,
+    均值 **32.1%** (新奖励时代单批最高), 峰值 **40% 连续两次** (ep=4480/4608)
+  - **reach 均值 69.4%**, floor_mean ~10.4
+  - **act 2 boss / won_game**: 8 次评估全部 0% (新奖励还没把模型推过 a1 boss)
+  - **历史 peak 对比**: 旧奖励时代 peak 30% (v22/v24/v28/v30/v36), 新奖励 peak 40%
+    (v38 单次, v39 连续两次)
+  - **Ckpt 状态**: `sts_models/v8_ppo_batch_v39/` 含 ep=3904…4896 全部 + final + summary
   - 详见 [docs/v8_training_log.md](docs/v8_training_log.md)
 
-- **`batch_v39` 启动 (2026-05-27, 续训, 从 v38 hang 救出, 1024 ep 长跑)**：
-  从 v38 ep=3872 ckpt 续训 (v38 hang 没生成 final.pt, 用最大干净 ckpt)。
-  - **续训源**：`sts_models/v8_ppo_batch_v38/v8_ppo_ep3872.pt` (episodes_done=3872)
-  - **参数**：`num_episodes=4896 batch_size=32 ckpt_freq=32 eval_freq=128`
-    (n_envs=1 serial, **增量训 1024 ep**, ep 3873→4896)
-  - **PID**：`88369`（nohup）；log `/tmp/v8_ppo_batch_v39.log`；output
-    `sts_models/v8_ppo_batch_v39/`；exit signal file `/tmp/v8_ppo_batch_v39.exit`（如有）
-  - **启动校验**：`[resume] start_episode=3872, target=4896 (将增量训 1024 ep)`，
+- **`batch_v40` 启动 (2026-05-28, 续训, 1024 ep 长跑)**：
+  从 v39 final ckpt 续训, 同参再训 1024 ep。
+  - **续训源**：`sts_models/v8_ppo_batch_v39/v8_ppo_final.pt` (episodes_done=4896)
+  - **参数**：`num_episodes=5920 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, **增量训 1024 ep**, ep 4897→5920)
+  - **PID**：`12627`（nohup）；log `/tmp/v8_ppo_batch_v40.log`；output
+    `sts_models/v8_ppo_batch_v40/`；exit signal file `/tmp/v8_ppo_batch_v40.exit`（如有）
+  - **启动校验**：`[resume] start_episode=4896, target=5920 (将增量训 1024 ep)`，
     0 Traceback
   - **观察重点**:
-    1. v38 hang 现象 (Guardian boss 深搜索循环) 是否再现
-    2. a1_beat 是否维持 22% 均值, peak 40% 能否持续
-    3. act 2 boss 突破 / won_game 破零
+    1. a1_beat 均值能否守住 32% 区间 / peak 40% 是否持续
+    2. act 2 boss / won_game 破零 (新奖励时代仍是 0)
+    3. v38 Guardian 深搜索 hang 是否再现, v39 整批未现但仍属潜在风险
   - **预期总时长**: ~3h 训练 + final eval
 
-接手 monitor 的检查清单（v39）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v39/`
+接手 monitor 的检查清单（v40）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v40/`
 - 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v39.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v39.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v39.log`（应见 start_episode=3872）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v40.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v40.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v40.log`（应见 start_episode=4896）
 - 验证新 reward 生效：heartbeat 应见 `eval_deck_calls=0`
 - hang 监测 (v38 教训): 心跳间隔超 5min → 怀疑 boss combat 深搜索循环, 30min+ 无心跳立刻杀
 

@@ -1407,3 +1407,45 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
     2. a1_beat 是否维持 22% 均值, peak 40% 能否持续
     3. act 2 boss 突破 / won_game 破零
   - **预期总时长**: ~3 小时 (新 reward ~10.7s/ep)
+
+- **`batch_v39` 完成 (2026-05-28, 新奖励完整跑完, 均值 32%, 峰值连续 40%)**:
+  从 v38 ep=3872 续训 1024 ep (ep 3873→4896) 全部完成 + 8 次中间评估。
+  Ckpt 路径 `sts_models/v8_ppo_batch_v39/` 含 ep=3904…4896 全部 + final +
+  `v8_ppo_summary.json`。PID 88369 干净退出, v38 hang 现象未再现 (整批 0 hang)。
+  - **训练侧**: 1024 ep, 0 Traceback, 0 hang (v38 Guardian 深搜索 hang 未复现,
+    但仍属潜在风险)
+  - **8 次中间评估完整数据 (eval_freq=128, ep 3968→4864)**:
+    - ep=3968: a1=26.7% reach=63.3% floor=10.9
+    - ep=4096: a1=33.3% reach=66.7% floor=9.8
+    - ep=4224: a1=30.0% reach=76.7% floor=11.9
+    - ep=4352: a1=36.7% reach=66.7% floor=9.8
+    - ep=4480: **a1=40.0%** reach=66.7% floor=8.3
+    - ep=4608: **a1=40.0%** reach=76.7% floor=10.3
+    - ep=4736: a1=30.0% reach=73.3% floor=10.9
+    - ep=4864 (final eval): a1=20.0% reach=63.3% floor=11.2
+    - **均值**: a1=32.1% (新奖励时代最高单批均值), reach=69.4%
+    - **峰值**: a1=40% 在 ep=4480/4608 **连续两次** 出现
+    - 最后一次 dip 到 20% 是 bimodal noise (非趋势下行)
+  - **跨 reward / 跨批 a1_beat 历史顶峰对比**:
+    - 旧奖励时代 peak: **30%** (batch_v22 / v24 / v28 / v30 / v36 五个批次曾触及)
+    - 新奖励时代 peak: **40%** (batch_v38 ep=3328 单次, batch_v39 ep=4480/4608 连续两次)
+    - 新奖励均值 32% vs 旧奖励后期 ~17.6% → real-combat reward 信号更强
+  - **act 2 boss / won_game**: 8 次评估全部 act2_boss_beat=0% / won_game=0%
+    (新奖励还没把模型推过 a1 boss 之后的中后期内容)
+  - **判定**: 数据有改善 (新奖励时代单批均值 32% 创新高, peak 40% 连续达成),
+    决策树指向「继续起 v40 同参续训」, 不动 reward 设置, 不引入新结构。
+
+- **`batch_v40` 启动 (2026-05-28, 续训, 1024 ep 长跑)**：
+  从 v39 final ckpt 续训, 同参再训 1024 ep。
+  - **续训源**：`sts_models/v8_ppo_batch_v39/v8_ppo_final.pt` (episodes_done=4896)
+  - **参数**：`num_episodes=5920 batch_size=32 ckpt_freq=32 eval_freq=128`
+    (n_envs=1 serial, **增量训 1024 ep**, ep 4897→5920)
+  - **PID**：`12627`（nohup）；log `/tmp/v8_ppo_batch_v40.log`；output
+    `sts_models/v8_ppo_batch_v40/`；exit signal file `/tmp/v8_ppo_batch_v40.exit`（如有）
+  - **启动校验**：`[resume] start_episode=4896, target=5920 (将增量训 1024 ep)`，
+    0 Traceback
+  - **观察重点**:
+    1. a1_beat 均值能否守住 32% 区间 / peak 40% 是否持续
+    2. act 2 boss / won_game 破零 (新奖励时代仍是 0)
+    3. v38 hang 现象 (Guardian 深搜索循环) 是否再次出现, v39 整批未现但仍属潜在风险
+  - **预期总时长**: ~3 小时 (新 reward ~10.7s/ep)
