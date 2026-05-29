@@ -423,6 +423,13 @@ class V8Env:
         # 战斗结束时 current_combat 已被置 None，[combat] exit 直接读会拿不到，
         # 故在战斗进行中每回合缓存到这里供 _log_combat_exit 使用。
         self._last_combat_turn: int = 0
+        # 阶段 1 telemetry: 最近一场战斗的 per-card 逐动作细账。
+        # _log_combat_exit 在战斗结束时从 runner.last_combat_card_log（引擎
+        # _end_combat 在置 current_combat=None 前抓取的 CombatLogEntry list）取出存这里，
+        # 为阶段 2 的「战后每张卡 5 维评分」留好数据接口。本阶段只存、不算分。
+        # 结构：List[dict]，每条 {turn, event_type, data}，play_card 条目的 data 含
+        # {card, target, effects:[{type:damage/block/draw/energy/power/...}]}。
+        self._last_combat_card_log: List[Dict[str, Any]] = []
 
         # [floor] 日志：每次 floor 变化时打一次（含所有 room 类型）
         self._last_logged_floor: int = -1
@@ -926,6 +933,28 @@ class V8Env:
         rs = self._runner.run_state
         hp_after = int(getattr(rs, "current_hp", 0) or 0)
         turn_actions = self._actions_taken - self._combat_enter_turn_actions
+
+        # ----- 阶段 1 telemetry：抓本场 per-card 逐动作细账 -----
+        # 引擎 _end_combat 在置 current_combat=None 前把 current_combat.log.entries
+        # 复制到 runner.last_combat_card_log（CombatLogEntry list，胜/负都覆盖）。
+        # 此处转成纯 dict 快照存到 self._last_combat_card_log，给阶段 2 评分用。
+        # 本阶段只存、不算分。
+        try:
+            raw_entries = getattr(self._runner, "last_combat_card_log", None) or []
+            self._last_combat_card_log = [
+                {
+                    "turn": int(getattr(e, "turn", 0) or 0),
+                    "event_type": getattr(e, "event_type", ""),
+                    "data": getattr(e, "data", {}) or {},
+                }
+                for e in raw_entries
+            ]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "capture last_combat_card_log failed: %s: %s; fallback []",
+                type(e).__name__, e,
+            )
+            self._last_combat_card_log = []
 
         # ----- 真实战斗 reward 计算 -----
         # turns: 真实回合数。阶段 0 修复——战斗结束时 current_combat 已被置 None
