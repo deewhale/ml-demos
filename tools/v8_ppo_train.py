@@ -1047,7 +1047,13 @@ def main() -> None:
                     snap = snapshots[i] if i < len(snapshots) else {}
                     final_floor = int(snap.get("floor", 0) or 0)
                     final_act = int(snap.get("act", 1) or 1)
-                    beat_boss = bool(snap.get("game_won", False))
+                    won_game = bool(snap.get("game_won", False))
+                    # 阶段 0：拆诚实字段。a1_boss_killed=过第一幕 boss（进 act2,
+                    # final_act>=2 或通关）；a2_boss_killed=过第二幕 boss（act>=3 或通关）；
+                    # won_game=通关。beat_boss 保留为废弃别名 = won_game（web/etl 仍消费）。
+                    a1_boss_killed = bool(won_game or final_act >= 2)
+                    a2_boss_killed = bool(won_game or final_act >= 3)
+                    beat_boss = won_game
                     batch_rollouts.extend(rollout)
                     batch_meta.append({
                         "ep": ep_idx,
@@ -1055,14 +1061,17 @@ def main() -> None:
                         "reward_sum": ep_reward,
                         "final_floor": final_floor,
                         "final_act": final_act,
-                        "beat_boss": beat_boss,
+                        "a1_boss_killed": a1_boss_killed,
+                        "a2_boss_killed": a2_boss_killed,
+                        "won_game": won_game,
+                        "beat_boss": beat_boss,  # deprecated 别名 = won_game
                         "secs": round_secs / n_envs_eff,  # 摊到每 ep
                     })
                     logger.info(
                         "[heartbeat] ep=%d (parallel) steps=%d round_secs=%.1f reward=%.3f "
-                        "floor=%d beat_boss=%s",
+                        "floor=%d a1_boss_killed=%s a2_boss_killed=%s won_game=%s beat_boss=%s",
                         ep_idx, len(rollout), round_secs, ep_reward,
-                        final_floor, beat_boss,
+                        final_floor, a1_boss_killed, a2_boss_killed, won_game, beat_boss,
                     )
 
             # ----------- 串行尾巴（remainder）-----------
@@ -1085,7 +1094,11 @@ def main() -> None:
                 runner = env.runner
                 final_floor = int(getattr(runner.run_state, "floor", 0) or 0) if runner else 0
                 final_act = int(getattr(runner.run_state, "act", 1) or 1) if runner else 1
-                beat_boss = bool(runner.game_won) if runner else False
+                won_game = bool(runner.game_won) if runner else False
+                # 阶段 0：拆诚实字段（见 parallel 分支注释）
+                a1_boss_killed = bool(won_game or final_act >= 2)
+                a2_boss_killed = bool(won_game or final_act >= 3)
+                beat_boss = won_game  # deprecated 别名
                 ep_secs = time.time() - ep_t0
                 rstats = getattr(trainer, "last_rollout_stats", {}) or {}
                 batch_collect_fwd_sec += float(rstats.get("forward_time_sec", 0.0))
@@ -1100,13 +1113,17 @@ def main() -> None:
                     "reward_sum": ep_reward,
                     "final_floor": final_floor,
                     "final_act": final_act,
-                    "beat_boss": beat_boss,
+                    "a1_boss_killed": a1_boss_killed,
+                    "a2_boss_killed": a2_boss_killed,
+                    "won_game": won_game,
+                    "beat_boss": beat_boss,  # deprecated 别名 = won_game
                     "secs": ep_secs,
                 })
                 logger.info(
                     "[heartbeat] ep=%d (tail-serial) steps=%d secs=%.1f reward=%.3f "
-                    "floor=%d beat_boss=%s",
-                    ep_idx, len(rollout), ep_secs, ep_reward, final_floor, beat_boss,
+                    "floor=%d a1_boss_killed=%s a2_boss_killed=%s won_game=%s beat_boss=%s",
+                    ep_idx, len(rollout), ep_secs, ep_reward, final_floor,
+                    a1_boss_killed, a2_boss_killed, won_game, beat_boss,
                 )
                 try:
                     env.close()
@@ -1140,7 +1157,11 @@ def main() -> None:
                 runner = env.runner
                 final_floor = int(getattr(runner.run_state, "floor", 0) or 0) if runner else 0
                 final_act = int(getattr(runner.run_state, "act", 1) or 1) if runner else 1
-                beat_boss = bool(runner.game_won) if runner else False
+                won_game = bool(runner.game_won) if runner else False
+                # 阶段 0：拆诚实字段（见 parallel 分支注释）
+                a1_boss_killed = bool(won_game or final_act >= 2)
+                a2_boss_killed = bool(won_game or final_act >= 3)
+                beat_boss = won_game  # deprecated 别名
                 ep_secs = time.time() - ep_t0
 
                 # 拿 per-episode 性能 / 调用计数
@@ -1163,15 +1184,22 @@ def main() -> None:
                     "reward_sum": ep_reward,
                     "final_floor": final_floor,
                     "final_act": final_act,
-                    "beat_boss": beat_boss,
+                    "a1_boss_killed": a1_boss_killed,
+                    "a2_boss_killed": a2_boss_killed,
+                    "won_game": won_game,
+                    "beat_boss": beat_boss,  # deprecated 别名 = won_game
                     "secs": ep_secs,
                 })
                 # ---- 每局 heartbeat：silent 跑步是不可接受的 ----
+                # 注意：beat_boss=%s 字段保留在原位置（web/etl/markers.py 正则依赖），
+                # 阶段 0 新增的 a1/a2/won_game 追加在 search_calls 之前。
                 logger.info(
                     "[heartbeat] ep=%d steps=%d secs=%.1f reward=%.3f floor=%d act=%d beat_boss=%s "
+                    "a1_boss_killed=%s a2_boss_killed=%s won_game=%s "
                     "search_calls=%d eval_deck_calls=%d",
                     ep_idx, len(rollout), ep_secs, ep_reward,
                     final_floor, final_act, beat_boss,
+                    a1_boss_killed, a2_boss_killed, won_game,
                     ep_search_calls, ep_eval_deck_calls,
                 )
                 try:
@@ -1194,6 +1222,9 @@ def main() -> None:
         ep_rewards = [m["reward_sum"] for m in batch_meta]
         ep_floors = [m["final_floor"] for m in batch_meta]
         n_beat = sum(1 for m in batch_meta if m["beat_boss"])
+        n_a1_killed = sum(1 for m in batch_meta if m.get("a1_boss_killed"))
+        n_a2_killed = sum(1 for m in batch_meta if m.get("a2_boss_killed"))
+        n_won = sum(1 for m in batch_meta if m.get("won_game"))
         wrapper_calls_in_batch = wrapper.call_count - prev_call_count
 
         num_episodes_done += batch_target
@@ -1203,7 +1234,10 @@ def main() -> None:
             "mean_reward": sum(ep_rewards) / max(1, len(ep_rewards)),
             "mean_steps": sum(ep_steps) / max(1, len(ep_steps)),
             "mean_floor": sum(ep_floors) / max(1, len(ep_floors)),
-            "beat_boss_in_batch": n_beat,
+            "beat_boss_count": n_beat,  # deprecated 别名 = won_game_count
+            "a1_boss_killed_count": n_a1_killed,
+            "a2_boss_killed_count": n_a2_killed,
+            "won_game_count": n_won,
             "policy_loss": metrics.get("policy_loss", 0.0),
             "value_loss": metrics.get("value_loss", 0.0),
             "entropy": metrics.get("entropy", 0.0),

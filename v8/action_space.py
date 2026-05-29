@@ -105,6 +105,38 @@ def _potion_label(potion: Any) -> str:
     return str(getattr(potion, "id", None) or getattr(potion, "name", None) or "?")
 
 
+def _neow_choice_content(runner: Any, choice_index: int) -> str:
+    """NeowAction(choice_index) → 该 blessing 的语义文字（祝福类型 + 缺点）。
+
+    阶段 0 修复（docs/v8_rl_fix_plan_2026-05-29.md 改动 4）：原本 NEOW token 只编
+    choice 序号，4 个选项 hash 不到不同 embedding → 模型塌到 idx=0。仿照
+    _reward_card_content，从 runner.neow_blessings 取 blessing 文字注入 token。
+
+    runner.neow_blessings 是 List[NeowBlessing]（见 engine/game.py:2642，
+    NeowAction(i) 的 i 即此 list 下标）。NeowBlessing 字段：
+        blessing_type: NeowBlessingType 枚举（.value 是稳定字符串，如 "ten_percent_hp_bonus"）
+        drawback_type: NeowDrawbackType 枚举（NONE 表示无缺点）
+
+    用 blessing_type.value（稳定、适合 hash），有缺点时再拼 drawback_type.value。
+    """
+    blessings = getattr(runner, "neow_blessings", None)
+    if not blessings:
+        return "?"
+    idx = int(choice_index)
+    if idx < 0 or idx >= len(blessings):
+        return "?"
+    b = blessings[idx]
+    bt = getattr(b, "blessing_type", None)
+    # 枚举优先取 .value（稳定字符串），退化到 str()
+    bt_str = str(getattr(bt, "value", None) or bt or "?")
+    dt = getattr(b, "drawback_type", None)
+    dt_str = str(getattr(dt, "value", None) or dt or "")
+    # NONE / 空 表示无缺点，不拼进 token
+    if dt_str and dt_str.lower() not in ("none", ""):
+        return f"{bt_str}|drawback={dt_str}"
+    return bt_str
+
+
 def _reward_card_content(runner: Any, choice_index: int) -> str:
     """RewardAction(reward_type='card', choice_index=encoded) → 候选卡 id。
 
@@ -250,7 +282,7 @@ def _format_engine_action(action: Any, runner: Optional[Any] = None) -> str:
 
     各 action 类型来自 packages/engine/game.py（带 runner 时新增内容字段）：
         PathAction(node_index)                 → "MAP:node=<i>"
-        NeowAction(choice_index)               → "NEOW:choice=<i>"
+        NeowAction(choice_index)               → "NEOW:<blessing_type>[|drawback=<d>]:choice=<i>"
         CombatAction(action_type, ...)         → "COMBAT:<type>(card=<i>,target=<j>,potion=<k>)"
         RewardAction(reward_type='card', i)    → "REWARD:card:<card_id>:choice=<i>"
         RewardAction(reward_type='skip_card',i)→ "REWARD:skip_card:choice=<i>"  # 内容无关
@@ -277,7 +309,11 @@ def _format_engine_action(action: Any, runner: Optional[Any] = None) -> str:
     if cls == "PathAction":
         return f"MAP:node={g('node_index', -1)}"
     if cls == "NeowAction":
-        return f"NEOW:choice={g('choice_index', -1)}"
+        cidx = g("choice_index", -1)
+        if runner is not None:
+            content = _neow_choice_content(runner, cidx)
+            return f"NEOW:{content}:choice={cidx}"
+        return f"NEOW:choice={cidx}"
     if cls == "CombatAction":
         atype = g("action_type", "?")
         return (

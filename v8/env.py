@@ -419,6 +419,10 @@ class V8Env:
         self._combat_enter_turn_actions: int = 0  # 进入 combat 时 _actions_taken 值
         # 真实战斗 reward 需要的额外快照
         self._combat_enter_enemy_total_max_hp: int = 0  # 进入战斗时所有敌人 max_hp 之和
+        # 阶段 0：缓存战斗内最后一次见到的真实回合数（current_combat.state.turn）。
+        # 战斗结束时 current_combat 已被置 None，[combat] exit 直接读会拿不到，
+        # 故在战斗进行中每回合缓存到这里供 _log_combat_exit 使用。
+        self._last_combat_turn: int = 0
 
         # [floor] 日志：每次 floor 变化时打一次（含所有 room 类型）
         self._last_logged_floor: int = -1
@@ -484,14 +488,23 @@ class V8Env:
             verbose=self.verbose,
         )
         # Round 2：如果有 combat_net_wrapper，把它作为 search leaf evaluator
-        # 接进 adapter（用户原话第 2 点：搜索 + 模型联合）
+        # 接进 adapter（用户原话第 2 点：搜索 + 模型联合）。
+        #
+        # 阶段 0 清场（docs/v8_rl_fix_plan_2026-05-29.md）：当前 combat_net_wrapper
+        # 内的 _CombatObsValueHead 是**随机权重桩**，被搜索当 leaf value 用、与手写
+        # 启发按 0.7*neural + 0.3*heuristic 混合（turn_solver.py），等于往战斗叶子
+        # 评估注入 70% 随机噪声。隔离测试（tools/v8_combat_isolated_test.py mode B）
+        # 证明拔掉噪声、纯手写启发更稳（赢率↑、少丢血）。因此训练时**不再**把这个
+        # 随机桩传给 adapter（neural_eval=None 等效，走纯手写启发）。
+        # wrapper 类本身保留：阶段 5 接真正训练好的战斗网络后会重新启用。
         adapter_kwargs: Dict[str, Any] = dict(
             time_budget_ms=50.0,
             node_budget=5_000,
             solver_budgets=self._solver_budgets,
         )
-        if self._combat_net_wrapper is not None:
-            adapter_kwargs["combat_net"] = self._combat_net_wrapper
+        # 阶段 0：随机桩已禁用（不传 combat_net）；待阶段 5 接真网络后恢复下面这行。
+        # if self._combat_net_wrapper is not None:
+        #     adapter_kwargs["combat_net"] = self._combat_net_wrapper
         self._adapter = TurnSolverAdapter(**adapter_kwargs)
         self._adapter.reset()
 
@@ -510,6 +523,7 @@ class V8Env:
         self._combat_enter_floor = 0
         self._combat_enter_turn_actions = 0
         self._combat_enter_enemy_total_max_hp = 0
+        self._last_combat_turn = 0
         self._last_logged_floor = -1
         self._pending_deck_room = None
         self._last_event_phase = None
@@ -882,6 +896,7 @@ class V8Env:
         self._combat_enter_max_hp = int(getattr(rs, "max_hp", 0) or 0)
         self._combat_enter_floor = int(getattr(rs, "floor", 0) or 0)
         self._combat_enter_turn_actions = self._actions_taken
+        self._last_combat_turn = 0  # 阶段 0：进战斗重置真实回合数缓存
         # 真实战斗 reward 快照：所有敌人 max_hp 之和（damage_ratio 分母）
         self._combat_enter_enemy_total_max_hp = sum(
             int(e.get("max_hp", 0) or 0) for e in enemies
@@ -913,21 +928,22 @@ class V8Env:
         turn_actions = self._actions_taken - self._combat_enter_turn_actions
 
         # ----- 真实战斗 reward 计算 -----
-        # turns: 优先 current_combat.state.turn（StSRLSolver 内部回合计数器）；
-        # current_combat 退出 COMBAT 时可能已被清；保底用 turn_actions（model 决策步数）。
-        turns = 0
+        # turns: 真实回合数。阶段 0 修复——战斗结束时 current_combat 已被置 None
+        # （engine game.py:_end_combat），此处直接读 current_combat.state.turn 永远
+        # 拿不到、fallback 恒触发 → 旧逻辑下 turns 实际等于动作数 turn_actions。
+        # 现在改用 _run_combat_turn 每回合缓存的 _last_combat_turn（战斗进行中读到的
+        # 真实回合数）。current_combat 万一还活着也再读一次取最大值兜底。
+        turns = int(self._last_combat_turn or 0)
         try:
             cc = getattr(self._runner, "current_combat", None)
             if cc is not None:
                 st = getattr(cc, "state", None)
                 if st is not None:
-                    turns = int(getattr(st, "turn", 0) or 0)
+                    turns = max(turns, int(getattr(st, "turn", 0) or 0))
         except Exception:  # noqa: BLE001
-            turns = 0
+            pass
         if turns <= 0:
-            # current_combat 已被清 → 用 turn_actions（粗略）。
-            # 实测每回合至少 1 action（end_turn），多则 5+，turn_actions 比真实 turn 偏高，
-            # 这只在 victory 后 phase 已切走时 fallback，量级仍合理。
+            # 极端兜底（缓存与 current_combat 都拿不到）：用 turn_actions（粗略偏高）。
             turns = max(1, turn_actions)
 
         hp_lost = max(self._combat_enter_hp - hp_after, 0)
@@ -1482,6 +1498,20 @@ class V8Env:
         actions = self._runner.get_available_actions()
         if not actions:
             return
+
+        # 阶段 0：战斗进行中 current_combat 还在，缓存真实回合数供 [combat] exit 用
+        # （战斗结束 current_combat 被置 None，exit 时直接读会拿不到 → fallback 到
+        # turn_actions，导致日志 turns 实际等于动作数而非真实回合数）。
+        try:
+            cc = getattr(self._runner, "current_combat", None)
+            if cc is not None:
+                st = getattr(cc, "state", None)
+                if st is not None:
+                    t = int(getattr(st, "turn", 0) or 0)
+                    if t > self._last_combat_turn:
+                        self._last_combat_turn = t
+        except Exception:  # noqa: BLE001
+            pass
 
         room_type = self._runner.current_room_type or "monster"
 
