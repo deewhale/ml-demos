@@ -61,11 +61,14 @@ from v8.reward import (
     compute_step_reward,
     compute_final_reward,
     compute_combat_reward,
+    compute_strength_growth_reward,
+    compute_boss_beat_reward,
     NODE_REWARD_EVENT_SUCCESS,
     NODE_REWARD_SHOP_RELIC,
     NODE_REWARD_REST_USE,
     NODE_REWARD_TREASURE,
 )
+from v8.card_scorer import CardScorer
 
 
 logger = logging.getLogger(__name__)
@@ -431,6 +434,12 @@ class V8Env:
         # {card, target, effects:[{type:damage/block/draw/energy/power/...}]}。
         self._last_combat_card_log: List[Dict[str, Any]] = []
 
+        # 阶段 2 底座：按局滚动的 per-card 评分器（每局 reset，战后累加锚维）。
+        # 牌组实力 = card_scorer.deck_strength(deck)（总分）。reward 用它的增量。
+        self._card_scorer: CardScorer = CardScorer()
+        # 上一次记录的牌组总分（算 Δdeck_strength 用）。每局 reset 归 0。
+        self._last_deck_strength: float = 0.0
+
         # [floor] 日志：每次 floor 变化时打一次（含所有 room 类型）
         self._last_logged_floor: int = -1
 
@@ -540,6 +549,10 @@ class V8Env:
         self._event_choice_count.clear()
         # 真实战斗 reward 缓存清零
         self._pending_combat_reward = 0.0
+        # 阶段 2：per-card 评分器每局清零（不跨局攒分）+ 牌组总分基线归 0。
+        self._card_scorer.reset()
+        self._last_deck_strength = 0.0
+        self._last_combat_card_log = []
         # perf 计数器在 reset 也清一遍（兼容 trainer 没调 reset_perf_counters 的情况）
         self.reset_perf_counters()
 
@@ -995,11 +1008,37 @@ class V8Env:
                 remaining_hp = 0
             damage_dealt = max(enemy_total_max - remaining_hp, 0)
 
+        # ----- 阶段 2 底座：战后牌组实力评分 + 增长奖励 -----
+        # 1) 从本场 per-card 细账累加锚维（输出/防御）到 card_scorer（按局滚动）。
+        # 2) 用更新后的 card_scorer 重算当前牌组总分（deck_strength）。
+        # 3) Δdeck_strength = 本次总分 − 上次记录 → 牌组实力增长奖励。
+        # 注：hp/回合罚已删（compute_combat_reward 新签名不收 hp_lost/turns），
+        #    hp_lost/turns 仅留作 [combat] exit 日志的诊断数值。
+        strength_reward = 0.0
+        deck_strength_now = self._last_deck_strength
+        try:
+            self._card_scorer.update_from_combat(self._last_combat_card_log)
+            cur_deck = [
+                {
+                    "name": getattr(c, "id", "") or "",
+                    "upgraded": bool(getattr(c, "upgraded", False)),
+                }
+                for c in (getattr(rs, "deck", []) or [])
+            ]
+            deck_strength_now = self._card_scorer.deck_strength(cur_deck)
+            delta_strength = deck_strength_now - self._last_deck_strength
+            strength_reward = compute_strength_growth_reward(delta_strength)
+            self._last_deck_strength = deck_strength_now
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "card_scorer strength update failed: %s: %s; strength_reward=0",
+                type(e).__name__, e,
+            )
+            strength_reward = 0.0
+
         try:
             combat_reward = compute_combat_reward(
                 won=won,
-                hp_lost=hp_lost,
-                turns=turns,
                 damage_dealt=damage_dealt,
                 enemy_total_max_hp=enemy_total_max,
             )
@@ -1009,14 +1048,30 @@ class V8Env:
                 type(e).__name__, e,
             )
             combat_reward = 0.0
-        self._pending_combat_reward += combat_reward
+
+        # 过 act boss 进度奖励（boss 战胜利时给一次）。room type 在下方判定，
+        # 这里先按 reason+room 判 boss victory。
+        boss_reward = 0.0
+        if won:
+            try:
+                rt0 = self._runner.current_room_type
+            except Exception:  # noqa: BLE001
+                rt0 = None
+            rt0_str = (rt0 or "").lower() if isinstance(rt0, str) else \
+                (getattr(rt0, "name", "") or "").lower()
+            if rt0_str == "boss":
+                boss_reward = compute_boss_beat_reward()
+
+        self._pending_combat_reward += combat_reward + strength_reward + boss_reward
 
         logger.info(
             "[combat] exit ep=%s reason=%s floor=%d hp_before=%d hp_after=%d "
-            "turn_actions=%d turns=%d damage=%d/%d combat_reward=%.2f",
+            "turn_actions=%d turns=%d damage=%d/%d combat_reward=%.2f "
+            "deck_strength=%.2f strength_reward=%.2f boss_reward=%.2f",
             self._episode_idx, reason, self._combat_enter_floor,
             self._combat_enter_hp, hp_after, turn_actions,
             turns, damage_dealt, enemy_total_max, combat_reward,
+            deck_strength_now, strength_reward, boss_reward,
         )
         # 胜利 + elite/boss → 准备 [deck] 日志（等 reward 处理完）
         if reason == "victory":
