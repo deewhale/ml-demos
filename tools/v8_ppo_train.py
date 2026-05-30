@@ -328,6 +328,10 @@ def run_eval(
     act2_beat = 0
     won_game = 0
     total_steps = 0
+    # ---- 阶段 3：每次 eval 测当前策略熵（熵崩第一时间看见）----
+    # 对每个 seed 的 eval rollout 算策略熵，最后按 seed 求均值。
+    entropy_sum = 0.0
+    entropy_n = 0
     # per-boss act1 维度：见 docstring，仅 final_act==1 且 reach 时填
     boss_reach_counts: Dict[str, int] = {}
     boss_kill_counts: Dict[str, int] = {}
@@ -570,6 +574,17 @@ def run_eval(
                     pass
             _log_eval_mem("empty", seed)
             continue
+        # ---- 阶段 3：测本 seed 的策略熵，累加（最后按 seed 求均值）----
+        try:
+            seed_entropy = trainer.policy_entropy(rollout)
+            entropy_sum += seed_entropy
+            entropy_n += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[eval] seed=%d policy_entropy failed: %s: %s",
+                seed, type(e).__name__, e,
+            )
+
         last = rollout[-1]
         # last.state 是这一步**之前**的 state；需要从 env 拿最新
         runner = env.runner
@@ -637,6 +652,11 @@ def run_eval(
         "act1_boss_beat_rate": act1_beat_rate,
         "act2_boss_beat_rate": act2_beat / num_seeds,
         "won_game_rate": won_game / num_seeds,
+        # 阶段 0 拆出的分层击杀指标（won_game_rate 是北极星，a1/a2 当过滤器）。
+        # eval 侧 act1/act2 boss "beat" = 穿过该 act boss（进入下一 act 或通关），
+        # 与 heartbeat 里 a1_boss_killed/a2_boss_killed 同口径。
+        "a1_boss_killed_rate": act1_beat_rate,
+        "a2_boss_killed_rate": act2_beat / num_seeds,
         # deprecated, use act1_boss_beat_rate
         "beat_boss_rate": act1_beat_rate,
         "floor_mean": sum(floors) / n if floors else 0.0,
@@ -644,6 +664,8 @@ def run_eval(
         "avg_steps": total_steps / n if floors else 0.0,
         "boss_reach_counts": boss_reach_counts,
         "boss_kill_counts": boss_kill_counts,
+        # ---- 阶段 3：当前策略熵（崩了第一时间看见）----
+        "entropy": entropy_sum / entropy_n if entropy_n > 0 else 0.0,
     }
 
 
@@ -1243,16 +1265,21 @@ def main() -> None:
             "entropy": metrics.get("entropy", 0.0),
             "approx_kl": metrics.get("approx_kl", 0.0),
             "clip_frac": metrics.get("clip_frac", 0.0),
+            # 阶段 3：自适应熵系数（本批用的 coef + 据本批熵调出的下批 coef）
+            "entropy_coef": metrics.get("entropy_coef", 0.0),
+            "entropy_coef_next": metrics.get("entropy_coef_next", 0.0),
             "update_secs": upd_secs,
             "wrapper_calls": wrapper_calls_in_batch,
         }
         train_log.append(log_entry)
         logger.info(
             "[ep=%d] reward_mean=%.3f steps_mean=%.1f floor_mean=%.1f beat=%d/%d "
-            "policy=%.4f value=%.4f entropy=%.4f kl=%.4f clip=%.3f wrapper_calls=%d upd=%.2fs",
+            "policy=%.4f value=%.4f entropy=%.4f ent_coef=%.4f->%.4f kl=%.4f clip=%.3f "
+            "wrapper_calls=%d upd=%.2fs",
             num_episodes_done, log_entry["mean_reward"], log_entry["mean_steps"],
             log_entry["mean_floor"], n_beat, len(batch_meta),
             log_entry["policy_loss"], log_entry["value_loss"], log_entry["entropy"],
+            log_entry["entropy_coef"], log_entry["entropy_coef_next"],
             log_entry["approx_kl"], log_entry["clip_frac"],
             wrapper_calls_in_batch, upd_secs,
         )
@@ -1328,10 +1355,11 @@ def main() -> None:
                 eval_history.append(eval_metrics)
                 logger.info(
                     "[eval@ep=%d] reached_a1_boss=%.2f a1_boss_beat=%.2f a2_boss_beat=%.2f "
-                    "won_game=%.2f floor_mean=%.1f (%.1fs)",
+                    "won_game=%.2f floor_mean=%.1f entropy=%.4f (%.1fs)",
                     num_episodes_done, eval_metrics["reached_boss_rate"],
                     eval_metrics["act1_boss_beat_rate"], eval_metrics["act2_boss_beat_rate"],
                     eval_metrics["won_game_rate"], eval_metrics["floor_mean"],
+                    eval_metrics.get("entropy", 0.0),
                     eval_metrics["secs"],
                 )
                 # per-boss reach / kill 分布（仅 act1，act 切换后 _boss_name 被覆盖，

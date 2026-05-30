@@ -100,6 +100,12 @@ class V8PPOTrainer:
         entropy_coef: float = 0.01,
         max_grad_norm: float = 0.5,
         device: str = "cpu",
+        # ---- 阶段 3：自适应熵系数 / 探索度地板（防熵崩 → skip-all 锁死）----
+        adaptive_entropy: bool = True,
+        target_entropy: float = 0.3,
+        entropy_coef_min: float = 0.01,
+        entropy_coef_max: float = 0.30,
+        entropy_adjust_rate: float = 0.05,
     ):
         self.device = torch.device(device)
         self.model = model.to(self.device)
@@ -117,9 +123,66 @@ class V8PPOTrainer:
         self.entropy_coef = float(entropy_coef)
         self.max_grad_norm = float(max_grad_norm)
 
+        # ============================================================
+        # 自适应熵系数 / 探索度地板（阶段 3）
+        # ============================================================
+        # 背景：上次训练熵从 ~0.71（batch_v15 起点）崩到 ~0.02，策略锁死 skip-all。
+        #   旧实现 entropy_coef 固定 0.01，无 floor、无自适应，崩了救不回来。
+        #
+        # 设计（保持简单：一个带上下限的「比例控制器」，不上 SAC 那套
+        #   target-entropy Lagrangian）：
+        #   - 每次 PPO update 后读这批的平均策略熵 H。
+        #   - H < target_entropy（探索不足）→ 乘性上调 entropy_coef（鼓励探索），
+        #     但不超过 entropy_coef_max（cap，防探索过头学不动）。
+        #   - H > target_entropy（探索足够）→ 乘性下调 entropy_coef（让策略收敛），
+        #     但不低于 entropy_coef_min（floor，floor>0 → 永远保底一点探索，防熵崩死）。
+        #   - 乘性步长用 (1 ± entropy_adjust_rate)，每 update 小步走、不震荡。
+        #
+        # 所有边界初始值待训练时按「熵轨迹守不守得住 + 学不学得动」两轴校验后调。
+        #   target_entropy=0.3：fresh init 时元决策每步熵 ~0.7-1.0，0.3 约为健康起点的
+        #     ~35%（对齐计划「初始熵 30%」）。
+        #   entropy_coef_min=0.01：旧固定值作 floor，保底探索。
+        #   entropy_coef_max=0.30：上限，防 entropy bonus 盖过 policy/value loss。
+        #   entropy_adjust_rate=0.05：每 update ±5% 的小步。
+        self.adaptive_entropy = bool(adaptive_entropy)
+        self.target_entropy = float(target_entropy)
+        self.entropy_coef_min = float(entropy_coef_min)
+        self.entropy_coef_max = float(entropy_coef_max)
+        self.entropy_adjust_rate = float(entropy_adjust_rate)
+        # entropy_coef 从构造值起步，但确保落在 [min, max] 区间内（防初值越界）
+        self.entropy_coef = float(
+            min(max(self.entropy_coef, self.entropy_coef_min), self.entropy_coef_max)
+        )
+
         # 性能 / 调用计数（每次 collect_rollout / update 后填充，trainer driver 读）
         self.last_rollout_stats: Dict[str, float] = {}
         self.last_update_stats: Dict[str, float] = {}
+
+    # ---------------------------------------------------------
+    # 自适应熵系数控制器（阶段 3）
+    # ---------------------------------------------------------
+
+    def _update_entropy_coef(self, measured_entropy: float) -> None:
+        """根据本批策略熵，按比例控制器调 entropy_coef（带上下限）。
+
+        逻辑（见 __init__ 注释）：
+          - 熵 < target → 探索不足 → entropy_coef ×(1 + rate)，上限 cap。
+          - 熵 ≥ target → 探索够 → entropy_coef ×(1 - rate)，下限 floor（floor>0 保底）。
+
+        每 update 调一次，小步乘性调整，平滑不震荡。
+        """
+        if not self.adaptive_entropy:
+            return
+        if measured_entropy != measured_entropy:  # NaN 防御
+            return
+        if measured_entropy < self.target_entropy:
+            self.entropy_coef *= (1.0 + self.entropy_adjust_rate)
+        else:
+            self.entropy_coef *= (1.0 - self.entropy_adjust_rate)
+        # clamp 到 [floor, cap]；floor>0 → 永远保底探索（核心防崩保险）
+        self.entropy_coef = float(
+            min(max(self.entropy_coef, self.entropy_coef_min), self.entropy_coef_max)
+        )
 
     # ---------------------------------------------------------
     # Rollout collection
@@ -417,6 +480,37 @@ class V8PPOTrainer:
         }
         return rollout
 
+    @torch.no_grad()
+    def policy_entropy(self, rollout: List[RolloutStep]) -> float:
+        """计算一批 rollout step 上的平均策略熵 H = -Σ p log p。
+
+        阶段 3：eval 路径用它把"当前策略熵"纳入 eval 输出（熵崩第一时间看见）。
+        与 update() 里算 entropy 同口径（对每个决策 state 的 logits 算 softmax 熵，
+        再对所有 step 求均值）。eval rollout 是 deterministic（argmax）采集的，但熵
+        本身只依赖 logits 分布，与采样方式无关。
+        """
+        if not rollout:
+            return 0.0
+        was_training = self.model.training
+        self.model.eval()
+        ent_sum = 0.0
+        ent_n = 0
+        for step in rollout:
+            out = self.model(step.state, step.available_actions)
+            logits = out["logits"]
+            valid_n = min(logits.shape[0], len(step.available_actions))
+            if valid_n <= 0:
+                continue
+            logits = logits[:valid_n]
+            log_probs = F.log_softmax(logits, dim=-1)
+            probs = F.softmax(logits, dim=-1)
+            ent = float(-(probs * log_probs).sum().item())
+            ent_sum += ent
+            ent_n += 1
+        if was_training:
+            self.model.train()
+        return ent_sum / ent_n if ent_n > 0 else 0.0
+
     # ---------------------------------------------------------
     # GAE advantage
     # ---------------------------------------------------------
@@ -639,6 +733,14 @@ class V8PPOTrainer:
         if n_updates > 0:
             for k in list(metrics_accum.keys()):
                 metrics_accum[k] /= n_updates
+
+        # ---- 阶段 3：用本批平均熵驱动自适应熵系数（带探索地板）----
+        # 注意：先记录"本次 update 实际生效的 coef"（用于本批 loss 的那个），
+        #   再根据本批熵调出"下批用的 coef"。这样 metrics 里的 entropy_coef 反映
+        #   的是"刚跑完这批用的值"，driver 日志看得清楚。
+        metrics_accum["entropy_coef"] = float(self.entropy_coef)
+        self._update_entropy_coef(metrics_accum.get("entropy", 0.0))
+        metrics_accum["entropy_coef_next"] = float(self.entropy_coef)
         metrics_accum["n_steps"] = float(len(rollout))
 
         self.last_update_stats = {
