@@ -101,11 +101,12 @@ class V8PPOTrainer:
         max_grad_norm: float = 0.5,
         device: str = "cpu",
         # ---- 阶段 3：自适应熵系数 / 探索度地板（防熵崩 → skip-all 锁死）----
+        # v1 太弱已加强（2026-05-31）：见下方 __init__ 注释「v2 加强」段。初始值待调。
         adaptive_entropy: bool = True,
-        target_entropy: float = 0.3,
-        entropy_coef_min: float = 0.01,
-        entropy_coef_max: float = 0.30,
-        entropy_adjust_rate: float = 0.05,
+        target_entropy: float = 0.25,
+        entropy_coef_min: float = 0.03,
+        entropy_coef_max: float = 0.50,
+        entropy_adjust_rate: float = 0.5,
     ):
         self.device = torch.device(device)
         self.model = model.to(self.device)
@@ -139,11 +140,21 @@ class V8PPOTrainer:
         #   - 乘性步长用 (1 ± entropy_adjust_rate)，每 update 小步走、不震荡。
         #
         # 所有边界初始值待训练时按「熵轨迹守不守得住 + 学不学得动」两轴校验后调。
-        #   target_entropy=0.3：fresh init 时元决策每步熵 ~0.7-1.0，0.3 约为健康起点的
-        #     ~35%（对齐计划「初始熵 30%」）。
-        #   entropy_coef_min=0.01：旧固定值作 floor，保底探索。
-        #   entropy_coef_max=0.30：上限，防 entropy bonus 盖过 policy/value loss。
-        #   entropy_adjust_rate=0.05：每 update ±5% 的小步。
+        #
+        # ★ v2 加强（2026-05-31）：v1（target=0.3 / floor=0.01 / cap=0.30 / rate=0.05
+        #   乘性固定步）实测顶不住熵塌方——redesign_v1 ep288→512 熵从 0.35 掉到 0.066，
+        #   而 ent_coef 才从 0.0100 顶到 0.0141（+41% / 7 update），刹车比下滑慢一个量级。
+        #   根因：v1 用固定 ±5% 乘性步，与「熵离 target 多远」无关，gap 再大也只 +5%。
+        #   改进三点：
+        #     1) floor 0.01 → 0.03：基线探索压力 ×3，永远保底更强探索。
+        #     2) 响应改成「与 gap 成比例 + 大力度」：低于 target 时
+        #        ent_coef *= (1 + rate * (target - H)/target)，rate=0.5。
+        #        gap 越大涨越猛——H 卡 0.1 / target 0.25 时单 update ×(1+0.5*0.6)=×1.3，
+        #        几个 update 内就能从 floor 0.03 涨到 0.1 量级（实测见单元自测）。
+        #     3) cap 0.30 → 0.50：允许在熵深塌时把 coef 顶很高再把熵拉回来。
+        #   target 仍取 0.25（≈ fresh init 元决策每步熵 0.7-1.0 的 ~30%，健康探索起点）。
+        #   高于 target 时对称地按 (1 - rate * (H - target)/target) 乘性下调（同样比例响应），
+        #   下限 floor 兜底。所有参数仍可配，初始值待按熵轨迹 + 学习两轴校验后微调。
         self.adaptive_entropy = bool(adaptive_entropy)
         self.target_entropy = float(target_entropy)
         self.entropy_coef_min = float(entropy_coef_min)
@@ -163,22 +174,28 @@ class V8PPOTrainer:
     # ---------------------------------------------------------
 
     def _update_entropy_coef(self, measured_entropy: float) -> None:
-        """根据本批策略熵，按比例控制器调 entropy_coef（带上下限）。
+        """根据本批策略熵，按「与 gap 成比例」的控制器调 entropy_coef（带上下限）。
 
-        逻辑（见 __init__ 注释）：
-          - 熵 < target → 探索不足 → entropy_coef ×(1 + rate)，上限 cap。
-          - 熵 ≥ target → 探索够 → entropy_coef ×(1 - rate)，下限 floor（floor>0 保底）。
+        逻辑（v2 加强，见 __init__ 注释）：
+          gap_ratio = (target - H) / target，归一化的「熵离 target 多远」。
+          - H < target（探索不足，gap_ratio>0）→ entropy_coef ×(1 + rate·gap_ratio)，
+            上限 cap。gap 越大涨越猛，刹得住快速塌方。
+          - H ≥ target（探索够，gap_ratio<0）→ entropy_coef ×(1 + rate·gap_ratio)
+            = ×(1 - rate·|gap_ratio|)，下限 floor（floor>0 永远保底探索）。
+          统一一条乘性式子，符号由 gap_ratio 决定，天然对称。
 
-        每 update 调一次，小步乘性调整，平滑不震荡。
+        每 update 调一次。gap_ratio 已用 target 归一并 clamp，单步乘子受控不爆。
         """
         if not self.adaptive_entropy:
             return
         if measured_entropy != measured_entropy:  # NaN 防御
             return
-        if measured_entropy < self.target_entropy:
-            self.entropy_coef *= (1.0 + self.entropy_adjust_rate)
-        else:
-            self.entropy_coef *= (1.0 - self.entropy_adjust_rate)
+        target = self.target_entropy if self.target_entropy > 1e-8 else 1e-8
+        gap_ratio = (target - measured_entropy) / target
+        # clamp gap_ratio 到 [-1, 1]：熵=0 时 gap_ratio=1（最大上调），
+        # 熵=2·target 时 gap_ratio=-1（最大下调），防极端熵值把单步乘子拉爆。
+        gap_ratio = max(-1.0, min(1.0, gap_ratio))
+        self.entropy_coef *= (1.0 + self.entropy_adjust_rate * gap_ratio)
         # clamp 到 [floor, cap]；floor>0 → 永远保底探索（核心防崩保险）
         self.entropy_coef = float(
             min(max(self.entropy_coef, self.entropy_coef_min), self.entropy_coef_max)
