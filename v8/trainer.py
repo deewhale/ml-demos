@@ -101,11 +101,11 @@ class V8PPOTrainer:
         max_grad_norm: float = 0.5,
         device: str = "cpu",
         # ---- 阶段 3：自适应熵系数 / 探索度地板（防熵崩 → skip-all 锁死）----
-        # v1 太弱已加强（2026-05-31）：见下方 __init__ 注释「v2 加强」段。初始值待调。
+        # v3 调温和（2026-05-31）：见下方 __init__ 注释「v3 调温和」段。初始值待调。
         adaptive_entropy: bool = True,
-        target_entropy: float = 0.25,
+        target_entropy: float = 0.06,
         entropy_coef_min: float = 0.03,
-        entropy_coef_max: float = 0.50,
+        entropy_coef_max: float = 0.12,
         entropy_adjust_rate: float = 0.5,
     ):
         self.device = torch.device(device)
@@ -141,20 +141,21 @@ class V8PPOTrainer:
         #
         # 所有边界初始值待训练时按「熵轨迹守不守得住 + 学不学得动」两轴校验后调。
         #
-        # ★ v2 加强（2026-05-31）：v1（target=0.3 / floor=0.01 / cap=0.30 / rate=0.05
-        #   乘性固定步）实测顶不住熵塌方——redesign_v1 ep288→512 熵从 0.35 掉到 0.066，
-        #   而 ent_coef 才从 0.0100 顶到 0.0141（+41% / 7 update），刹车比下滑慢一个量级。
-        #   根因：v1 用固定 ±5% 乘性步，与「熵离 target 多远」无关，gap 再大也只 +5%。
-        #   改进三点：
-        #     1) floor 0.01 → 0.03：基线探索压力 ×3，永远保底更强探索。
-        #     2) 响应改成「与 gap 成比例 + 大力度」：低于 target 时
-        #        ent_coef *= (1 + rate * (target - H)/target)，rate=0.5。
-        #        gap 越大涨越猛——H 卡 0.1 / target 0.25 时单 update ×(1+0.5*0.6)=×1.3，
-        #        几个 update 内就能从 floor 0.03 涨到 0.1 量级（实测见单元自测）。
-        #     3) cap 0.30 → 0.50：允许在熵深塌时把 coef 顶很高再把熵拉回来。
-        #   target 仍取 0.25（≈ fresh init 元决策每步熵 0.7-1.0 的 ~30%，健康探索起点）。
-        #   高于 target 时对称地按 (1 - rate * (H - target)/target) 乘性下调（同样比例响应），
-        #   下限 floor 兜底。所有参数仍可配，初始值待按熵轨迹 + 学习两轴校验后微调。
+        # ★ v3 调温和（2026-05-31）：v2（target=0.25 / floor=0.03 / cap=0.50 / rate=0.5）
+        #   实测「硬顶没用还添乱」——redesign_v2 把 ent_coef 一路顶到 cap=0.5 仍拉不住
+        #   探索度（熵磨到 0.027），且爬坡期被高 coef 引发过 KL 失稳（approx_kl 冲 0.18）。
+        #   结论：**这套奖励下策略熵天生收敛得低**，追一个够不到的高 target（0.25）只会
+        #   让控制器长期顶满 cap、扰动梯度、破坏正在爬坡的学习。
+        #   改成「防真崩盘的温和安全网」（不再追高探索，只防掉到接近 0 的真崩）：
+        #     1) target_entropy 0.25 → 0.06：只防熵掉到接近 0 的真崩盘，不再追够不到的高目标。
+        #        熵稳在 ~0.04（略低于 target）时控制器轻微施压即可，不会狂顶。
+        #     2) cap 0.50 → 0.12：温和上限。不再顶到 0.5（那会引发 KL 失稳）；
+        #        最多到 0.12，给一点保底探索压力但不扰乱爬坡。
+        #     3) floor 0.03：保持不变（永远保底一点探索）。
+        #   响应公式（gap-proportional）和 rate=0.5 保留——只是 target/cap 收窄后，
+        #   gap 变小 → 单步乘子变小 → 整体行为从「狂顶 cap」变成「温和停在 cap 附近」。
+        #   高于 target 时仍对称地按 (1 - rate * (H - target)/target) 乘性下调，floor 兜底。
+        #   所有参数仍可配，初始值待按熵轨迹 + 学习两轴校验后微调。
         self.adaptive_entropy = bool(adaptive_entropy)
         self.target_entropy = float(target_entropy)
         self.entropy_coef_min = float(entropy_coef_min)
