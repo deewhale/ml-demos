@@ -63,6 +63,7 @@ from v8.reward import (
     compute_combat_reward,
     compute_floor_progress_reward,
     compute_boss_beat_reward,
+    compute_boss_hp_reward,
     NODE_REWARD_EVENT_SUCCESS,
     NODE_REWARD_SHOP_RELIC,
     NODE_REWARD_REST_USE,
@@ -583,9 +584,10 @@ class V8Env:
         # 推进到第一个元决策 phase（NEOW 一般直接就是；保险起见 advance）
         self._advance_to_meta_decision()
 
-        # 构造初始 V8State（2026-05-25：不再 evaluate_deck，deck_strength 留 None）
+        # 构造初始 V8State；v5 起 deck_strength 填 card_scorer 牌组 5 维聚合当模型特征
+        # （开局没打过仗 → 各维 0）。
         state = _build_state_from_runner(self._runner)
-        state.deck_strength = None
+        self._fill_deck_strength_feature(state)
 
         self._current_state = state
         self._prev_state = state
@@ -699,11 +701,12 @@ class V8Env:
         if stall_terminated:
             info["error"] = "event_stall"
 
-        # 推进结束 → 构造 next_state（2026-05-25：不再调 evaluate_deck，deck_strength 留 None）
+        # 推进结束 → 构造 next_state；v5 起 deck_strength 填 card_scorer 牌组 5 维聚合
+        # 当模型特征（_log_combat_exit 已在本 step 期间用本场细账更新过 card_scorer）。
         next_state = _build_state_from_runner(self._runner)
-        next_state.deck_strength = None
+        self._fill_deck_strength_feature(next_state)
         self._last_act_for_cache = next_state.act
-        info["deck_strength_evaluated"] = False
+        info["deck_strength_evaluated"] = True
 
         # node_reward detect
         node_reward = _detect_node_reward(
@@ -1058,30 +1061,39 @@ class V8Env:
             )
             combat_reward = 0.0
 
-        # 过 act boss 进度奖励（boss 战胜利时给一次）。room type 在下方判定，
-        # 这里先按 reason+room 判 boss victory。
-        boss_reward = 0.0
-        if won:
-            try:
-                rt0 = self._runner.current_room_type
-            except Exception:  # noqa: BLE001
-                rt0 = None
-            rt0_str = (rt0 or "").lower() if isinstance(rt0, str) else \
-                (getattr(rt0, "name", "") or "").lower()
-            if rt0_str == "boss":
-                boss_reward = compute_boss_beat_reward()
+        # 这场战斗的 room type（boss 相关奖励都用它判定，算一次）。
+        try:
+            rt0 = self._runner.current_room_type
+        except Exception:  # noqa: BLE001
+            rt0 = None
+        rt0_str = (rt0 or "").lower() if isinstance(rt0, str) else \
+            (getattr(rt0, "name", "") or "").lower()
+        is_boss_room = (rt0_str == "boss")
 
-        # 进奖励的只有：单场胜负小信号 + 过 act boss 进度（strength_reward 已删）。
-        self._pending_combat_reward += combat_reward + boss_reward
+        # 过 act boss 进度奖励（boss 战**胜利**时给一次）。
+        boss_reward = compute_boss_beat_reward() if (won and is_boss_room) else 0.0
+
+        # 「健康到达 act boss」高效奖励（v5 起）：这场是 boss 战时，按**进入 boss 战
+        # 那一刻**的 hp_ratio（_combat_enter_hp / _combat_enter_max_hp）给奖——量的是
+        # 「走到 boss 面前还剩多少血」，不是 boss 战内丢血 → 奖励「拿好卡前面打得干净」，
+        # 天然反 skip-all。胜负都给（健康到达本身就该奖；输了 boss_beat 仍是 0）。
+        boss_hp_reward = 0.0
+        if is_boss_room:
+            enter_max = float(self._combat_enter_max_hp or 0)
+            arrival_ratio = (self._combat_enter_hp / enter_max) if enter_max > 0 else 0.0
+            boss_hp_reward = compute_boss_hp_reward(arrival_ratio)
+
+        # 进奖励的只有：单场胜负小信号 + 过 act boss 进度 + 健康到达 boss（strength_reward 已删）。
+        self._pending_combat_reward += combat_reward + boss_reward + boss_hp_reward
 
         logger.info(
             "[combat] exit ep=%s reason=%s floor=%d hp_before=%d hp_after=%d "
             "turn_actions=%d turns=%d damage=%d/%d combat_reward=%.2f "
-            "deck_strength=%.2f delta_strength=%.2f boss_reward=%.2f",
+            "deck_strength=%.2f delta_strength=%.2f boss_reward=%.2f boss_hp_reward=%.2f",
             self._episode_idx, reason, self._combat_enter_floor,
             self._combat_enter_hp, hp_after, turn_actions,
             turns, damage_dealt, enemy_total_max, combat_reward,
-            deck_strength_now, delta_strength, boss_reward,
+            deck_strength_now, delta_strength, boss_reward, boss_hp_reward,
         )
         # 胜利 + elite/boss → 准备 [deck] 日志（等 reward 处理完）
         if reason == "victory":
@@ -1149,6 +1161,24 @@ class V8Env:
             "true_victory": "boss",
         }
         return mapping.get(s, "unknown")
+
+    def _fill_deck_strength_feature(self, state: V8State) -> None:
+        """把 card_scorer 的牌组 5 维聚合填进 state.deck_strength（模型输入特征）。
+
+        v5 起：deck_strength 当**模型输入特征**喂——让模型在元决策（选卡/路线）时
+        看到自己牌组当前各维（输出/防御/运转/加费/能力）多强。
+        从 self._card_scorer.deck_dims(state.deck) 取（按局真实战斗量出、归一锚分量纲）。
+        开局没打过仗 → 各维全 0；这里仍填 dict（非 None）让模型一致看到 5 维。
+        任何异常退回 None（model encoder 内有 None → 全 0 兜底）。
+        """
+        try:
+            state.deck_strength = self._card_scorer.deck_dims(state.deck or [])
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "_fill_deck_strength_feature failed: %s: %s; deck_strength=None",
+                type(e).__name__, e,
+            )
+            state.deck_strength = None
 
     def _final_hp_ratio(self) -> float:
         """episode 结束时的存活比 current_hp / max_hp ∈ [0,1]（compute_final_reward 用）。

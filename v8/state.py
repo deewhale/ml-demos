@@ -54,10 +54,13 @@ class V8State:
     # 当前位置 {"floor": int, "x": int}，未上图（NEOW）时为 None
     current_position: Optional[Dict[str, int]] = None
 
-    # ----- 牌组强度（最近一次 evaluate_deck 结果）-----
-    # 4 维数字：{"damage_dealt": float, "damage_taken": float,
-    #          "turns_to_win": float, "win_rate": float}
-    # 未评估过时为 None（PPO step 用 0 / mask 处理）
+    # ----- 牌组强度（card_scorer 牌组聚合，v5 起）-----
+    # 5 维数字：{"output": float, "defense": float, "draw": float,
+    #          "energy": float, "power": float}
+    # 由 env 在 reset/step 中从 CardScorer.deck_dims(deck) 填（按局真实战斗量出的
+    # 各维牌组聚合）。让模型在元决策（选卡/路线）时看到自己牌组当前各维多强。
+    # 未评估过（开局没打过仗）时为 None（model encoder 内有 None → 全 0 兜底）。
+    # 旧语义（模拟评分 4 维 damage_dealt/damage_taken/turns_to_win/win_rate）已弃用。
     deck_strength: Optional[Dict[str, float]] = None
 
     # ----- 战斗内字段（仅 COMBAT phase 有意义）-----

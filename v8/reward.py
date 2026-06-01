@@ -23,6 +23,10 @@
   （改由 per-floor step reward 承担），final 只留通关 bonus。
 - **存活 terminal 信号（小）**：episode 结束 +W_HP_TERMINAL(=5)×final_hp_ratio，
   让「活着到第 N 层」> 「死在第 N 层」。
+- **「健康到达 act boss」高效奖励（v5 起，+W_BOSS_HP(=15)×boss_arrival_hp_ratio）**：
+  到 boss 战时按**进入那一刻**的血量比给奖（血越满奖越多）。量的是「走到 boss 面前
+  还剩多少血」，不是「boss 战少挨打」→ 奖励「拿好卡前面打得干净」，天然反 skip-all
+  （好牌组到 boss 血多 → 奖高；skip-all 残血到 boss → 奖低、吃亏）。
 
 权衡：走到第 10 层就死 ≈ 30 量级（主要来自 floor）；通关 ≈ 300+ 量级。
 进度 / 过 boss / 通关在总奖励里占绝对主导，任何残留战斗 / node 小信号都不接近其量级。
@@ -69,6 +73,20 @@ BOSS_BEAT_BONUS: float = 25.0
 # 存活 terminal 信号（小）：episode 结束 + W_HP_TERMINAL × final_hp_ratio。
 # 让「活着到第 N 层」> 「死在第 N 层」，但权重小到不和进度量级竞争。
 W_HP_TERMINAL: float = 5.0
+
+# 「健康到达 act boss」高效奖励（v5 起）：到达 / 进入每个 act boss 战时，按**进入
+# boss 战那一刻**的 hp_ratio 给 + W_BOSS_HP × hp_ratio。即到 boss 时血越满奖越多。
+#
+# **为什么不会逼 skip-all（防 skip-all 设计核心）**：
+#   这个奖励量的是「走到 boss 面前时还剩多少血」，不是「boss 战少挨打」。
+#   - 好牌组 → 前面每场打得干净 → 到 boss 时血更多 → 这个奖更高
+#     ⇒ 奖励「拿能打的好卡」，跟 skip-all 反向。
+#   - skip-all 的小弱牌组 → 前面被磨 → 到 boss 时血更少 → 这个奖更低
+#     ⇒ skip-all 在这个信号下吃亏、不占便宜。
+#
+# 权重取中等（15）：让「健康到达」成有意义信号（满血到 boss ≈ +15，介于过层 +3
+# 与过 boss +25 之间），但不盖过通关（+100）/ 过 boss（+25）主轴。
+W_BOSS_HP: float = 15.0
 
 
 # ============================================================
@@ -120,6 +138,21 @@ def compute_floor_progress_reward(num_new_floors: int = 1) -> float:
 def compute_boss_beat_reward() -> float:
     """过一个 act boss 的进度奖励（env 在 boss 战斗胜利时给一次）。"""
     return BOSS_BEAT_BONUS
+
+
+def compute_boss_hp_reward(boss_arrival_hp_ratio: float) -> float:
+    """「健康到达 act boss」奖励 = W_BOSS_HP × boss_arrival_hp_ratio。
+
+    env 在 boss 战结束时给一次，用的是**进入 boss 战那一刻**的 hp_ratio
+    （current_hp / max_hp ∈ [0,1]，即「走到 boss 面前还剩多少血」），
+    而不是 boss 战内的丢血——所以奖励「健康地走到 boss」而非「boss 战少挨打」，
+    天然反 skip-all（好牌组前面打得干净 → 到 boss 血多 → 奖高）。
+
+    boss_arrival_hp_ratio ∈ [0, 1]。残血到 boss → 接近 0；满血到 boss → 1×W。
+    """
+    r = float(boss_arrival_hp_ratio or 0.0)
+    r = max(0.0, min(1.0, r))  # clamp 到 [0,1]
+    return W_BOSS_HP * r
 
 
 def compute_hp_terminal_reward(final_hp_ratio: float) -> float:
@@ -218,6 +251,7 @@ __all__ = [
     "compute_combat_reward",
     "compute_floor_progress_reward",
     "compute_boss_beat_reward",
+    "compute_boss_hp_reward",
     "compute_hp_terminal_reward",
     # weights (导出方便 trainer / unit test 引用)
     "W_NODE_REWARD",
@@ -225,6 +259,7 @@ __all__ = [
     "W_FLOOR_PROGRESS",
     "BOSS_BEAT_BONUS",
     "W_HP_TERMINAL",
+    "W_BOSS_HP",
     "W_COMBAT_WIN",
     "W_COMBAT_LOSE",
     "NODE_REWARD_EVENT_SUCCESS",

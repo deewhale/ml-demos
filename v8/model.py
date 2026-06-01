@@ -7,7 +7,7 @@
        - 卡 / 遗物 / 药水 token embedding + set encoder（mean-pool）
        - 数字状态（hp/max_hp/floor/act/gold/...）MLP
        - Map encoder（flat 节点编码 + 一层简单邻接消息传递）
-       - 牌组强度 4 维 直接 concat
+       - 牌组强度 5 维（card_scorer 聚合：输出/防御/运转/加费/能力）直接 concat
        - Phase one-hot concat
        - 全部 concat → MLP → state_vec [B, hidden_dim]
             ↓
@@ -46,6 +46,12 @@ import torch.nn.functional as F
 
 from v8.action_space import KNOWN_PHASES
 from v8.state import V8State
+
+
+# 牌组强度特征归一常数：card_scorer.deck_dims 是整副牌各维的「总和」，会随
+# 牌组规模 + 战斗场次增长。除以这个温和常数把单维量级压回 ~O(1)，避免某维爆掉。
+# 取 10.0：一副打到 act1 后段的牌单维聚合常落在个位到十几量级，/10 后落到 ~1。
+DECK_STRENGTH_NORM: float = 10.0
 
 
 # ===== Hash → token id =====
@@ -338,14 +344,18 @@ class V8Model(nn.Module):
             nn.ReLU(),
         )
 
-        # ----- 牌组强度 4 维 -----
-        self.deck_strength_dim = 4
+        # ----- 牌组强度 5 维（card_scorer 牌组聚合：输出/防御/运转/加费/能力）-----
+        # v5 起改用 card_scorer.deck_dims（按局真实战斗量出的 5 维），替换旧的
+        # 模拟评分 4 维 dict（damage_dealt/damage_taken/turns_to_win/win_rate）。
+        # 让模型在元决策（选卡/路线）时「看到」自己牌组当前各维多强。
+        # 新特征 → 旧 ckpt 不兼容（输入维度变 + 语义变），v5 必须 fresh start。
+        self.deck_strength_dim = 5
 
         # ----- Phase one-hot -----
         # 用 KNOWN_PHASES 的索引
 
         # ----- State 总融合 MLP -----
-        # 拼接：deck(64) + relic(64) + potion(64) + map(64) + num(32) + deck_strength(4) + phase(NUM_PHASES)
+        # 拼接：deck(64) + relic(64) + potion(64) + map(64) + num(32) + deck_strength(5) + phase(NUM_PHASES)
         # 战斗外字段（hand/monsters/energy）不进 state_vec，只参与战斗 head
         state_in_dim = (
             set_out_dim * 3  # deck + relic + potion
@@ -530,14 +540,20 @@ class V8Model(nn.Module):
         )
         num_vec = self.num_mlp(num_feats)
 
-        # ---- 牌组强度 ----
+        # ---- 牌组强度（card_scorer 5 维聚合：输出/防御/运转/加费/能力）----
+        # state.deck_strength 由 env 填成 card_scorer.deck_dims 的 5 维 dict
+        # （已是归一锚分量纲：output/defense 已 /OUTPUT_NORM，协同三维本就归一）。
+        # 牌组聚合是「总和」会随牌组变大而增长，这里再除一个温和常数
+        # DECK_STRENGTH_NORM 把整副牌的量级压回 ~O(1)，避免某维爆掉淹没其他特征。
+        # 未评估过（None / 开局没打过仗）→ 全 0，安全。
         ds = state.deck_strength or {}
         strength_vec = torch.tensor(
             [
-                float(ds.get("damage_dealt", 0.0) or 0.0) / 50.0,
-                float(ds.get("damage_taken", 0.0) or 0.0) / 50.0,
-                float(ds.get("turns_to_win", 0.0) or 0.0) / 10.0,
-                float(ds.get("win_rate", 0.0) or 0.0),
+                float(ds.get("output", 0.0) or 0.0) / DECK_STRENGTH_NORM,
+                float(ds.get("defense", 0.0) or 0.0) / DECK_STRENGTH_NORM,
+                float(ds.get("draw", 0.0) or 0.0) / DECK_STRENGTH_NORM,
+                float(ds.get("energy", 0.0) or 0.0) / DECK_STRENGTH_NORM,
+                float(ds.get("power", 0.0) or 0.0) / DECK_STRENGTH_NORM,
             ],
             dtype=torch.float32,
             device=device,

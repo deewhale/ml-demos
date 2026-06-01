@@ -346,6 +346,29 @@ class CardScorer:
             total += self.card_score(key)
         return float(total)
 
+    def deck_dims(self, deck: Optional[List[Dict[str, Any]]]) -> Dict[str, float]:
+        """当前牌组的**5 维分各自的牌组聚合**（总和，与 deck_strength 同口径）。
+
+        deck_strength() 给的是综合标量（5 维加权和的总分）；这里把每一维分开聚合，
+        供 v8/model.py 当**输入特征**喂给模型——让模型在选卡/路线时「看到」自己牌组
+        当前各维度多强（输出/防御/运转/加费/能力），而不只是一个标量。
+
+        返回归一量纲值（与 card_dims 同口径：output/defense 已除归一常数，协同三维
+        本就是归一量纲），各维在牌组上求和。同名重复卡各算一次（与 deck_strength 一致）。
+        没出过力的卡各维 0 → 不拉聚合。空牌组 → 全 0。
+        """
+        agg = {"output": 0.0, "defense": 0.0, "draw": 0.0, "energy": 0.0, "power": 0.0}
+        if not deck:
+            return agg
+        for entry in deck:
+            if not isinstance(entry, dict):
+                continue
+            key = card_key_from_deck_entry(entry)
+            d = self.card_dims(key)
+            for k in agg:
+                agg[k] += float(d.get(k, 0.0) or 0.0)
+        return agg
+
     # ---------------------------------------------------------------------
     # debug / 两轴校验
     # ---------------------------------------------------------------------
