@@ -135,11 +135,31 @@ def load_combat_head(model: V8Model, ckpt_path: str) -> Dict[str, Any]:
     state_dict = ckpt.get("model_state_dict")
     if state_dict is None:
         raise RuntimeError(f"checkpoint {ckpt_path} 缺 model_state_dict")
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+    # 容忍 shape 不匹配的参数：ckpt 里 shape 与当前 model 对应 param 不一致的
+    # （如 v5 新增 deck_strength 特征令 state_fuse.0.weight 301→302），剔除后跳过，
+    # 保持该层当前模型的随机初始化（让它 fresh 学），其余预热权重照常加载。
+    model_state = model.state_dict()
+    skipped_shape = []
+    filtered_state_dict = {}
+    for k, v in state_dict.items():
+        if k in model_state and tuple(model_state[k].shape) != tuple(v.shape):
+            skipped_shape.append((k, tuple(v.shape), tuple(model_state[k].shape)))
+            continue
+        filtered_state_dict[k] = v
+
+    missing, unexpected = model.load_state_dict(filtered_state_dict, strict=False)
+    loaded_n = len(filtered_state_dict) - len(unexpected)
     logger.info(
-        "loaded combat head from %s (missing=%d, unexpected=%d)",
-        ckpt_path, len(missing), len(unexpected),
+        "loaded combat head from %s (loaded=%d, skipped_shape=%d, missing=%d, unexpected=%d)",
+        ckpt_path, loaded_n, len(skipped_shape), len(missing), len(unexpected),
     )
+    if skipped_shape:
+        for k, ck_shape, cur_shape in skipped_shape:
+            logger.info(
+                "  跳过 shape 不匹配 param (保持随机初始化): %s ckpt%s vs model%s",
+                k, ck_shape, cur_shape,
+            )
     if missing:
         logger.info("missing keys (前 5): %s", list(missing)[:5])
     if unexpected:
