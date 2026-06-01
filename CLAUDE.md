@@ -13,18 +13,26 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 - `v8/trainer.py` — V8PPOTrainer（PPO + clip + GAE + entropy bonus）。
   通过 env 收集 rollout，按 `eval_frequency` 周期跑确定性 eval。
 - `v8/model.py` — V8Model（set-encoder + pointer-net actor + value head）。
-- `v8/combat_net_wrapper.py` — 把 V8Model 桥接到 StSRLSolver 的 combat_net hook，
-  供战斗内搜索调用；BC combat head 权重从 `sts_models/v8_combat_head_v1.pt` 加载（Phase A 产物）。
+  **redesign 后加 deck_strength 5 维输入特征**（卡组评分喂模型，不再当奖励，commit `6922a9e`）。
+- `v8/combat_net_wrapper.py` — 把 V8Model 桥接到 StSRLSolver 的 combat_net hook。
+  **当前已禁用**：env reset 里 `neural_eval=None`，战斗走 StSRLSolver 手写启发式搜索，
+  combat_net（随机权重桩）不参与。BC combat head（`sts_models/v8_combat_head_v1.pt`，
+  真权重）只作选牌 model 的预热初始化加载，**不冻结、训练里不被调用**（死参数，详见
+  「当前状态」段）。
 - `v8/card_scorer.py` — 按局滚动的 per-card 卡组评分（从战斗 per-card 细账
-  `card_log` 累计）。当前实现输出 / 防御两维，运转 / 加费 / 能力三维占位（权重 0）。
-  reward 用「卡组总分增长」作信号（2026-05-29 redesign 底座，commit `2482eeb`）。
+  `card_log` 累计）。**输出不进奖励**（2026-06-01 删 strength_reward 后）——只打日志
+  + 作选牌 model 的输入特征。五维全部已实现（**非占位非 0**）：输出 / 防御两锚维 +
+  运转 / 加费 / 能力三协同维，权重 `1.0 / 1.0 / 0.30 / 0.30 / 0.15`。
 - `v8/deck_evaluator.py` — 旧战后牌组模拟评分（9 worker ProcessPoolExecutor）。
   **redesign 后 reward 不再调用**（已弃用模拟战评分），保留参考。
-- `v8/reward.py` — step reward shaping。**2026-05-29 redesign 后改为
-  「卡组实力(总分)增长 + 进度 + 过 boss 奖励」**（删模拟战评分 / 删 hp 罚 / 删回合罚，
-  胜负信号 30→10）。战斗 per-card 细账由引擎 `CombatResult.card_log` /
+- `v8/reward.py` — step reward shaping。**2026-06-01 (commit `60ea0b9`) 删 `strength_reward`
+  「卡组实力增长」(8×Δdeck) 后，改为纯「进度 + 过 boss + 通关」主轴**：
+  step = `0.5×node + combat + floor_progress`，各项 floor=+3/层、boss_beat=+25、
+  boss_hp=+15×到达 boss 时血量比、combat win=+1/lose=-5、通关=+100、
+  hp_terminal=+5×final_hp（hp 罚 / 回合罚 / damage_ratio 此前已删；strength_reward 因刷分
+  —— 死亡局净赚 +485 —— 删除）。战斗 per-card 细账由引擎 `CombatResult.card_log` /
   `game.last_combat_card_log` 导出，env 存 `_last_combat_card_log`
-  （引擎 fork commit `75cb883d` + 主仓 `5cc87a9`）。
+  （引擎 fork commit `75cb883d` + 主仓 `5cc87a9`），现仅供 `card_scorer` 打分作特征。
 - `tools/v8_ppo_train.py` — 训练入口。常用参数：`--num_episodes` `--batch_size`
   `--checkpoint_frequency` `--eval_frequency` `--output_dir` `--smoke`。
 - `data/sts_data.py` — STS 数据提取（V6 遗留，可能复用）。
@@ -51,14 +59,21 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   进入战斗 / 等），出门时的 hp / gold / deck_size。
 
 ### 文档
-- `docs/v6_training_log.md` — V6 训练日志
-- `docs/v6_architecture_review.md` — V3→V6 架构演进回顾
-- `docs/archive/` — 旧版本设计文档和分析（V3-V5）
+- `docs/v8_training_log.md` — V8 RL 完整训练历史（trial100 / long / batch_v* / redesign_*）
+- `docs/v8_rl_diagnosis_2026-05-29.md` — V8 RL 全面诊断（推翻"随机数指挥"假设 + 标准 RL 对照）
+- `docs/v8_rl_fix_plan_2026-05-29.md` — 六阶段修复计划 + 防钻空子红线
+- `docs/v8_design_principles.md` — V8 设计原则（用户原话存档）
+- `docs/parallel_env_design.md` — 并行 env 设计
+- `docs/archive/` — 旧版本设计文档（由专门 agent 创建，放入 `v8_implementation_design.md` /
+  `v8_alphazero_lite_design.md` / `v8_sweep_log.md` 等历史设计/分析）
+- 注：`docs/v6_training_log.md` / `docs/v6_architecture_review.md` 已不存在（旧引用为死链，已移除）
 
 ### 归档（不追踪）
 - `archive/v3/` — V3 DQN agent
 - `archive/v4/` — V4 PPO + Transformer
 - `archive/v5/` — V5 TurnSolver + 策略层
+- `docs/archive/` — V8 历史设计文档（`v8_implementation_design.md` /
+  `v8_alphazero_lite_design.md` / `v8_sweep_log.md`，已弃用但留参考）
 - `demos/` — 教学 demo（MNIST、CartPole、简化 STS）
 - `tools/` — 工具脚本（comm_bridge、test_solver 等）
 - `sts_models/` — 模型权重
@@ -138,23 +153,49 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-05-30 (V8 RL 奖励重设计大转向: 系统排查推翻"战斗被随机数指挥"假设, 真根因=奖励 reward hacking; 修复阶段 0-3 落地 (拔随机噪声 / 修回合计数 / 拆 beat_boss→a1/a2/won_game / card_log 导出 / card_scorer 卡组评分 / reward 改卡组实力增长 / 自适应熵地板); 新训练线 redesign_v1 从头启动 (新奖励首条正式线); 旧线 v40 ep5140 自然停存档) -->
-- 2026-05-30: **V8 RL 奖励重设计转向**。系统排查（2026-05-29~30）**推翻**之前"战斗被
-  随机数指挥 = 头号根因"的假设：隔离实验证明战斗搜索健康（小怪 8-12 真实回合），
-  "24-50 回合"是计数标错名（`turns` 实为动作数，已修），随机桩噪声仅边缘影响（已拔）。
-  **真根因 = 奖励**：`-丢血 -0.5×回合` shaping 引发 reward hacking → skip 所有卡 →
-  通关恒 0；且这套奖励是 agent 在 commit `8b9485a` 擅自换掉了用户原设计（战后卡组多维评分）。
-  **修复阶段 0-3 已落地**：拔战斗随机噪声 + 修回合计数 + 拆 `beat_boss`→
-  `a1_boss_killed`/`a2_boss_killed`/`won_game` + NEOW token 注入选项文字（`24df9cc`）；
-  导出战斗 per-card 细账 `card_log`（fork `75cb883d` + 主仓 `5cc87a9`）；新模块
-  `v8/card_scorer.py` 按局滚动卡组评分 + `v8/reward.py` 改「卡组实力增长 + 进度 + 过 boss」
-  （删模拟战 / hp / 回合罚，胜负 30→10，`2482eeb`）；trainer 自适应熵地板 + eval 分层指标
-  （`740358b`）。新训练线 `v8_ppo_redesign_v1`（**从头训，新奖励第一条正式线**，
-  PID 13120，log `/tmp/v8_ppo_redesign_v1.log`，output `sts_models/v8_ppo_redesign_v1`，
-  num_episodes=1024）。旧线 v40 已于 ep5140 自然停（存档保留，不再续）。
-  详见 [docs/v8_rl_diagnosis_2026-05-29.md](docs/v8_rl_diagnosis_2026-05-29.md)（全面诊断 +
-  标准 RL 对照）和 [docs/v8_rl_fix_plan_2026-05-29.md](docs/v8_rl_fix_plan_2026-05-29.md)
-  （六阶段修复计划 + 防钻空子红线）。
+<!-- last-verified: 2026-06-02 (本次变更: 奖励重设计转向坐实——redesign_v5 fresh 1024 局打过一幕 30%/到达 60% 清白对齐, 证伪「评分当奖励」(刷分→死亡局净赚 +485)、确立「赢为主轴 + 评分降级为模型输入特征 + 健康到达 boss」方向; redesign_v6 续训到 2048 局现役 PID 3988) -->
+- 2026-06-02: **奖励重设计转向坐实——「赢为主轴 + 评分当特征」证明有效，redesign_v6 现役**。
+  - **证伪「评分当奖励」**：之前把「per-card 卡组评分增长」(`strength_reward`) 当奖励，
+    归因证明严重跑偏——每打一场仗按伤害发奖占总奖励 73%、连死亡局都净赚 +485，
+    模型被训成「多打架」而非「赢」。v1-v4 四条线（锚维 / 锚维续 / 协同 / 对齐）都卡在
+    打过一幕 boss ~7-13%，低于旧线 32%。
+  - **最终方向（用户拍板）**：奖励改成「真实进度 / 通关为主轴」（每层 +3 / 过 boss +25 /
+    通关 +100 / 小胜负 / 存活），删 `strength_reward`（commit `60ea0b9`）；**卡组评分降级为
+    模型输入特征**（deck_strength 5 维喂模型，commit `6922a9e`）；加「健康到达 boss」高效奖励
+    （`W_BOSS_HP × 到 boss 血量比`，设计成奖好牌组、不逼模型 skip-all）。
+  - **v5 验证成功**：这套（对齐奖励 + 评分特征 + 健康到达）**fresh 1024 局训到打过一幕 boss 30% /
+    到达 60%**——清白对齐（无 exploit）、只 1024 局（旧线要 4900 才到 32%）、探索度还活着
+    （熵 0.21）、牌组健康（~15）。**整个转向坐实。**
+  - **前沿**：模型能稳定打一幕，二三幕几乎进不去（二幕碰过 3%、通关 0）。
+  - **现役 `v8_ppo_redesign_v6`**（从 v5 final 续训到 2048 局，PID 3988，
+    log `/tmp/v8_ppo_redesign_v6.log`），看拉长训练能否推过 30% / 往二幕渗透。
+  - **关键诊断更正**：战斗随机桩是幽灵（隔离实验证战斗健康）、「24-50 回合」是计数 bug、
+    真根因是奖励 reward hacking。详见
+    [docs/v8_rl_diagnosis_2026-05-29.md](docs/v8_rl_diagnosis_2026-05-29.md)。
+- 2026-06-01: **V8 RL 奖励再瘦身 + redesign_v5 现役**（已被 v5 完成 / v6 续训取代，留档）。redesign 时代分三段奖励演进：
+  **v1-v3（2026-05-30~31）**用 5-29 redesign 设计的「卡组实力增长」(`strength_reward`)
+  奖励训练（reward_mean ~200-360）；**v4（2026-06-01，commit `60ea0b9`）是删
+  `strength_reward` 后第一批纯进度主轴**（reward_mean ~33-47，熵地板生效守住 0.186）；
+  **v5（2026-06-01，commit `6922a9e`）再把 deck_strength 当模型输入特征 + 加「健康到达
+  boss」防跳过奖励**。`strength_reward`（8×Δdeck 卡组实力增长）被证明是刷分元凶
+  （死亡局也能净赚 +485），commit `60ea0b9` 彻底删除。
+  现役 `reward.py`：step = 0.5×node + combat + floor_progress，
+  各项 floor=+3/层、boss_beat=+25、boss_hp=+15×到达 boss 时血量比、combat win=+1/lose=-5、
+  通关=+100、hp_terminal=+5×final_hp（hp 罚 / 回合罚 / damage_ratio 此前已删）。
+  **战斗驱动 = StSRLSolver 手写启发式搜索**（小怪 50ms / elite 250ms / boss 500ms+10s cap），
+  **不进 RL trajectory**；combat_net wrapper（随机权重桩）在 env reset 里已禁用
+  （`neural_eval=None`）。BC combat head（`sts_models/v8_combat_head_v1.pt`，真权重）
+  只作**选牌 model 的预热初始化加载**（loaded=45/skipped_shape=1/missing=5），
+  **不冻结、训练里不被调用**（战斗走搜索）——是「加载了但既不冻结也不用」的死参数。
+  redesign eval 概览：v1 a1 末 6.7% / 熵塌 0.060，v2 a1 末 13.3%（**ep768 act2 擦边
+  3.3%，整个 redesign 时代唯一一次 act2 破零**）/ 熵 0.027，v3 崩 a1 末 0.00 / 熵彻底崩
+  0.0096，v4 a1 末 10%（峰值 16.7%@ep640）/ 熵守住 0.186，**全程 won_game=0**。
+  现役 `v8_ppo_redesign_v5`（**fresh start**，PID 85107，
+  num_episodes=1024 batch_size=32 eval_freq=128 ckpt_freq=32 device=mps，当前约 ep64-81，
+  零异常，log `/tmp/v8_ppo_redesign_v5.log`，output `sts_models/v8_ppo_redesign_v5`）。
+  旧线 v40 已到 ep5120 结束存档（不再续）。
+  详见 [docs/v8_rl_diagnosis_2026-05-29.md](docs/v8_rl_diagnosis_2026-05-29.md) 和
+  [docs/v8_rl_fix_plan_2026-05-29.md](docs/v8_rl_fix_plan_2026-05-29.md)。
 - 2026-05-12: **V8 RL 已搭起，长跑暂停调查事件死循环 bug**。战斗内沿用 search +
   BC combat head (`sts_models/v8_combat_head_v1.pt`，Phase A 产物)，战斗外用纯 model
   RL（PPO）with dense reward shaping。`sts_models/v8_ppo_long_v1` 于 2026-05-12 10:08
@@ -168,7 +209,7 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   （注意：V8 RL 新模块在 `v8/` 包内，与已 archive 的旧 `v8_*.py` 文件不冲突。）
 - 路线演进：V3-V5 (DQN/早期 PPO) → V6 (PPO+Transformer) → V7 (搜索+启发式，未完成)
   → V8 BC (监督学习, 已 archive) → **V8 RL (当前阶段)**。
-- V6/V7 已归档，详见 docs/v6_architecture_review.md
+- V6/V7 已归档（`docs/v6_architecture_review.md` 已不存在，历史回顾参见 git log / `archive/`）
 - **维护规则**：每次切换大版本（如 V8→V9）或大阶段（如 V8 BC→V8 RL）必须同步更新
   「当前状态」和「活跃代码」段，刷新 last-verified 日期，与代码改动一起 commit。
 
@@ -185,18 +226,43 @@ CLAUDE.md 只保留最近活跃训练 + 还在用的知识。
 | **v37** | **2944** | **16.7%** | **0.00** | **12.53** | **30/30** | **⚠ 旧 reward (simulation-based deck_evaluator) 训练的最后一批; act2_boss_beat=3.33% (历史第二次破零, 上次为 batch_v32); reached_boss=66.7% (持续高位); floor_mean=12.53 (相对高); boss reach 均衡 Slime=5 / Hexa=4 / Guardian=6; boss_kill 仍全 0** |
 | **v38** | **3872** | **~22% (均值)** | **0.00** | **~10.8 (均值)** | **N/A** | **⚠ 新 reward (real-combat) 第一批; 跑 928/1024 ep 后 ep=3882 hang 在 Guardian boss combat 36+ min 立刻杀; 7 中间评估 (ep 3072→3840): a1 = 13/13/40/27/27/17/20%, 峰值 40% (ep=3328); 比旧 reward 后期均值 (~17.6%) 略高; 无 final eval; ckpt 至 ep=3872** |
 | **v39** | **4896** | **32.1% (均值)** | **0.00** | **~10.4 (均值)** | **N/A (8 中间评估)** | **✅ 新 reward 第二批 1024 ep 完整跑完; 8 中间评估 (ep 3968→4864) a1 = 27/33/30/37/40/40/30/20%, 均值 32.1% 创新奖励时代单批最高; 峰值 40% 在 ep=4480/4608 连续两次 (旧奖励 peak 30%); reach 均值 69.4%; act2_boss_beat / won_game 全程 0; 0 Traceback / 0 hang (v38 Guardian 现象未复现)** |
-| **v40** | **5920 (target)** | **训练中** | **训练中** | **训练中** | **训练中** | **⏳ 从 v39 final 续训 (新奖励第三批), num_episodes=5920 batch_size=32 ckpt_freq=32 eval_freq=128 增量 1024 ep, PID 12627, log /tmp/v8_ppo_batch_v40.log; 观察 a1_beat 32% 均值能否守住 / peak 40% 是否持续 / act2_boss / won_game 破零; v38 Guardian hang 仍属潜在风险** |
+| **v40** | **5120 (结束)** | **—** | **0.00** | **—** | **存档** | **real-combat reward 时代最后一批; 到 ep5120 结束存档, 不再续。redesign 转向后 batch_v* 序列终止 (reward / 指标定义已变, 与下方 redesign 不可直接对比)** |
 
-完整 v15-v40 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+> 以下 redesign 行为奖励重设计时代概览（reward 信号已变，与上面 batch_v* 不可直接比）。
+> **完整 redesign 细节见 [docs/v8_training_log.md](docs/v8_training_log.md)**（由专门 agent 维护）。
 
-**[重大转向] 奖励重设计 → batch_v* 序列终止, redesign_v1 起 (2026-05-30)**：
+| Redesign | ep | a1_boss_beat (末) | won_game | 熵 (末) | 备注 |
+|---|---|---|---|---|---|
+| **redesign_v1** | 512 | **6.7%** | **0.00** | **0.060 (塌)** | strength_reward 时代首条正式线 (fresh start); v2 从 ep384 续, 丢弃 v1 ep385-526 |
+| **redesign_v2** | 768 | **13.3%** | **0.00** | **0.027** | strength_reward 续训; **ep768 act2 擦边 3.3% = 整个 redesign 时代唯一一次 act2 破零** |
+| **redesign_v3** | 640 | **0.00** | **0.00** | **0.0096 (彻底崩)** | strength_reward 续训; 崩了, 熵塌缩最严重 |
+| **redesign_v4** | 640+ | **10% (峰 16.7%@ep640)** | **0.00** | **0.186 (守住)** | **删 strength_reward 第一批纯进度主轴 (commit `60ea0b9`); reward_mean ~33-47, 熵地板生效** |
+| **redesign_v5** | **1024 (完成)** | **30% (到达 60%)** | **0.00** | **0.21 (活)** | **✅ 转向坐实: 对齐奖励 + deck_strength 当模型输入特征 + 健康到达 boss (commit `6922a9e`), fresh 1024 局即到一幕 30% (旧线要 4900 才到 32%); 清白对齐无 exploit, 探索度活 (熵 0.21), 牌组健康 ~15; 二幕碰过 3%、通关 0** |
+| **redesign_v6** | **2048 (训练中)** | **训练中** | **训练中** | **训练中** | **⏳ 现役: 从 v5 final 续训到 2048 局, 看拉长训练能否推过 30% / 往二幕渗透; PID 3988, log /tmp/v8_ppo_redesign_v6.log** |
+
+完整 v15-v40 + redesign_v1~v6 细节 + audit findings 详见 [docs/v8_training_log.md](docs/v8_training_log.md)。
+
+**[重大转向] 奖励重设计 → batch_v* 序列终止, redesign 系列 (2026-05-30 ~ 06-01)**：
 上表 v37-v40 是 **real-combat reward (hp/回合 shaping) 时代的历史记录**，保留备查。
 2026-05-29~30 系统排查定位真根因 = 这套 reward 引发 reward hacking（skip 卡, 通关恒 0），
-且偏离用户原设计。v40 已于 ep5140 自然停（存档保留，不再续）。新训练线
-`v8_ppo_redesign_v1` **从头训**（新奖励第一条正式线：卡组实力增长 + 进度 + 过 boss，
-只用输出 / 防御底座，花哨三维 0 权重），与 batch_v* 不可直接对比（reward / 指标定义已变）。
-诊断与修复细节见 [docs/v8_rl_diagnosis_2026-05-29.md](docs/v8_rl_diagnosis_2026-05-29.md)
-和 [docs/v8_rl_fix_plan_2026-05-29.md](docs/v8_rl_fix_plan_2026-05-29.md)。
+且偏离用户原设计。v40 已到 ep5120 结束存档（不再续）。redesign 系列三段奖励演进：
+- **v1-v3 (2026-05-30~31)**：5-29 redesign 设计的「卡组实力增长 (strength_reward) + 进度 +
+  过 boss」奖励。三批 a1 末值 6.7%/13.3%/0.00%，熵反复塌缩（0.060/0.027/0.0096），
+  **v2 ep768 act2 擦边 3.3% = 整个 redesign 时代唯一一次 act2 破零**，**全程 won_game=0**。
+- **v4 (2026-06-01)**：发现 `strength_reward` 是刷分元凶（死亡局净赚 +485），
+  commit `60ea0b9` **彻底删除**，改纯「进度 + 过 boss + 通关」主轴（见上方「活跃代码」
+  `reward.py` 公式）——**删 strength_reward 后第一批纯进度**。a1 末 10%（峰值 16.7%@ep640），
+  熵地板生效守住 0.186。`v8_ppo_redesign_v4` 从头训。
+- **v5 (2026-06-02，✅ 转向坐实)**：commit `6922a9e` 把 deck_strength 当**模型输入特征** +
+  加「健康到达 boss」防跳过奖励。`v8_ppo_redesign_v5` **fresh 1024 局即到一幕 30% / 到达 60%**——
+  清白对齐无 exploit、只 1024 局（旧线要 4900 才到 32%）、探索度活（熵 0.21）、牌组健康（~15）。
+  **整个奖励重设计转向坐实**：评分当奖励证伪 → 赢为主轴 + 评分降级为模型输入特征 + 健康到达 boss。
+- **v6 (2026-06-02，现役)**：从 v5 final **续训到 2048 局**，看拉长训练能否推过 30% /
+  往二幕渗透。PID 3988，log `/tmp/v8_ppo_redesign_v6.log`。前沿：稳定打一幕，二三幕几乎进不去
+  （二幕碰过 3%、通关 0）。
+redesign 系列与 batch_v* 不可直接对比（reward / 指标定义已变）。诊断与修复细节见
+[docs/v8_rl_diagnosis_2026-05-29.md](docs/v8_rl_diagnosis_2026-05-29.md) 和
+[docs/v8_rl_fix_plan_2026-05-29.md](docs/v8_rl_fix_plan_2026-05-29.md)。
 
 **[重大变更] reward 信号源切换 (commit `8b9485a`, 2026-05-27)**:
 batch_v37 是 simulation-based reward (deck_evaluator) 训练的最后一批; batch_v38
@@ -239,13 +305,14 @@ v37 作为 sim-reward 最后一批的 baseline。
     3. v38 Guardian 深搜索 hang 是否再现, v39 整批未现但仍属潜在风险
   - **预期总时长**: ~3h 训练 + final eval
 
-接手 monitor 的检查清单（v40）：
-- ckpt 落盘进度：`ls sts_models/v8_ppo_batch_v40/`
-- 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`
-- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_batch_v40.log`
-- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_batch_v40.log | tail -1`
-- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_batch_v40.log`（应见 start_episode=4896）
-- 验证新 reward 生效：heartbeat 应见 `eval_deck_calls=0`
+接手 monitor 的检查清单（redesign_v6）：
+- ckpt 落盘进度：`ls sts_models/v8_ppo_redesign_v6/`
+- 训练是否还活：`ps -ef | grep v8_ppo_train.py | grep -v grep`（PID 3988）
+- 异常监测：`grep -cE "\[guard_cap\]|MysteriousSphere event_phase=COMBAT_WON|Error|Traceback" /tmp/v8_ppo_redesign_v6.log`
+- 当前 ep：`grep "\[heartbeat\]" /tmp/v8_ppo_redesign_v6.log | tail -1`
+- 验证 resume 生效：`grep "\[resume\]" /tmp/v8_ppo_redesign_v6.log`（v6 从 v5 final 续训到 2048 局，应见 start_episode≈1024）
+- 观察重点：a1_beat 能否守住 / 推过 30%、二幕渗透 (二幕碰过 3%、通关 0)、熵地板
+- 验证新 reward 生效：heartbeat 应见 `eval_deck_calls=0`（模拟战评分已弃用）
 - hang 监测 (v38 教训): 心跳间隔超 5min → 怀疑 boss combat 深搜索循环, 30min+ 无心跳立刻杀
 
 ### 已修复 bug
