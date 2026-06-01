@@ -2,25 +2,41 @@
 
 设计来源：docs/v8_rl_fix_plan_2026-05-29.md「核心设计 / 阶段 2」。
 
-阶段 2 底座（2026-05-29 起，本批改动）—— 删 hp/回合战斗罚，换「牌组实力增长 + 真实进度」：
-- **删掉**单场战斗的 hp/回合惩罚（`-W_HP_LOSS_PER_BATTLE*hp_lost - W_TURNS*turns`）。
-  这两项是 reward hacking 的源头（诊断：模型 skip 所有卡保命 → 牌组永远 11 张烂牌 → 通关恒 0）。
-- **删掉**每元决策 step 的「每点丢血惩罚」（`-W_HP_LOSS*Δhp_loss*100`）。HP 退为路线状态参考，
-  不再作独立惩罚（其奖励影响只通过「死亡 → 进度低」体现，不变相惩罚拿卡）。
-- 战斗本身保留一个**小**的胜负 + 输出效率信号（赢/打出伤害是真本事，不惩罚拿卡）。
-- **新增**「牌组实力增长」奖励：每场战斗结束、card_scorer 重算牌组总分后，
-  奖励 += Δdeck_strength × W_STRENGTH_GROWTH（牌里的卡这场证明了价值 → 实力涨 → 给正奖励，
-  经 GAE 回溯到选卡 / 路线决策）。由 env 在 _log_combat_exit 算好、塞进 combat_reward。
-- **进度奖励**：到新楼层 + / 过 act boss ++ / 通关 +++。真实、不可伪造、对齐北极星。
+奖励重对齐（2026-06-01 起，本批改动）—— **删 strength_reward（刷分元凶），
+改「真实进度 / 过 boss / 通关」为绝对主轴**：
+
+归因结论：旧奖励里 strength_reward（8×Δdeck_strength）占总奖励 ~73%，每打一仗
+按伤害发大奖，与「赢」无关 → 死亡局也净赚 +485。把稀疏的真实进度信号淹没 100 倍。
+
+本批改动：
+- **彻底删掉 strength_reward**：`compute_strength_growth_reward` 不再进 step reward。
+  （card_scorer.update_from_combat / deck_strength() 在 env 里**保留继续调用**——
+  deck_strength 数值还要算、还要打日志，只是不进奖励；留着给下一步当模型特征。）
+- **删掉 combat_reward 里的 `W_DAMAGE_RATIO × damage_ratio`** 项（刷战斗味、奖打架）。
+- **战斗胜负调成小信号**：赢 +W_COMBAT_WIN(=2) / 输 -W_COMBAT_LOSE(=5)。保留这个小
+  信号让模型在意单场胜负，但绝不大到变成「奖打架」。
+- **进度（主轴，稠密）**：每到达一个新楼层 +W_FLOOR_PROGRESS(=3)，由 env 在检测到
+  floor 变大时给。这是主信号。
+- **过 act boss**：+BOSS_BEAT_BONUS(=25)。
+- **通关**：+GAME_WON_BONUS(=100)。
+- **避免和 final 重复计**：final_reward 里去掉 `FLOOR_REACHED_BONUS×final_floor`
+  （改由 per-floor step reward 承担），final 只留通关 bonus。
+- **存活 terminal 信号（小）**：episode 结束 +W_HP_TERMINAL(=5)×final_hp_ratio，
+  让「活着到第 N 层」> 「死在第 N 层」。
+
+权衡：走到第 10 层就死 ≈ 30 量级（主要来自 floor）；通关 ≈ 300+ 量级。
+进度 / 过 boss / 通关在总奖励里占绝对主导，任何残留战斗 / node 小信号都不接近其量级。
 
 历史（已删除的旧设计，留档防回退）：
-- batch_v38 起曾用 real-combat hp/回合 reward（commit 8b9485a）—— 本批删掉。
+- ≤2026-05-31 曾有 strength_reward（8×Δdeck_strength）+ combat 输出效率 reward
+  —— 本批删掉（刷分、死亡局净赚 +485）。
+- batch_v38 起曾用 real-combat hp/回合 reward（commit 8b9485a）—— 已删。
 - 更早（≤v37）用 deck_evaluator 模拟战评分 —— 早已停用，文件保留供 web / 历史日志引用。
 
 不在本文件内：
-- per-card 评分 + 牌组总分聚合：v8/card_scorer.py
-- env step 内部 reward 串起来 + 牌组实力增量计算：v8/env.py（_log_combat_exit 算
-  combat_reward + Δdeck_strength，塞进下一次 step() 输出）
+- per-card 评分 + 牌组总分聚合：v8/card_scorer.py（保留计算，不进奖励）
+- env step 内部 reward 串起来 + 进度奖励触发：v8/env.py（_maybe_log_floor 给
+  per-floor 进度奖励、_log_combat_exit 给 combat + 过 boss 奖励、reset 给存活 terminal）
 """
 
 from __future__ import annotations
@@ -38,98 +54,83 @@ if TYPE_CHECKING:
 # 节点本身收益权重（事件 / 商店 / 休息特殊收益）
 W_NODE_REWARD: float = 0.5
 
-# 通关大 bonus（model 知道赢是终极目标）—— 进度奖励顶层
+# 通关大 bonus（model 知道赢是终极目标）—— 进度奖励顶层（+++）
 GAME_WON_BONUS: float = 100.0
 
-# 每过一层小 bonus（稠密兜底，避免 0 winning data 时 model 完全没信号）
-FLOOR_REACHED_BONUS: float = 1.0
+# 进度奖励主轴（稠密）：每到达一个新楼层 +W_FLOOR_PROGRESS。
+# 由 env 在 _maybe_log_floor 检测到 floor 变大时给，是整个奖励的主信号。
+# 一个走到第 10 层的局光这项就攒 ~30，远大于残留的战斗 / node 小信号。
+W_FLOOR_PROGRESS: float = 3.0
 
-# 过每个 act boss 的中层进度奖励（介于过层 +1 与通关 +100 之间）。
-# 对齐计划「到新楼层 + / 过每个 act boss ++ / 通关 +++」。
-# 初始值待训练时调（见两轴校验：要比单场战斗胜负信号显著大，才能把「过 boss」
-# 这个稀疏 ground-truth 拉出来）。
+# 过每个 act boss 的中层进度奖励（++，介于过层 +3 与通关 +100 之间）。
+# 对齐「到新楼层 + / 过每个 act boss ++ / 通关 +++」。
 BOSS_BEAT_BONUS: float = 25.0
 
+# 存活 terminal 信号（小）：episode 结束 + W_HP_TERMINAL × final_hp_ratio。
+# 让「活着到第 N 层」> 「死在第 N 层」，但权重小到不和进度量级竞争。
+W_HP_TERMINAL: float = 5.0
+
 
 # ============================================================
-# 单场真实战斗的 reward 权重（已删 hp/回合罚）
+# 单场真实战斗的 reward 权重（小信号，不压进度主轴）
 # ============================================================
 
-# 胜负信号（保留但调小：赢一场 +W_WIN，输 -W_LOSE）。
-# 调小理由（计划「避免重新引入会惩罚拿卡的项」）：胜负本身不该压过牌组实力增长 /
-# 进度；保留小幅胜负 + 输出效率作为「这场打得怎么样」的即时信号即可。
-# 初始值待训练时调。
-W_COMBAT_WIN: float = 10.0
-W_COMBAT_LOSE: float = 10.0   # 输的惩罚（绝对值，符号在公式里取负）
-
-# 输出效率奖励（damage_dealt / enemy_total_max_hp ∈ [0, 上限] × W）。
-# 这是「打出伤害」的奖励，不惩罚拿卡 → 保留。
-W_DAMAGE_RATIO: float = 5.0
-
-# 牌组实力增长奖励系数（Δdeck_strength × W）。
-# card_scorer 的 deck_strength 已对伤害 / 格挡做过 /50 归一，单场一张主力攻击卡
-# Δ 约 ~1（量纲）；× 8 让「牌里的卡这场证明了价值」的增量奖励落在和单场胜负
-# (±10) 同量级、又不压过「过 boss +25 / 通关 +100」的进度奖励。
-# 初始值待训练时调（两轴校验：要能把「选到日后强的卡」推出来，又不空刷）。
-W_STRENGTH_GROWTH: float = 8.0
+# 胜负小信号（赢 +W_COMBAT_WIN，输 -W_COMBAT_LOSE）。
+# 量级要求（关键）：调到很小，让模型在意单场胜负但绝不变成「奖打架」。
+# 输的惩罚 (5) > 赢的奖励 (1)：输≈死≈断进度本身就该罚得重一点。
+# W_COMBAT_WIN 压到 1.0：一个走到 floor10 的局约打 7-10 仗，combat 累计 ~7-10，
+# 远小于同局 floor 进度 (10×3=30)；即便极端多仗也压不过进度主轴 —— 满足
+# 「任何残留战斗信号不接近进度量级」的对齐要求。
+W_COMBAT_WIN: float = 1.0
+W_COMBAT_LOSE: float = 5.0   # 输的惩罚（绝对值，符号在公式里取负）
 
 
-def compute_combat_reward(
-    *,
-    won: bool,
-    damage_dealt: int,
-    enemy_total_max_hp: int,
-) -> float:
-    """单场真实战斗结束时的即时奖励分（已删 hp/回合罚）。
+def compute_combat_reward(*, won: bool) -> float:
+    """单场真实战斗结束时的即时小信号（只剩胜负，刷分项已删）。
 
     每场战斗只算一次、不累加进 episode buffer，env 算完直接塞进当步 step_reward。
-    牌组实力增长奖励 + 进度奖励**不在这里**，由 env 单独算（见 _log_combat_exit）。
+    进度奖励（过层 / 过 boss / 通关）**不在这里**，由 env / final 单独算。
 
-    公式（阶段 2 底座，2026-05-29 起）：
-        combat_reward = (won? +W_WIN : -W_LOSE)
-                       + W_DAMAGE_RATIO * (damage_dealt / enemy_total_max_hp)
+    公式（奖励重对齐，2026-06-01 起）：
+        combat_reward = (won? +W_COMBAT_WIN : -W_COMBAT_LOSE)
 
-    **删除项**（reward hacking 源头 + 变相惩罚拿卡）：
-        - W_HP_LOSS_PER_BATTLE * hp_lost   （丢血罚）
-        - W_TURNS * turns                  （回合罚）
+    **删除项**（reward hacking 源头）：
+        - W_DAMAGE_RATIO * damage_ratio     （刷战斗味、奖打架——本批删）
+        - W_HP_LOSS_PER_BATTLE * hp_lost    （丢血罚，更早已删）
+        - W_TURNS * turns                   （回合罚，更早已删）
 
     参数：
-        won:                这场战斗有没赢（player 没死且 enemies 全死）
-        damage_dealt:       对敌人造成的总伤害（绝对值 ≥ 0）
-        enemy_total_max_hp: 进入战斗时所有敌人 max_hp 之和（用于算输出效率比）
+        won: 这场战斗有没赢（player 没死且 enemies 全死）
 
     返回：
         float（不是 NaN / inf）
     """
-    win_term = W_COMBAT_WIN if won else -W_COMBAT_LOSE
-
-    damage_dealt = max(int(damage_dealt or 0), 0)
-    enemy_max = max(int(enemy_total_max_hp or 0), 1)  # 防除零
-
-    damage_ratio = float(damage_dealt) / float(enemy_max)
-    # 限制 ratio 上限（防 overkill 异常拉高，比如某些 reset relic 触发的大伤害）
-    if damage_ratio > 2.0:
-        damage_ratio = 2.0
-
-    return win_term + W_DAMAGE_RATIO * damage_ratio
+    return W_COMBAT_WIN if won else -W_COMBAT_LOSE
 
 
-def compute_strength_growth_reward(delta_strength: float) -> float:
-    """牌组实力增长奖励 = Δdeck_strength × W_STRENGTH_GROWTH。
+def compute_floor_progress_reward(num_new_floors: int = 1) -> float:
+    """到达新楼层的进度奖励（主轴）= num_new_floors × W_FLOOR_PROGRESS。
 
-    delta_strength: 本场战斗后牌组总分 − 上次记录的牌组总分（card_scorer.deck_strength 之差）。
-        > 0：牌里的卡这场证明了价值（打了伤害 / 加了格挡）→ 正奖励。
-        = 0：没新出力（如没打仗、或这局这套牌已稳定）→ 0，不空刷。
-        < 0 几乎不会发生（累计分单调不减；牌组缩水如删卡才可能负，也合理：删掉的卡分没了）。
-
-    经 GAE 回溯归给选卡 / 路线决策。
+    env 在 _maybe_log_floor 检测到 floor 变大时给。通常一次 +1 层；
+    极端情况（一次跳多层）按层数线性给，确保「越深奖励越高」单调。
     """
-    return W_STRENGTH_GROWTH * float(delta_strength)
+    return W_FLOOR_PROGRESS * float(max(int(num_new_floors or 0), 0))
 
 
 def compute_boss_beat_reward() -> float:
     """过一个 act boss 的进度奖励（env 在 boss 战斗胜利时给一次）。"""
     return BOSS_BEAT_BONUS
+
+
+def compute_hp_terminal_reward(final_hp_ratio: float) -> float:
+    """episode 结束时的存活 terminal 信号 = W_HP_TERMINAL × final_hp_ratio。
+
+    final_hp_ratio ∈ [0, 1]（current_hp / max_hp）。死亡局 = 0，满血通关 = 1×W。
+    小权重，只为「活着到第 N 层 > 死在第 N 层」破平局，不和进度量级竞争。
+    """
+    r = float(final_hp_ratio or 0.0)
+    r = max(0.0, min(1.0, r))  # clamp 到 [0,1]
+    return W_HP_TERMINAL * r
 
 
 # ============================================================
@@ -158,60 +159,74 @@ def compute_step_reward(
     next_state: "V8State",
     node_reward: float = 0.0,
     combat_reward: float = 0.0,
+    floor_reward: float = 0.0,
 ) -> float:
     """每个元决策 step 的 reward。
 
-    公式（阶段 2 底座，2026-05-29 起——**删了每点丢血惩罚**）：
+    公式（奖励重对齐，2026-06-01 起）：
         r = W_NODE_REWARD * node_reward
             + combat_reward
+            + floor_reward
 
-    其中 combat_reward 由 env 在战斗结束时一次性塞进来，已含：
-        - 单场胜负 + 输出效率（compute_combat_reward）
-        - 牌组实力增长（compute_strength_growth_reward）
-        - 过 act boss 进度（compute_boss_beat_reward）
+    其中：
+        combat_reward: env 在战斗结束时一次性塞进来的**单场胜负小信号 + 过 act boss
+            进度**（compute_combat_reward + compute_boss_beat_reward）。
+        floor_reward: env 在本 step 期间检测到 floor 变大时累计的**进度主轴奖励**
+            （compute_floor_progress_reward）。
 
-    **删除项**（HP 退为路线状态参考，不作独立惩罚）：
-        - W_HP_LOSS * Δhp_loss_ratio * 100   （每点丢血罚 → reward hacking 源头之一）
+    **删除项**（reward hacking 源头）：
+        - 牌组实力增长（strength_reward = 8×Δdeck_strength）—— 刷分元凶，本批删
+        - 单场输出效率（W_DAMAGE_RATIO×damage_ratio）—— 奖打架，本批删
+        - 每点丢血罚 / hp/回合罚 —— 更早已删
 
     参数：
         prev_state / next_state: 前一个 / 当前元决策点 V8State（保留签名兼容 caller；
-            本批起 hp 不再进 reward，仅留作未来路线状态扩展位）。
+            hp 不进 step reward，存活信号改 terminal 给，见 compute_hp_terminal_reward）。
         node_reward: env 内 detect 出的节点本身特殊收益（默认 0）
-        combat_reward: 本 step 期间发生过的真实战斗结果分 + 牌组实力增长 + 过 boss 进度
-            （env 在 _log_combat_exit 算好缓存，下一次 step 时取出来一次性塞进去）。
-            0 表示本 step 没战斗。
+        combat_reward: 本 step 期间的真实战斗胜负小信号 + 过 boss 进度（默认 0）
+        floor_reward: 本 step 期间到达的新楼层进度奖励（默认 0，进度主轴）
 
     返回：
         float reward（不是 NaN / inf）
     """
-    return W_NODE_REWARD * float(node_reward) + float(combat_reward)
+    return (
+        W_NODE_REWARD * float(node_reward)
+        + float(combat_reward)
+        + float(floor_reward)
+    )
 
 
-def compute_final_reward(game_won: bool, final_floor: int) -> float:
+def compute_final_reward(game_won: bool, final_hp_ratio: float = 0.0) -> float:
     """Episode 结束时 final reward。
 
-    进度奖励顶层：通关大 bonus + final_floor 兜底（避免 0 winning data 时 model 完全没信号）。
+    进度奖励顶层（+++）：通关大 bonus + 存活 terminal 小信号。
+    **不再含 FLOOR_REACHED_BONUS×final_floor**——逐层进度已由 per-floor step reward
+    （compute_floor_progress_reward）承担，避免和 final 重复计。
     过 act boss 的 ++ 在战斗结束时单独给（compute_boss_beat_reward），不在这里。
+
+    参数：
+        game_won: 是否通关。
+        final_hp_ratio: episode 结束时 current_hp / max_hp ∈ [0,1]，给小的存活信号。
     """
     won_bonus = GAME_WON_BONUS if game_won else 0.0
-    return won_bonus + FLOOR_REACHED_BONUS * float(int(final_floor or 0))
+    return won_bonus + compute_hp_terminal_reward(final_hp_ratio)
 
 
 __all__ = [
     "compute_step_reward",
     "compute_final_reward",
     "compute_combat_reward",
-    "compute_strength_growth_reward",
+    "compute_floor_progress_reward",
     "compute_boss_beat_reward",
+    "compute_hp_terminal_reward",
     # weights (导出方便 trainer / unit test 引用)
     "W_NODE_REWARD",
     "GAME_WON_BONUS",
-    "FLOOR_REACHED_BONUS",
+    "W_FLOOR_PROGRESS",
     "BOSS_BEAT_BONUS",
+    "W_HP_TERMINAL",
     "W_COMBAT_WIN",
     "W_COMBAT_LOSE",
-    "W_DAMAGE_RATIO",
-    "W_STRENGTH_GROWTH",
     "NODE_REWARD_EVENT_SUCCESS",
     "NODE_REWARD_SHOP_RELIC",
     "NODE_REWARD_REST_USE",

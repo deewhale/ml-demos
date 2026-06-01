@@ -61,7 +61,7 @@ from v8.reward import (
     compute_step_reward,
     compute_final_reward,
     compute_combat_reward,
-    compute_strength_growth_reward,
+    compute_floor_progress_reward,
     compute_boss_beat_reward,
     NODE_REWARD_EVENT_SUCCESS,
     NODE_REWARD_SHOP_RELIC,
@@ -398,6 +398,10 @@ class V8Env:
         # 一次性塞进去。单 step 内多场战斗（罕见 e.g. event→combat→event→combat）会累加。
         self._pending_combat_reward: float = 0.0
 
+        # 进度（主轴）reward 缓存：_maybe_log_floor 检测到 floor 变大时累计，
+        # step() 下次 reward 计算时取出一次性塞进去（单 step 内可能跨多层）。
+        self._pending_floor_reward: float = 0.0
+
         # 节点 reward detect 需要的快照（step 开始时记录）
         self._step_start_phase: Optional[Any] = None
         self._step_start_relics_count: int = 0
@@ -549,6 +553,8 @@ class V8Env:
         self._event_choice_count.clear()
         # 真实战斗 reward 缓存清零
         self._pending_combat_reward = 0.0
+        # 进度（主轴）reward 缓存清零
+        self._pending_floor_reward = 0.0
         # 阶段 2：per-card 评分器每局清零（不跨局攒分）+ 牌组总分基线归 0。
         self._card_scorer.reset()
         self._last_deck_strength = 0.0
@@ -625,7 +631,7 @@ class V8Env:
             done = True
             reward = compute_final_reward(
                 game_won=bool(self._runner.game_won),
-                final_floor=int(self._runner.run_state.floor),
+                final_hp_ratio=self._final_hp_ratio(),
             )
             info["phase_after"] = self._current_state.phase
             info["error"] = "no_available_actions"
@@ -709,26 +715,33 @@ class V8Env:
         )
         info["node_reward"] = node_reward
 
-        # 拿出本 step 期间累计的真实战斗 reward（_log_combat_exit 算好缓存的）
+        # 拿出本 step 期间累计的真实战斗 reward（_log_combat_exit 算好缓存的：
+        # 单场胜负小信号 + 过 act boss 进度）
         combat_reward = float(self._pending_combat_reward)
         self._pending_combat_reward = 0.0
         info["combat_reward"] = combat_reward
 
-        # 计算 step reward（真实战斗结果分 + hp_loss 罚 + 节点收益）
+        # 拿出本 step 期间累计的进度（主轴）奖励（_maybe_log_floor 算好缓存的）
+        floor_reward = float(self._pending_floor_reward)
+        self._pending_floor_reward = 0.0
+        info["floor_reward"] = floor_reward
+
+        # 计算 step reward（进度主轴 + 战斗小信号 + 节点收益）
         step_reward = compute_step_reward(
             prev_state=self._prev_state if self._prev_state is not None else next_state,
             next_state=next_state,
             node_reward=node_reward,
             combat_reward=combat_reward,
+            floor_reward=floor_reward,
         )
 
         # done 判定
         done = bool(self._runner.game_over)
         if done:
-            # 加上 final reward
+            # 加上 final reward（通关 bonus + 存活 terminal；逐层进度已在上面 per-floor 给）
             step_reward += compute_final_reward(
                 game_won=bool(self._runner.game_won),
-                final_floor=int(self._runner.run_state.floor),
+                final_hp_ratio=self._final_hp_ratio(),
             )
 
         # 步数 cap
@@ -768,6 +781,7 @@ class V8Env:
         self._current_state = None
         self._prev_state = None
         self._pending_combat_reward = 0.0
+        self._pending_floor_reward = 0.0
 
     @property
     def state(self) -> Optional[V8State]:
@@ -1008,14 +1022,14 @@ class V8Env:
                 remaining_hp = 0
             damage_dealt = max(enemy_total_max - remaining_hp, 0)
 
-        # ----- 阶段 2 底座：战后牌组实力评分 + 增长奖励 -----
+        # ----- 战后牌组实力评分（保留计算 + 日志，但**不进奖励**）-----
+        # 奖励重对齐（2026-06-01）：strength_reward 已彻底删（刷分元凶，死亡局净赚 +485）。
+        # card_scorer 计算保留——deck_strength 数值还要算 + 打日志，留着下一步当模型特征喂。
         # 1) 从本场 per-card 细账累加锚维（输出/防御）到 card_scorer（按局滚动）。
-        # 2) 用更新后的 card_scorer 重算当前牌组总分（deck_strength）。
-        # 3) Δdeck_strength = 本次总分 − 上次记录 → 牌组实力增长奖励。
-        # 注：hp/回合罚已删（compute_combat_reward 新签名不收 hp_lost/turns），
-        #    hp_lost/turns 仅留作 [combat] exit 日志的诊断数值。
-        strength_reward = 0.0
+        # 2) 用更新后的 card_scorer 重算当前牌组总分（deck_strength），仅日志 + 留特征。
+        # 注：hp_lost/turns/damage 仅留作 [combat] exit 日志的诊断数值，不再进奖励。
         deck_strength_now = self._last_deck_strength
+        delta_strength = 0.0
         try:
             self._card_scorer.update_from_combat(self._last_combat_card_log)
             cur_deck = [
@@ -1027,21 +1041,16 @@ class V8Env:
             ]
             deck_strength_now = self._card_scorer.deck_strength(cur_deck)
             delta_strength = deck_strength_now - self._last_deck_strength
-            strength_reward = compute_strength_growth_reward(delta_strength)
             self._last_deck_strength = deck_strength_now
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                "card_scorer strength update failed: %s: %s; strength_reward=0",
+                "card_scorer strength update failed: %s: %s (仅影响日志/未来特征, 不进奖励)",
                 type(e).__name__, e,
             )
-            strength_reward = 0.0
 
+        # 单场胜负小信号（刷分项 damage_ratio 已删，只剩 ±胜负）。
         try:
-            combat_reward = compute_combat_reward(
-                won=won,
-                damage_dealt=damage_dealt,
-                enemy_total_max_hp=enemy_total_max,
-            )
+            combat_reward = compute_combat_reward(won=won)
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "compute_combat_reward failed: %s: %s; fallback 0",
@@ -1062,16 +1071,17 @@ class V8Env:
             if rt0_str == "boss":
                 boss_reward = compute_boss_beat_reward()
 
-        self._pending_combat_reward += combat_reward + strength_reward + boss_reward
+        # 进奖励的只有：单场胜负小信号 + 过 act boss 进度（strength_reward 已删）。
+        self._pending_combat_reward += combat_reward + boss_reward
 
         logger.info(
             "[combat] exit ep=%s reason=%s floor=%d hp_before=%d hp_after=%d "
             "turn_actions=%d turns=%d damage=%d/%d combat_reward=%.2f "
-            "deck_strength=%.2f strength_reward=%.2f boss_reward=%.2f",
+            "deck_strength=%.2f delta_strength=%.2f boss_reward=%.2f",
             self._episode_idx, reason, self._combat_enter_floor,
             self._combat_enter_hp, hp_after, turn_actions,
             turns, damage_dealt, enemy_total_max, combat_reward,
-            deck_strength_now, strength_reward, boss_reward,
+            deck_strength_now, delta_strength, boss_reward,
         )
         # 胜利 + elite/boss → 准备 [deck] 日志（等 reward 处理完）
         if reason == "victory":
@@ -1140,13 +1150,33 @@ class V8Env:
         }
         return mapping.get(s, "unknown")
 
+    def _final_hp_ratio(self) -> float:
+        """episode 结束时的存活比 current_hp / max_hp ∈ [0,1]（compute_final_reward 用）。
+
+        死亡局 current_hp=0 → 0；满血通关 → 1。拿不到 max_hp（防除零）退 0。
+        """
+        if self._runner is None:
+            return 0.0
+        rs = self._runner.run_state
+        cur_hp = int(getattr(rs, "current_hp", 0) or 0)
+        max_hp = int(getattr(rs, "max_hp", 0) or 0)
+        if max_hp <= 0:
+            return 0.0
+        return max(0.0, min(1.0, cur_hp / max_hp))
+
     def _maybe_log_floor(self) -> None:
-        """如果 runner.floor 变了，打一行 [floor] 日志。"""
+        """如果 runner.floor 变了，打一行 [floor] 日志 + 给进度（主轴）奖励。
+
+        进度奖励（奖励重对齐，2026-06-01）：floor 严格变大时，按新增层数累计
+        compute_floor_progress_reward 到 _pending_floor_reward（step() 取出塞进 reward）。
+        _last_logged_floor 初值 -1（sentinel）时只记录不发奖（首次进图基线）。
+        """
         assert self._runner is not None
         rs = self._runner.run_state
         cur_floor = int(getattr(rs, "floor", 0) or 0)
         if cur_floor == self._last_logged_floor:
             return
+        prev_floor = self._last_logged_floor
         room = self._current_room_type_str()
         hp = int(getattr(rs, "current_hp", 0) or 0)
         max_hp = int(getattr(rs, "max_hp", 0) or 0)
@@ -1155,6 +1185,11 @@ class V8Env:
             "[floor] ep=%s floor=%d act=%d hp=%d/%d room=%s",
             self._episode_idx, cur_floor, act, hp, max_hp, room,
         )
+        # 进度（主轴）奖励：只在 floor 严格变大时给（prev_floor>=0 排除 -1 sentinel
+        # 与首层基线；act 切换时 floor 也是单调上涨，跨 act 仍正常累计）。
+        if prev_floor >= 0 and cur_floor > prev_floor:
+            num_new = cur_floor - prev_floor
+            self._pending_floor_reward += compute_floor_progress_reward(num_new)
         self._last_logged_floor = cur_floor
 
     def _maybe_log_deck(self) -> None:
