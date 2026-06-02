@@ -1449,3 +1449,85 @@ counter writeback、reward shaping。所有项干净，不需要新 fix：
     2. act 2 boss / won_game 破零 (新奖励时代仍是 0)
     3. v38 hang 现象 (Guardian 深搜索循环) 是否再次出现, v39 整批未现但仍属潜在风险
   - **预期总时长**: ~3 小时 (新 reward ~10.7s/ep)
+
+---
+
+## Redesign 时代（2026-05-30 起，从头训新奖励线）
+
+**背景**：batch_v40（real-combat reward，累计到 ep≈5120）后线终结存档。2026-05-29 出
+[V8 RL 诊断 + 修复实施计划](v8_rl_fix_plan_2026-05-29.md)：定位真问题是 `-丢血 -0.5×回合`
+shaping 引发 reward hacking（skip 所有卡 → 卡组永远 11 张烂牌 → 通关恒 0），且偏离用户
+「战后给卡组多维评分」原设计。redesign 线是**全新从头训（fresh start，meta 随机初始化）**，
+不从 v40 续训（熵已锁死，救不回来）。战斗内仍沿用 search + BC combat head，只重做战斗外奖励。
+
+**两个奖励阶段（关键分界）**：
+- **redesign_v1~v3**（commit `2482eeb`，2026-05-30~31）：阶段 2 落地的
+  **「牌组实力增长(strength_reward)」奖励**——战后牌组总分(Σ per-card 5 维分)的增量作稠密信号，
+  经 GAE 回溯归给选卡 / 路线决策。heartbeat reward 量级 ~200-360。
+- **redesign_v4 起**（commit `60ea0b9`，2026-06-01 09:43 「奖励重对齐」）：
+  **删掉 strength_reward（认定为刷分元凶——死亡局靠攒卡组分也能净赚 +485，根本没通关）**，
+  改 **纯进度 / 过 boss / 通关为主轴**。reward 量级随之从 ~200 降到 ~35（v4 reward_mean ~33-47），
+  正好印证 strength_reward 被拔。
+- **redesign_v5 起**（commit `6922a9e`，2026-06-01 16:44）：`deck_strength` **降级为模型输入特征**
+  （不再进奖励），另加「健康到达 boss 的高效奖励」防 skip-all。
+
+**全程结果**：v1~v5 **won_game 恒 0，act2_boss_beat 仅 v2 单次擦边 3.3%**，a1_boss_beat 在
+0~17% 区间反复（无单调上行）。strength_reward 三批（v1-v3）的核心赌注（卡组分涨→会通关）
+未成立；删它后（v4）a1_beat 数据并未变差也未变好，但奖励量级回归理智、熵守得住。
+
+**最近批次概览**（redesign 时代，确定性 eval 30-seed，a1_boss_beat / 熵 维度）：
+
+| Batch | ep 范围 | 奖励配置 | a1_boss_beat（末/区间） | act2 / won | 熵末值 | 备注 |
+|---|---|---|---|---|---|---|
+| **redesign_v1** | **0→526** | **strength_reward** | **末 0.07 / 区间 0.03–0.10** | **0 / 0** | **0.060** | **从头训第一批; a1 随 ep 爬 3.3→10→10→7%, 熵单调塌 0.688→0.380→0.137→0.060; reach 峰 40%; 跑到 ep≈526 即停, ckpt 至 ep512** |
+| **redesign_v2** | **384→1024** | **strength_reward** | **末 0.13 / 区间 0.07–0.13** | **act2 单次 0.03 / 0** | **0.033** | **从 v1/ep384 ckpt 续训补满 1024 ep; a1 5 次评估 10/13/13/7/13%, act2 在 ep768 擦边 3.3%(redesign 唯一一次破 act2 零); 熵全程 0.027–0.060 低位; 0 Traceback / 0 hang; 含 final + summary** |
+| **redesign_v3** | **0→663** | **strength_reward** | **末 0.00 / 区间 0.00–0.07** | **0 / 0** | **0.0096** | **⚠ 重训一遍 strength 线; a1 0/3.3/3.3/6.7→末 ep640 跌回 0%; 熵彻底崩(训练侧 0.0096, eval 侧 ep640=0.0096); 跑到 ep≈663 即停(无 final); 印证 strength_reward + 弱熵地板会把策略压死** |
+| **redesign_v4** | **0→1024** | **纯进度(删 strength)** | **末 0.10 / 区间 0.03–0.17** | **0 / 0** | **0.186** | **✅ commit `60ea0b9` 删 strength_reward 后第一批; reward_mean 从 ~200 降到 ~35(印证); a1 8 次评估 7/3/10/3/17/3/3/10%(峰 16.7% 在 ep640); 加强熵地板后熵守住 0.55→0.19 不再崩(对比 v3 的 0.0096); 1024 ep 完整跑完 + final + summary; 0 Traceback / 0 hang** |
+| **redesign_v5** | **0→训练中(~ep103)** | **纯进度 + deck_strength 当特征 + 健康到达 boss 奖励** | **训练中(首个 eval 要 ep≥128)** | **训练中** | **训练中(早期 ~0.68)** | **⏳ commit `6922a9e` 后首批: deck_strength 降级为模型输入特征(不进奖励) + 加防 skip-all 的健康到达 boss 高效奖励; PID 85107, log `/tmp/v8_ppo_redesign_v5.log`, output `sts_models/v8_ppo_redesign_v5/`; reward_mean ~35(纯进度量级, 与 v4 一致); 首个确定性 eval 要等 ep≥128; 观察 a1_beat 能否破 v4 的 ~10% / 熵能否守住** |
+
+**完整确定性 eval 明细**（每批 `[eval@ep=...]` 行，数字源于 ckpt JSON `eval_history` + log）：
+
+- **redesign_v1**（strength_reward, fresh）:
+  - ep128: a1=3.3% reach=16.7% floor=8.0 熵=0.688
+  - ep256: a1=10.0% reach=33.3% floor=10.9 熵=0.380
+  - ep384: a1=10.0% reach=40.0% floor=9.6 熵=0.137
+  - ep512: a1=6.7% reach=30.0% floor=10.4 熵=0.060（v1 最后一次, 之后 v2 从 ep384 续训, v1 ep385-526 work 丢弃）
+- **redesign_v2**（strength_reward, 从 v1/ep384 续训）:
+  - ep512: a1=10.0% reach=33.3% floor=10.4 熵=0.060
+  - ep640: a1=13.3% reach=50.0% floor=12.0 熵=0.045
+  - ep768: a1=13.3% **act2=3.3%** reach=30.0% floor=9.0 熵=0.047（redesign 时代唯一 act2 破零）
+  - ep896: a1=6.7% reach=30.0% floor=9.8 熵=0.027
+  - ep1024: a1=13.3% reach=40.0% floor=11.0 熵=0.033
+- **redesign_v3**（strength_reward, fresh, 熵崩盘批）:
+  - ep128: a1=0.0% reach=6.7% floor=5.6 熵=0.730
+  - ep256: a1=3.3% reach=13.3% floor=10.3 熵=0.251
+  - ep384: a1=3.3% reach=33.3% floor=9.8 熵=0.137
+  - ep512: a1=6.7% reach=23.3% floor=9.9 熵=0.059
+  - ep640: a1=0.0% reach=16.7% floor=10.5 **熵=0.0096**（彻底崩, 跑到 ep≈663 即停）
+- **redesign_v4**（纯进度, fresh, 熵地板生效批）:
+  - ep128: a1=6.7% reach=33.3% floor=11.0 熵=0.548
+  - ep256: a1=3.3% reach=23.3% floor=10.6 熵=0.359
+  - ep384: a1=10.0% reach=33.3% floor=9.8 熵=0.280
+  - ep512: a1=3.3% reach=23.3% floor=10.8 熵=0.230
+  - ep640: **a1=16.7%** reach=40.0% floor=10.2 熵=0.239（本批峰值）
+  - ep768: a1=3.3% reach=26.7% floor=10.7 熵=0.223
+  - ep896: a1=3.3% reach=30.0% floor=10.7 熵=0.212
+  - ep1024: a1=10.0% reach=30.0% floor=9.6 熵=0.186（末; 熵守住, 对比 v3 末 0.0096 不再崩）
+- **redesign_v5**（纯进度 + deck_strength 特征 + 健康到达奖励, fresh）:
+  - 训练中 ~ep103, 首个确定性 eval 要等 ep≥128, 暂无 eval 数据
+  - 早期 PPO 更新熵 ~0.68（ep32/64/96: 0.7145/0.6865/0.6760）, reward_mean ~35
+
+**boss 到达分布**（各批 eval reach 主要落在 Hexaghost / Slime Boss / The Guardian 三 act1 boss,
+boss_kill 全程 0/N）。
+
+**判定 / 接手提示（redesign_v5）**：
+- redesign 线证明 strength_reward 是死路（v1-v3 won_game 恒 0 + v3 熵崩盘）, 已于 v4 删除。
+- v4 删 strength + 强熵地板后熵稳, 但 a1_beat 仍卡 ~10%（未优于旧 real-combat 线 batch_v39 的 32% 均值）。
+- v5 是当前现役: deck_strength 改当特征 + 健康到达 boss 奖励, 观察能否把 a1_beat 推过 v4 的 ~10% / act2 / won_game 破零。
+- 接手检查清单（同 batch_v<N> 套路）:
+  - ckpt 进度: `ls sts_models/v8_ppo_redesign_v5/`
+  - 训练是否还活: `ps -ef | grep v8_ppo_train.py | grep redesign_v5 | grep -v grep`（PID 85107）
+  - 当前 ep: `grep "\[heartbeat\]" /tmp/v8_ppo_redesign_v5.log | tail -1`
+  - 验证纯进度奖励生效: heartbeat reward 量级应在几十（~35）而非 ~200
+  - eval 出数: `grep "\[eval@ep=" /tmp/v8_ppo_redesign_v5.log`（要等 ep≥128）
+  - hang 监测: 30min+ 无 heartbeat 立刻杀

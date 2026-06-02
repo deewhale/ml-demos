@@ -1,3 +1,8 @@
+> **状态（2026-06-01 核实）**：并行采集脚手架（`trainer.collect_rollout_batched` 等）
+> 已部分实现，但 `update()` 仍按单局更新、现役训练默认 `n_envs=1`（`tools/v8_ppo_train.py`
+> CLI default）单环境串行（`args.n_envs > 1` 才启用 ParallelV8Env，否则走「串行 rollout
+> 路径（旧逻辑 / n_envs=1）」），本设计尚未全量启用。
+
 # Parallel V8 Env 设计文档
 
 ## 目标

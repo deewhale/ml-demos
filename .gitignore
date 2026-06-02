@@ -81,3 +81,12 @@ external/
 # web/ 数据产物（不入 git）
 web/data/*.sqlite
 web/data/localization_zho.json
+
+# workflow 运行的一次性工件（不入 git）
+workflow_state/
+
+# smoke 测试产物 / 本地日志（不入 git）
+data/v8_smoke/
+data/v8_smoke_resume_base/
+data/v8_smoke_resume_test/
+logs_smoke_stderr.txt

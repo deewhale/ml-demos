@@ -4,20 +4,29 @@
 
 ## 项目结构
 
-### 活跃代码（V8）
-- `v8_model.py` — V8 模型（pointer-network 选卡 / 选目标，无 PPO）
-- `v8_trainer.py` — V8 训练管线（行为克隆 / 监督学习）
-- `v8_data_collector.py` — bottled_ai 启发式 teacher 数据采集
-- `v8_teacher_ironclad.py` — 移植自 bottled_ai 的 Ironclad 启发式策略
-- `v8_inference_bot.py` — V8 推理 bot（接 StSRLSolver）
+### 活跃代码（V8 RL）
+现役 V8 RL 代码在 `v8/` 包，战斗外用纯 model RL（PPO + dense reward shaping），
+战斗内走 StSRLSolver 手写搜索：
+- `v8/env.py` — V8Env gym wrapper（封装 StSRLSolver runner，元决策状态/动作编码 + 驱动战斗）
+- `v8/trainer.py` — V8PPOTrainer（PPO + clip + GAE + 自适应熵地板）
+- `v8/model.py` — V8Model（set-encoder + pointer-net actor + value head）
+- `v8/reward.py` — step reward shaping（进度 + 过 boss + 通关，strength_reward 已删）
+- `v8/card_scorer.py` — per-card 卡组评分（只作模型特征，不进奖励）
+- `v8/combat_net_wrapper.py` — 随机桩，当前已禁用（战斗走 StSRLSolver 手写搜索）
+- `v8/deck_evaluator.py` — 旧模拟战评分，已弃用保留参考
+- `tools/v8_ppo_train.py` — 训练入口
 - `data/sts_data.py` — STS 数据提取（卡牌/遗物/药水统一效果向量，沿用自 V6）
+
+### 训练可视化
+- `web/` — FastAPI 训练可视化（app.py / db.py / etl / routers / static），详见 `web/README.md`
 
 ### 文档
 - `docs/v8_training_log.md` — V8 训练日志
-- `docs/v8_sweep_log.md` — V8 参数 sweep 记录
-- `docs/v8_alphazero_lite_design.md` — V8 早期设计草案（部分已与现役实现漂移，仅供参考）
-- `docs/v6_training_log.md`、`docs/v6_architecture_review.md` — V6 历史训练日志和架构演进回顾
-- `docs/archive/` — 更早版本设计文档（V3-V5）
+- `docs/v8_design_principles.md` — V8 设计原则
+- `docs/v8_rl_diagnosis_2026-05-29.md` — V8 RL 归因诊断
+- `docs/v8_rl_fix_plan_2026-05-29.md` — V8 RL 修复实施计划
+- `docs/archive/v8_sweep_log.md` — V8 参数 sweep 记录（归档）
+- `docs/archive/v8_alphazero_lite_design.md`、`docs/archive/v8_implementation_design.md` — V8 早期设计草案（已与现役实现漂移，仅供参考，归档）
 
 ### 归档
 - `archive/` — 已删除的早期代码（V3 DQN, V4 PPO+Transformer, V5 TurnSolver）；V6/V7 源文件随 V8 切换已从 working tree 删除，可在历史 commit 中查看
@@ -83,8 +92,8 @@ StSRLSolver 的 `pyproject.toml` 还列了 mlx / fastapi / uvicorn / websockets�
 ### 设计理念
 
 - 统一效果编码：从游戏数据提取卡牌/遗物/药水的真实效果向量（V6 起沿用至 V8）
-- 当前 V8 路线：行为克隆 + pointer-network，bottled_ai 启发式策略当数据 teacher，第一阶段聚焦 Ironclad
-- 架构演进：V3 (DQN) → V4 (PPO+Transformer) → V5 (TurnSolver+Agent) → V6 (统一效果编码+PPO) → V7 (搜索+手调 lex 评估器) → V8 (行为克隆 + pointer-network + bottled_ai teacher)
+- 当前 V8 RL 路线：战斗外用纯 model RL（PPO + dense reward shaping + set-encoder/pointer-net），战斗内走 StSRLSolver 手写搜索（早期 V8 BC 行为克隆路线已 archive）
+- 架构演进：V3 (DQN) → V4 (PPO+Transformer) → V5 (TurnSolver+Agent) → V6 (统一效果编码+PPO) → V7 (搜索+手调 lex 评估器) → V8 BC (行为克隆，已 archive) → V8 RL (PPO，当前阶段)
 
 ### 配置
 
