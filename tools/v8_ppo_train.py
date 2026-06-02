@@ -694,10 +694,6 @@ def run_eval(
 # ============================================================
 
 
-# 固定 eval 种子集起点。每次 deterministic eval 都跑 [EVAL_SEED_OFFSET,
-# EVAL_SEED_OFFSET + eval_seeds) 这一批固定种子，保证跨 ep 评估可比。
-EVAL_SEED_OFFSET = 10_000
-
 _PARSER_DEFAULTS: Dict[str, Any] = {
     "num_episodes": 1000,
     "batch_size": 32,
@@ -706,7 +702,7 @@ _PARSER_DEFAULTS: Dict[str, Any] = {
     "combat_head_checkpoint": "sts_models/v8_combat_head_v1.pt",
     "output_dir": "sts_models/v8_ppo_rl",
     "eval_frequency": 100,
-    "eval_seeds": 48,
+    "eval_seeds": 30,
     "checkpoint_frequency": 500,
     "max_steps_per_episode": 1500,
     "deck_eval_freq": 10,
@@ -1368,26 +1364,15 @@ def main() -> None:
             if cur_eval_milestone > last_eval_milestone:
                 last_eval_milestone = cur_eval_milestone
                 eval_t0 = time.time()
-                # eval 用固定 seed offset（10_000），跟训练 seed 不冲突。
-                # 关键：seed_offset 不再随 num_episodes_done 变化——每次 eval 都跑
-                # 完全相同的一批种子 [10_000, 10_000+num_seeds)，保证不同 ep 的评估
-                # 直接可比，eval 间差异只来自策略变化而非换种子（解决 ±20pp 噪声根因）。
+                # eval 用大 seed offset，跟训练 seed 不冲突
                 eval_metrics = run_eval(
                     trainer, env,
                     num_seeds=args.eval_seeds,
-                    seed_offset=EVAL_SEED_OFFSET,
+                    seed_offset=10_000 + num_episodes_done,
                 )
                 eval_metrics["episodes_done"] = num_episodes_done
                 eval_metrics["secs"] = time.time() - eval_t0
                 eval_history.append(eval_metrics)
-                # ---- 滚动均值：最近 3 次 eval（含本次）的各指标均值，让趋势看得准 ----
-                # 固定种子集后单次 eval 已可比；滚动均值进一步平滑边界局翻转 / 策略随机性残余抖动。
-                _recent = eval_history[-3:]
-                _rn = len(_recent)
-                _roll_a1 = sum(m["act1_boss_beat_rate"] for m in _recent) / _rn
-                _roll_reach = sum(m["reached_boss_rate"] for m in _recent) / _rn
-                _roll_a2 = sum(m["act2_boss_beat_rate"] for m in _recent) / _rn
-                _roll_won = sum(m["won_game_rate"] for m in _recent) / _rn
                 logger.info(
                     "[eval@ep=%d] reached_a1_boss=%.2f a1_boss_beat=%.2f a2_boss_beat=%.2f "
                     "won_game=%.2f floor_mean=%.1f entropy=%.4f (%.1fs)",
@@ -1396,12 +1381,6 @@ def main() -> None:
                     eval_metrics["won_game_rate"], eval_metrics["floor_mean"],
                     eval_metrics.get("entropy", 0.0),
                     eval_metrics["secs"],
-                )
-                logger.info(
-                    "[eval@ep=%d] roll%d_mean: reached_a1_boss=%.2f a1_boss_beat=%.2f "
-                    "a2_boss_beat=%.2f won_game=%.2f (固定种子 offset=%d num_seeds=%d)",
-                    num_episodes_done, _rn, _roll_reach, _roll_a1, _roll_a2, _roll_won,
-                    EVAL_SEED_OFFSET, args.eval_seeds,
                 )
                 # per-boss reach / kill 分布（仅 act1，act 切换后 _boss_name 被覆盖，
                 # 故 kill 列无法按 boss 归属，恒为 0；reach 列反映"卡在哪个 boss"分布）
