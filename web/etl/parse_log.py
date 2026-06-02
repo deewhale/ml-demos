@@ -419,17 +419,17 @@ class LogParser:
             cur.execute(f"DELETE FROM episodes WHERE ep IN ({placeholders})", ep_list)
 
         # episodes（取每个 ep 的最后一条 heartbeat，已经覆盖在 dict 里）
-        # floor_reached 存绝对楼层：(act - 1) * 17 + floor + 1
-        # env 输出 floor 是 0-indexed（每 Act 0-16），STS 实际楼层 1-indexed：
-        # act=1 floor=0 → 绝对 1（起始），act=1 floor=16 → 绝对 17（boss 层）
-        # act=2 floor=0 → 绝对 18，act=2 floor=5 → 绝对 23
-        # act=3 floor=0 → 绝对 35，act=3 floor=16 → 绝对 51
+        # floor_reached 存绝对楼层：(act - 1) * 17 + floor（无 +1，与 _abs_floor 一致）
+        # 模拟器 floor 每个 Act 0-index（floor 0 = act 起点占位，floor 1 = 第一间房，
+        # floor 16 = boss 层），act 1-index：
+        # act=1 floor=16 → 绝对 16（Act1 boss）；act=2 floor=16 → 绝对 33（Act2 boss）；
+        # act=3 floor=16 → 绝对 50（Act3 boss）；心脏层 = 55
         ep_rows = [
             (
                 d["ep"],
                 d["steps"],
                 d["reward"],
-                (d.get("act", 1) - 1) * 17 + d["floor"] + 1,
+                _abs_floor(d["floor"], d.get("act", 1)),
                 1 if d["beat_boss"] else 0,
                 d["secs"],
                 d["search_calls"],

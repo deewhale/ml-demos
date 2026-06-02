@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>STS V8 强化学习训练可视化</title>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+    <nav id="sidebar">
+        <h1>STS V8 RL</h1>
+        <ul>
+            <li><a href="#/training">训练曲线</a></li>
+            <li><a href="#/eval">评估结果</a></li>
+            <li><a href="#/episode">单局回放</a></li>
+            <li><a href="#/deck">牌组组成</a></li>
+        </ul>
+        <div id="rescan-block">
+            <button id="rescan-btn" type="button">重新扫描</button>
+            <div id="rescan-status"></div>
+        </div>
+    </nav>
+    <main id="app-root">
+        <div class="loading">加载中...</div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+    <script>window.PAGES = {};</script>
+    <script src="/static/page_training.js"></script>
+    <script src="/static/page_eval.js"></script>
+    <script src="/static/page_episode.js"></script>
+    <script src="/static/page_deck.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -5,6 +5,8 @@ Endpoints:
       胜局牌组中所有 (card_en_id, upgraded) 的累积频次，含中文 display
   GET /api/deck/card_frequency[?floor_min=10][&beat_boss=1][&ep_min=0][&ep_max=100]
       过滤条件下的卡牌出现频次
+  GET /api/deck/pick_rates[?ep_min=0][&ep_max=100]
+      卡牌选择率：被提供时选择的比例（类 spirelogs.com）
   GET /api/deck/by_episode/{ep}
       单局所有 deck snapshot（每个保存点全牌组）
 """
@@ -211,6 +213,94 @@ def relic_frequency(
                 "freq": freq,
                 "total_eps": total_eps,
             })
+        return result
+    finally:
+        conn.close()
+
+
+@router.get("/pick_rates")
+def card_pick_rates(
+    ep_min: int | None = Query(None, description="最小 ep（含）"),
+    ep_max: int | None = Query(None, description="最大 ep（含）"),
+):
+    """Card pick rate: how often each card is picked when offered.
+
+    从 meta_decisions 表 phase='CARD_REWARDS' + decision_type IN ('pick','skip') 计算。
+    options_json 格式为 ["REWARD:card:CardName:choice=N", "REWARD:skip_card:choice=0"]，
+    只计入 REWARD:card:* 条目。"""
+    import re
+
+    conn = get_conn()
+    try:
+        where: list[str] = [
+            "phase = 'CARD_REWARDS'",
+            "decision_type IN ('pick', 'skip')",
+            "options_json IS NOT NULL",
+        ]
+        params: list = []
+        if ep_min is not None:
+            where.append("ep >= ?")
+            params.append(ep_min)
+        if ep_max is not None:
+            where.append("ep <= ?")
+            params.append(ep_max)
+        where_sql = " AND ".join(where)
+
+        rows = conn.execute(
+            f"SELECT decision_type, chosen_card, options_json FROM meta_decisions WHERE {where_sql}",
+            params,
+        ).fetchall()
+
+        # 正则：从 "REWARD:card:CardName:choice=N" 提取 card name
+        card_option_re = re.compile(r"^REWARD:card:(.+?):choice=\d+$")
+
+        offered_counter: Counter = Counter()
+        picked_counter: Counter = Counter()
+
+        for r in rows:
+            opts_raw = r["options_json"]
+            if not opts_raw:
+                continue
+            try:
+                opts = json.loads(opts_raw)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(opts, list):
+                continue
+
+            # 提取所有卡牌选项
+            for opt in opts:
+                m = card_option_re.match(opt)
+                if m:
+                    card_name = m.group(1)
+                    offered_counter[card_name] += 1
+
+            # 统计被选中的卡
+            if r["decision_type"] == "pick" and r["chosen_card"]:
+                picked_counter[r["chosen_card"]] += 1
+
+        # i18n 查询
+        card_i18n = conn.execute(
+            "SELECT en_id, en_name, zh_name FROM i18n_entries WHERE kind='card'"
+        ).fetchall()
+        card_zh_map = {
+            row["en_id"]: (row["zh_name"] or row["en_name"] or row["en_id"])
+            for row in card_i18n
+        }
+
+        # 组装结果，按 offered DESC 排序
+        result = []
+        for card, offered in offered_counter.most_common():
+            picked = picked_counter.get(card, 0)
+            pick_rate = picked / offered if offered > 0 else 0.0
+            result.append({
+                "card": card,
+                "zh": card_zh_map.get(card),
+                "offered": offered,
+                "picked": picked,
+                "pick_rate": round(pick_rate, 4),
+            })
+
         return result
     finally:
         conn.close()

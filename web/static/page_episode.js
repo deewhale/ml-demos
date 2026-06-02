@@ -13,6 +13,7 @@
     let selectedEp = null;
     let currentTimeline = null;
     let hpChart = null;  // HP 曲线 Chart.js 实例
+    let deckChart = null; // 牌组大小 Chart.js 实例
 
     const SORT_KEYS_ZH = {
         reward: "奖励",
@@ -787,6 +788,108 @@
         });
     }
 
+    // ===== 牌组大小曲线图 =====
+    function destroyDeckChart() {
+        if (deckChart) {
+            try { deckChart.destroy(); } catch (_) {}
+            deckChart = null;
+        }
+    }
+
+    function renderDeckChart(container, timeline) {
+        destroyDeckChart();
+        if (!timeline || !timeline.length) {
+            container.innerHTML = "";
+            return;
+        }
+
+        // 收集有 deck snapshot 的楼层
+        const deckPoints = [];
+        // 起始点：floor 0, deck_size = 10 (Ironclad starter)
+        deckPoints.push({ absFloor: 0, deckSize: 10 });
+
+        for (const item of timeline) {
+            if (item.deck && item.deck.deck_size != null) {
+                const absFloor = item.abs_floor ?? ((item.act - 1) * 17 + item.floor);
+                deckPoints.push({ absFloor, deckSize: item.deck.deck_size });
+            }
+        }
+
+        if (deckPoints.length <= 1) {
+            container.innerHTML = "";
+            return;
+        }
+
+        container.innerHTML = `
+            <div class="deck-chart-card">
+                <div class="deck-chart-title">牌组大小</div>
+                <div class="deck-chart-canvas-wrap"><canvas id="deck-size-canvas"></canvas></div>
+            </div>
+        `;
+
+        const canvas = document.getElementById("deck-size-canvas");
+        if (!canvas) return;
+
+        const data = deckPoints.map(p => ({ x: p.absFloor, y: p.deckSize }));
+        const xMin = Math.min(...deckPoints.map(p => p.absFloor));
+        const xMax = Math.max(...deckPoints.map(p => p.absFloor));
+        const yMax = Math.max(...deckPoints.map(p => p.deckSize)) + 2;
+
+        deckChart = new Chart(canvas, {
+            type: "line",
+            data: {
+                datasets: [
+                    {
+                        label: "牌组大小",
+                        data: data,
+                        borderColor: "#2563eb",
+                        backgroundColor: "rgba(37, 99, 235, 0.12)",
+                        fill: true,
+                        tension: 0.25,
+                        pointRadius: 4,
+                        pointBackgroundColor: "#2563eb",
+                        borderWidth: 2,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                parsing: false,
+                scales: {
+                    x: {
+                        type: "linear",
+                        title: { display: true, text: "绝对楼层" },
+                        min: xMin - 0.5,
+                        max: xMax + 0.5,
+                        ticks: { stepSize: 1, font: { size: 10 } },
+                    },
+                    y: {
+                        title: { display: true, text: "张数" },
+                        min: 0,
+                        max: yMax,
+                        ticks: { stepSize: 1, font: { size: 10 } },
+                    },
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            title(items) {
+                                if (!items.length) return "";
+                                return `楼层 ${items[0].parsed.x}`;
+                            },
+                            label(ctx) {
+                                return `牌组大小: ${ctx.parsed.y} 张`;
+                            },
+                        },
+                    },
+                },
+            },
+        });
+    }
+
     function renderTimeline(container) {
         if (!currentTimeline) {
             container.innerHTML = `<div class="loading">点击左侧某局查看回放</div>`;
@@ -832,6 +935,7 @@
             </div>
             ${endgameHtml}
             <div id="hp-chart-container"></div>
+            <div id="deck-chart-container"></div>
             <div class="timeline-list">${groupsHtml || '<div class="loading">无时间轴数据</div>'}</div>
         `;
 
@@ -839,6 +943,12 @@
         const hpContainer = container.querySelector("#hp-chart-container");
         if (hpContainer && timeline.length) {
             renderHpChart(hpContainer, timeline);
+        }
+
+        // 渲染牌组大小曲线图
+        const deckContainer = container.querySelector("#deck-chart-container");
+        if (deckContainer && timeline.length) {
+            renderDeckChart(deckContainer, timeline);
         }
 
         container.querySelectorAll("details.combat-expandable").forEach((d) => {

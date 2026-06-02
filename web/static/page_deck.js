@@ -15,8 +15,12 @@
     let activeRarities = new Set(ALL_RARITIES);
     let chartInstance = null;
     let relicChartInstance = null;
+    let pickRateChartInstance = null;
     let rawData = [];
     let relicData = [];
+    let pickRateData = [];
+    let pickRateSortKey = "offered"; // offered | picked | pick_rate | card
+    let pickRateSortAsc = false;
 
     const RARITY_COLORS = {
         BASIC: "#9e9e9e",
@@ -47,6 +51,16 @@
         if (epMax !== "") q.append("ep_max", String(epMax));
         const res = await fetch(`/api/deck/card_frequency?${q.toString()}`);
         if (!res.ok) throw new Error("加载卡牌频次失败: " + res.status);
+        const data = await res.json();
+        return Array.isArray(data) ? data : [];
+    }
+
+    async function fetchPickRates() {
+        const q = new URLSearchParams();
+        if (epMin !== "") q.append("ep_min", String(epMin));
+        if (epMax !== "") q.append("ep_max", String(epMax));
+        const res = await fetch(`/api/deck/pick_rates?${q.toString()}`);
+        if (!res.ok) throw new Error("加载卡牌选择率失败: " + res.status);
         const data = await res.json();
         return Array.isArray(data) ? data : [];
     }
@@ -187,6 +201,202 @@
             ? ` · 局 ${epMin || "0"}~${epMax || "最新"}`
             : "";
         titleEl.textContent = `遗物出现频次（${winFilter}${rangeNote}）`;
+    }
+
+    function destroyPickRateChart() {
+        if (pickRateChartInstance) {
+            pickRateChartInstance.destroy();
+            pickRateChartInstance = null;
+        }
+    }
+
+    function getPickRateFiltered() {
+        // 只展示 offered >= 5 的卡（减少噪声）
+        return pickRateData.filter((r) => r.offered >= 5);
+    }
+
+    function pickRateColor(rate) {
+        // 渐变：红 (0%) -> 黄 (50%) -> 绿 (100%)
+        if (rate <= 0.5) {
+            const t = rate / 0.5;
+            const r = Math.round(239 * (1 - t) + 234 * t);
+            const g = Math.round(68 * (1 - t) + 179 * t);
+            const b = Math.round(68 * (1 - t) + 8 * t);
+            return `rgb(${r},${g},${b})`;
+        } else {
+            const t = (rate - 0.5) / 0.5;
+            const r = Math.round(234 * (1 - t) + 34 * t);
+            const g = Math.round(179 * (1 - t) + 197 * t);
+            const b = Math.round(8 * (1 - t) + 94 * t);
+            return `rgb(${r},${g},${b})`;
+        }
+    }
+
+    function drawPickRateChart() {
+        const canvas = document.getElementById("pick-rate-canvas");
+        if (!canvas) return;
+        destroyPickRateChart();
+        const filtered = getPickRateFiltered();
+        if (!filtered.length) {
+            const wrap = canvas.parentElement;
+            if (wrap) wrap.innerHTML = `<div class="empty">暂无选择率数据（需至少 5 次提供）</div>`;
+            return;
+        }
+
+        // 按 pick_rate 降序排列展示
+        const sorted = [...filtered].sort((a, b) => b.pick_rate - a.pick_rate);
+        const top = sorted.slice(0, topN);
+        const labels = top.map((r) => r.zh || r.card);
+        const data = top.map((r) => Math.round(r.pick_rate * 1000) / 10); // percent with 1 decimal
+        const colors = top.map((r) => pickRateColor(r.pick_rate));
+
+        const height = Math.max(400, top.length * 22);
+        canvas.parentElement.style.height = height + "px";
+
+        pickRateChartInstance = new Chart(canvas, {
+            type: "bar",
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: "选择率 %",
+                        data,
+                        backgroundColor: colors,
+                        borderColor: "#1f2937",
+                        borderWidth: 0,
+                    },
+                ],
+            },
+            options: {
+                indexAxis: "y",
+                responsive: true,
+                maintainAspectRatio: false,
+                layout: { padding: { right: 50 } },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => {
+                                const r = top[ctx.dataIndex];
+                                return `${r.zh || r.card}：提供 ${r.offered} 次，选择 ${r.picked} 次（${(r.pick_rate * 100).toFixed(1)}%）`;
+                            },
+                            afterLabel: (ctx) => {
+                                const r = top[ctx.dataIndex];
+                                return `引擎 ID: ${r.card}`;
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        beginAtZero: true,
+                        max: 100,
+                        title: { display: true, text: "选择率 %" },
+                        ticks: { callback: (v) => v + "%" },
+                    },
+                    y: { ticks: { autoSkip: false, font: { size: 11 } } },
+                },
+            },
+            plugins: [
+                {
+                    id: "pickRateValueLabel",
+                    afterDatasetsDraw(chart) {
+                        const { ctx } = chart;
+                        ctx.save();
+                        ctx.font = "11px -apple-system, sans-serif";
+                        ctx.fillStyle = "#374151";
+                        ctx.textAlign = "left";
+                        ctx.textBaseline = "middle";
+                        chart.data.datasets.forEach((dataset, di) => {
+                            const meta = chart.getDatasetMeta(di);
+                            meta.data.forEach((bar, i) => {
+                                const v = dataset.data[i];
+                                if (v == null) return;
+                                const { x, y } = bar.tooltipPosition();
+                                ctx.fillText(v.toFixed(1) + "%", x + 4, y);
+                            });
+                        });
+                        ctx.restore();
+                    },
+                },
+            ],
+        });
+    }
+
+    function updatePickRateTitle() {
+        const titleEl = document.getElementById("pick-rate-chart-title");
+        if (!titleEl) return;
+        const rangeNote = (epMin !== "" || epMax !== "")
+            ? ` · 局 ${epMin || "0"}~${epMax || "最新"}`
+            : "";
+        const count = getPickRateFiltered().length;
+        titleEl.textContent = `卡牌选择率（被提供时选择的比例${rangeNote}） · ${count} 种卡牌`;
+    }
+
+    function renderPickRateTable() {
+        const tbody = document.querySelector("#pick-rate-table tbody");
+        if (!tbody) return;
+        const filtered = getPickRateFiltered();
+
+        // 排序
+        const sorted = [...filtered].sort((a, b) => {
+            let cmp = 0;
+            if (pickRateSortKey === "card") {
+                const aLabel = a.zh || a.card;
+                const bLabel = b.zh || b.card;
+                cmp = aLabel.localeCompare(bLabel, "zh-CN");
+            } else {
+                cmp = (a[pickRateSortKey] || 0) - (b[pickRateSortKey] || 0);
+            }
+            return pickRateSortAsc ? cmp : -cmp;
+        });
+
+        tbody.innerHTML = sorted
+            .map(
+                (r, idx) => {
+                    const pct = (r.pick_rate * 100).toFixed(1);
+                    const barWidth = Math.round(r.pick_rate * 100);
+                    const barColor = pickRateColor(r.pick_rate);
+                    return `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${escapeHtml(r.zh || r.card)}</td>
+                        <td class="muted">${escapeHtml(r.card)}</td>
+                        <td class="num">${r.offered}</td>
+                        <td class="num">${r.picked}</td>
+                        <td class="num">
+                            <div style="display:flex;align-items:center;gap:6px;justify-content:flex-end;">
+                                <div style="width:60px;height:10px;background:#e5e7eb;border-radius:5px;overflow:hidden;">
+                                    <div style="width:${barWidth}%;height:100%;background:${barColor};border-radius:5px;"></div>
+                                </div>
+                                <span>${pct}%</span>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+                }
+            )
+            .join("");
+    }
+
+    function setupPickRateTableSort() {
+        const ths = document.querySelectorAll("#pick-rate-table th[data-sort]");
+        ths.forEach((th) => {
+            th.style.cursor = "pointer";
+            th.addEventListener("click", () => {
+                const key = th.dataset.sort;
+                if (pickRateSortKey === key) {
+                    pickRateSortAsc = !pickRateSortAsc;
+                } else {
+                    pickRateSortKey = key;
+                    pickRateSortAsc = key === "card"; // card 默认升序，数值默认降序
+                }
+                // 更新排序指示
+                ths.forEach((t) => t.classList.remove("sort-asc", "sort-desc"));
+                th.classList.add(pickRateSortAsc ? "sort-asc" : "sort-desc");
+                renderPickRateTable();
+            });
+        });
     }
 
     function getFilteredData() {
@@ -335,26 +545,34 @@
         const chartCard = document.getElementById("deck-chart-card");
         if (chartCard) chartCard.querySelector(".deck-loading").style.display = "block";
         try {
-            const [cards, relics] = await Promise.all([fetchCardFreq(), fetchRelicFreq()]);
+            const [cards, relics, picks] = await Promise.all([
+                fetchCardFreq(), fetchRelicFreq(), fetchPickRates(),
+            ]);
             rawData = cards;
             relicData = relics;
+            pickRateData = picks;
         } catch (e) {
             rawData = [];
             relicData = [];
+            pickRateData = [];
             console.error(e);
         }
         updateTitle();
         updateRelicTitle();
+        updatePickRateTitle();
         renderLegend();
         drawChart();
         drawRelicChart();
+        drawPickRateChart();
         renderTable();
+        renderPickRateTable();
         if (chartCard) chartCard.querySelector(".deck-loading").style.display = "none";
     }
 
     async function render(root, params) {
         destroyChart();
         destroyRelicChart();
+        destroyPickRateChart();
         root.innerHTML = window.UI.loading("载入牌组数据...");
 
         root.innerHTML = `
@@ -397,9 +615,31 @@
                 <h3 id="relic-chart-title">遗物出现频次</h3>
                 <div class="chart-wrap" style="height: 500px;"><canvas id="relic-canvas"></canvas></div>
             </div>
+            <div class="chart-card" id="pick-rate-chart-card">
+                <h3 id="pick-rate-chart-title">卡牌选择率（被提供时选择的比例）</h3>
+                <div class="chart-wrap" style="height: 700px;"><canvas id="pick-rate-canvas"></canvas></div>
+            </div>
+            <div class="chart-card">
+                <h3>选择率详细列表</h3>
+                <p style="font-size:12px;color:#6b7280;margin:0 0 8px 0;">只显示被提供 ≥5 次的卡牌 · 点击列头排序</p>
+                <table class="simple" id="pick-rate-table">
+                    <thead>
+                        <tr>
+                            <th>排名</th>
+                            <th data-sort="card">卡牌</th>
+                            <th>引擎 ID</th>
+                            <th data-sort="offered" class="num">提供次数</th>
+                            <th data-sort="picked" class="num">选择次数</th>
+                            <th data-sort="pick_rate" class="num sort-desc">选择率</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
         `;
 
         renderRarityChips();
+        setupPickRateTableSort();
 
         root.querySelector("#deck-only-win").addEventListener("change", async (e) => {
             onlyBeatBoss = e.target.checked;
