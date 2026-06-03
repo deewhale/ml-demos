@@ -38,25 +38,22 @@ from sts_paths import ensure_on_sys_path
 
 ensure_on_sys_path()
 
-# StSRLSolver 引擎
+# StSRLSolver 引擎 phase / action 类型枚举。
+# 中间层重构（2026-06）：env 不再直接 import GameRunner / TurnSolverAdapter，
+# 引擎生命周期 / 动作 / 战斗都走 GameBackend（默认 StSRLBackend）。
+# 这里仍 import GamePhase（phase 是 pass-through 引擎枚举，env 做 _META_PHASES
+# 等映射判定）和 EventAction（[event] 日志 isinstance 判定）。其余 action 类型
+# （PathAction/NeowAction/RewardAction/...）env 不再直接引用。
 from packages.engine.game import (  # noqa: E402
-    GameRunner,
     GamePhase,
-    PathAction,
-    NeowAction,
-    CombatAction,
-    RewardAction,
     EventAction,
-    ShopAction,
-    RestAction,
-    TreasureAction,
-    BossRewardAction,
 )
-from packages.training.turn_solver import TurnSolverAdapter  # noqa: E402
 
 # V8 内部模块
 from v8.state import V8State
 from v8.action_space import get_available_actions
+from v8.backends.protocol import GameBackend
+from v8.backends.stsrl_backend import StSRLBackend
 from v8.reward import (
     compute_step_reward,
     compute_final_reward,
@@ -121,101 +118,12 @@ DEFAULT_MAX_STEPS_PER_EPISODE: int = 5_000
 
 
 # =============================================================================
-# 辅助：runner → V8State
-# =============================================================================
-
-
-def _build_state_from_runner(runner: GameRunner) -> V8State:
-    """从 GameRunner 提取 V8State（元决策 phase 用，不含战斗内字段）。
-
-    战斗内字段（hand / draw / discard / monsters / energy）只在 phase=COMBAT 时
-    填充；元决策 phase 留空（避免假数据）。本 env 设计是战斗内由 env 内部处理，
-    模型只在元决策 phase 看 state，所以 COMBAT phase 一般不会被 caller 看到。
-    """
-    rs = runner.run_state
-    phase_name = _ENGINE_TO_V8_PHASE.get(runner.phase, runner.phase.name)
-
-    # ----- 数字状态 -----
-    hp = int(getattr(rs, "current_hp", 0) or 0)
-    max_hp = int(getattr(rs, "max_hp", 0) or 0)
-    floor = int(getattr(rs, "floor", 0) or 0)
-    act = int(getattr(rs, "act", 1) or 1)
-    gold = int(getattr(rs, "gold", 0) or 0)
-
-    # ----- 药水（含空槽用 "" 占位）-----
-    potions: List[str] = []
-    for slot in getattr(rs, "potion_slots", []) or []:
-        pid = getattr(slot, "potion_id", None)
-        potions.append(pid if pid else "")
-
-    # ----- 牌组 {"name": id, "upgraded": bool} -----
-    deck: List[Dict[str, Any]] = []
-    for c in getattr(rs, "deck", []) or []:
-        deck.append({
-            "name": getattr(c, "id", "") or "",
-            "upgraded": bool(getattr(c, "upgraded", False)),
-        })
-
-    # ----- 遗物 -----
-    relics: List[str] = []
-    for r in getattr(rs, "relics", []) or []:
-        rid = getattr(r, "id", None) or str(r)
-        relics.append(rid)
-
-    # ----- 完整 act 地图 -----
-    map_nodes: List[List[Dict[str, Any]]] = []
-    try:
-        cur_map = rs.act_maps.get(act) if getattr(rs, "act_maps", None) else None
-    except Exception:  # noqa: BLE001
-        cur_map = None
-    if cur_map is not None:
-        for layer in cur_map:
-            layer_repr: List[Dict[str, Any]] = []
-            for node in layer:
-                rt = getattr(node, "room_type", None)
-                rt_str = rt.value if rt is not None and hasattr(rt, "value") else str(rt or "")
-                edges_x = []
-                for e in getattr(node, "edges", []) or []:
-                    edges_x.append(int(getattr(e, "dst_x", -1)))
-                layer_repr.append({
-                    "room_type": rt_str,
-                    "x": int(getattr(node, "x", -1)),
-                    "edges": edges_x,
-                })
-            map_nodes.append(layer_repr)
-
-    # ----- 当前位置 -----
-    current_position: Optional[Dict[str, int]] = None
-    mp = getattr(rs, "map_position", None)
-    if mp is not None and not (mp.x == -1 and mp.y == -1):
-        current_position = {"floor": int(mp.y), "x": int(mp.x)}
-
-    # ----- 当前 act 的 boss 名（boss-aware encoding）-----
-    # runner._boss_name 在 GameRunner reset 时即填好（如 'Hexaghost'）。
-    # 容错：缺字段 / None → 空字符串。
-    boss_name = str(getattr(runner, "_boss_name", "") or "")
-
-    state = V8State(
-        hp=hp,
-        max_hp=max_hp,
-        floor=floor,
-        act=act,
-        gold=gold,
-        potions=potions,
-        deck=deck,
-        relics=relics,
-        map_nodes=map_nodes,
-        current_position=current_position,
-        deck_strength=None,  # 由 env 在 reset/step 中按时机填
-        in_combat=(runner.phase == GamePhase.COMBAT),
-        phase=phase_name,
-        boss=boss_name,
-    )
-    return state
-
-
-# =============================================================================
 # 诊断辅助：action 描述 / 战斗内状态提取
+#
+# 中间层重构（2026-06）：原 _build_state_from_runner 已搬到
+# v8/backends/stsrl_backend.py（中性化为 backend.build_v8_state()）。
+# 下面的诊断 helper 改为接收 GameBackend（用其 pass-through 的 current_combat
+# / run_state 等），不直接触碰 GameRunner。
 # =============================================================================
 
 
@@ -246,10 +154,10 @@ def _safe_action_repr(action: Any) -> str:
         return type(action).__name__
 
 
-def _combat_enemies_brief(runner: GameRunner) -> List[Dict[str, Any]]:
-    """从 runner.current_combat 提取存活敌人简要信息（name + hp/max_hp）。"""
+def _combat_enemies_brief(backend: GameBackend) -> List[Dict[str, Any]]:
+    """从 backend.current_combat 提取存活敌人简要信息（name + hp/max_hp）。"""
     out: List[Dict[str, Any]] = []
-    cc = getattr(runner, "current_combat", None)
+    cc = backend.current_combat
     if cc is None:
         return out
     st = getattr(cc, "state", None)
@@ -266,9 +174,9 @@ def _combat_enemies_brief(runner: GameRunner) -> List[Dict[str, Any]]:
     return out
 
 
-def _combat_pile_sizes(runner: GameRunner) -> Tuple[int, int, int]:
+def _combat_pile_sizes(backend: GameBackend) -> Tuple[int, int, int]:
     """返回 (hand_size, draw_size, discard_size)；不在 combat 时全 0。"""
-    cc = getattr(runner, "current_combat", None)
+    cc = backend.current_combat
     if cc is None:
         return (0, 0, 0)
     st = getattr(cc, "state", None)
@@ -287,7 +195,7 @@ def _combat_pile_sizes(runner: GameRunner) -> Tuple[int, int, int]:
 
 
 def _detect_node_reward(
-    runner: GameRunner,
+    backend: GameBackend,
     prev_phase: Optional[Any],
     prev_relics_count: int,
     prev_max_hp: int,
@@ -303,7 +211,7 @@ def _detect_node_reward(
     - 其他（COMBAT / CARD_REWARDS / MAP / NEOW / BOSS_REWARDS）→ 0
       （战斗 / 选卡的收益已经在 Δdeck_strength 里反映）
     """
-    rs = runner.run_state
+    rs = backend.run_state
     new_relics_count = len(getattr(rs, "relics", []) or [])
     new_max_hp = int(getattr(rs, "max_hp", 0) or 0)
 
@@ -367,6 +275,7 @@ class V8Env:
         solver_budgets: Optional[Dict[str, Tuple[float, int, int]]] = None,
         combat_net_wrapper: Optional[Any] = None,
         deck_eval_freq: int = 10,
+        backend_factory: Optional[Any] = None,
     ):
         """V8Env 构造器。
 
@@ -387,9 +296,19 @@ class V8Env:
         # 遗留字段（兼容 trainer / parallel_env / pretrain 调用签名），内部不再触发模拟战
         self.deck_eval_freq = max(1, int(deck_eval_freq))
 
-        # 每局重置的运行时状态
-        self._runner: Optional[GameRunner] = None
-        self._adapter: Optional[TurnSolverAdapter] = None
+        # 引擎中间层（2026-06）：env 只跟 GameBackend 说话，不直接持有 GameRunner /
+        # TurnSolverAdapter。默认 StSRLBackend（包当前 StSRLSolver Python 引擎）；
+        # 日后可注入真机 / Rust 后端。backend_factory 可选注入（测试 / 换后端用）。
+        self._backend_factory = backend_factory or (
+            lambda: StSRLBackend(
+                character=self.character,
+                ascension=self.ascension,
+                verbose=self.verbose,
+                solver_budgets=self._solver_budgets,
+                combat_net_wrapper=self._combat_net_wrapper,
+            )
+        )
+        self._backend: Optional[GameBackend] = None
         self._current_state: Optional[V8State] = None
 
         # reward 计算需要的历史
@@ -501,39 +420,16 @@ class V8Env:
         开局 deck_strength 直接置 None，state encoder 内已有 None 兜底。
         """
 
-        self._runner = GameRunner(
-            seed=seed,
-            ascension=self.ascension,
-            character=self.character,
-            skip_neow=False,  # V8 让 model 决策 Neow
-            verbose=self.verbose,
-        )
-        # Round 2：如果有 combat_net_wrapper，把它作为 search leaf evaluator
-        # 接进 adapter（用户原话第 2 点：搜索 + 模型联合）。
-        #
-        # 阶段 0 清场（docs/v8_rl_fix_plan_2026-05-29.md）：当前 combat_net_wrapper
-        # 内的 _CombatObsValueHead 是**随机权重桩**，被搜索当 leaf value 用、与手写
-        # 启发按 0.7*neural + 0.3*heuristic 混合（turn_solver.py），等于往战斗叶子
-        # 评估注入 70% 随机噪声。隔离测试（tools/v8_combat_isolated_test.py mode B）
-        # 证明拔掉噪声、纯手写启发更稳（赢率↑、少丢血）。因此训练时**不再**把这个
-        # 随机桩传给 adapter（neural_eval=None 等效，走纯手写启发）。
-        # wrapper 类本身保留：阶段 5 接真正训练好的战斗网络后会重新启用。
-        adapter_kwargs: Dict[str, Any] = dict(
-            time_budget_ms=50.0,
-            node_budget=5_000,
-            solver_budgets=self._solver_budgets,
-        )
-        # 阶段 0：随机桩已禁用（不传 combat_net）；待阶段 5 接真网络后恢复下面这行。
-        # if self._combat_net_wrapper is not None:
-        #     adapter_kwargs["combat_net"] = self._combat_net_wrapper
-        self._adapter = TurnSolverAdapter(**adapter_kwargs)
-        self._adapter.reset()
+        # 引擎中间层（2026-06）：创建后端（内部建 GameRunner + TurnSolverAdapter）。
+        # combat_net 随机桩禁用等行为细节在 StSRLBackend.reset 内，与重构前一致。
+        self._backend = self._backend_factory()
+        self._backend.reset(seed)
 
         self._step_count = 0
         self._actions_taken = 0
         self._battles_finished = 0
         self._last_seed = seed
-        self._last_act_for_cache = self._runner.run_state.act
+        self._last_act_for_cache = self._backend.run_state.act
 
         # 诊断状态
         self._last_action_repr = ""
@@ -567,8 +463,8 @@ class V8Env:
         # runner.seed_string 是 StSRLSolver 内部使用的 seed token，
         # 与 trainer 传进来的 episode 级 seed 一一对应。
         try:
-            run_seed_str = str(getattr(self._runner, "seed_string", "") or "")
-            run_seed_int = getattr(self._runner, "seed", None)
+            run_seed_str = self._backend.seed_string
+            run_seed_int = self._backend.seed_int
             logger.info(
                 "[seed] ep=%s episode_seed=%d run_seed=%s run_seed_str=%s "
                 "ascension=%d character=%s",
@@ -586,7 +482,7 @@ class V8Env:
 
         # 构造初始 V8State；v5 起 deck_strength 填 card_scorer 牌组 5 维聚合当模型特征
         # （开局没打过仗 → 各维 0）。
-        state = _build_state_from_runner(self._runner)
+        state = self._backend.build_v8_state()
         self._fill_deck_strength_feature(state)
 
         self._current_state = state
@@ -604,7 +500,7 @@ class V8Env:
             done:       是否游戏结束
             info:       dict（debug：phase 变化 / 战斗发生 / 评估命中 等）
         """
-        if self._runner is None or self._current_state is None:
+        if self._backend is None or self._current_state is None:
             raise RuntimeError("V8Env: must call reset() before step()")
 
         step_t0 = time.time()
@@ -619,20 +515,20 @@ class V8Env:
         }
 
         # 记录 step 开始快照（detect node_reward 用）
-        rs = self._runner.run_state
-        self._step_start_phase = self._runner.phase
+        rs = self._backend.run_state
+        self._step_start_phase = self._backend.phase
         self._step_start_relics_count = len(getattr(rs, "relics", []) or [])
         self._step_start_max_hp = int(getattr(rs, "max_hp", 0) or 0)
 
         # 取当前可执行 actions（GameAction 对象 list）
-        engine_actions = self._runner.get_available_actions()
+        engine_actions = self._backend.get_available_actions()
         if not engine_actions:
             # 没合法 action：游戏卡死 / 结束 → 强制 terminal，让上层不要再 step
-            if not self._runner.game_over:
+            if not self._backend.game_over:
                 self._force_terminate_run(reason="step_no_actions")
             done = True
             reward = compute_final_reward(
-                game_won=bool(self._runner.game_won),
+                game_won=bool(self._backend.game_won),
                 final_hp_ratio=self._final_hp_ratio(),
             )
             info["phase_after"] = self._current_state.phase
@@ -681,12 +577,12 @@ class V8Env:
         stall_terminated = self._maybe_force_event_stall_terminate(chosen_action)
 
         # 执行 action
-        ok = self._runner.take_action(chosen_action)
+        ok = self._backend.take_action(chosen_action)
         self._actions_taken += 1
         if not ok:
             logger.warning(
                 "V8Env.step: take_action returned False at floor=%d phase=%s action=%s",
-                rs.floor, self._runner.phase.name, chosen_action,
+                rs.floor, self._backend.phase.name, chosen_action,
             )
             info["error"] = "take_action_failed"
 
@@ -703,18 +599,18 @@ class V8Env:
 
         # 推进结束 → 构造 next_state；v5 起 deck_strength 填 card_scorer 牌组 5 维聚合
         # 当模型特征（_log_combat_exit 已在本 step 期间用本场细账更新过 card_scorer）。
-        next_state = _build_state_from_runner(self._runner)
+        next_state = self._backend.build_v8_state()
         self._fill_deck_strength_feature(next_state)
         self._last_act_for_cache = next_state.act
         info["deck_strength_evaluated"] = True
 
         # node_reward detect
         node_reward = _detect_node_reward(
-            runner=self._runner,
+            backend=self._backend,
             prev_phase=self._step_start_phase,
             prev_relics_count=self._step_start_relics_count,
             prev_max_hp=self._step_start_max_hp,
-            next_phase=self._runner.phase,
+            next_phase=self._backend.phase,
         )
         info["node_reward"] = node_reward
 
@@ -739,11 +635,11 @@ class V8Env:
         )
 
         # done 判定
-        done = bool(self._runner.game_over)
+        done = bool(self._backend.game_over)
         if done:
             # 加上 final reward（通关 bonus + 存活 terminal；逐层进度已在上面 per-floor 给）
             step_reward += compute_final_reward(
-                game_won=bool(self._runner.game_won),
+                game_won=bool(self._backend.game_won),
                 final_hp_ratio=self._final_hp_ratio(),
             )
 
@@ -755,7 +651,7 @@ class V8Env:
                 self.max_steps_per_episode,
             )
             # 强制把 runner 标 terminal，防止万一上层不读 done 又调一次 step
-            if not self._runner.game_over:
+            if not self._backend.game_over:
                 self._force_terminate_run(reason="max_steps_exceeded")
             done = True
             info["error"] = "max_steps_exceeded"
@@ -771,16 +667,17 @@ class V8Env:
     def get_available_actions(self) -> List[str]:
         """当前 state 下的合法 action 字符串描述（pointer network 输入）。
 
-        idx 与下次 step(idx) 严格对齐 runner.get_available_actions()。
+        idx 与下次 step(idx) 严格对齐 backend.get_available_actions()。
         """
-        if self._runner is None or self._current_state is None:
+        if self._backend is None or self._current_state is None:
             return []
-        return get_available_actions(self._current_state, runner=self._runner)
+        return self._backend.get_available_action_labels(self._current_state)
 
     def close(self) -> None:
-        """清理资源：清 runner / adapter 引用。"""
-        self._runner = None
-        self._adapter = None
+        """清理资源：关后端 + 清状态引用。"""
+        if self._backend is not None:
+            self._backend.close()
+        self._backend = None
         self._current_state = None
         self._prev_state = None
         self._pending_combat_reward = 0.0
@@ -792,9 +689,21 @@ class V8Env:
         return self._current_state
 
     @property
-    def runner(self) -> Optional[GameRunner]:
-        """底层 GameRunner（外部只读访问，方便 debug；trainer 不应直接改 runner 状态）。"""
-        return self._runner
+    def backend(self) -> Optional[GameBackend]:
+        """底层 GameBackend（外部只读访问，方便 debug）。"""
+        return self._backend
+
+    @property
+    def runner(self) -> Optional[Any]:
+        """底层 GameRunner（外部只读访问，方便 debug；trainer 读 run_state 做 progress
+        signal）。中间层重构后通过 backend pass-through 暴露；行为不变。
+
+        注：trainer / v8_ppo_train 仍读 env.runner.run_state（floor/act/screen_type）
+        当 progress signal，保留此属性向后兼容。stage2 应改成走 backend 中性接口。
+        """
+        if self._backend is None:
+            return None
+        return getattr(self._backend, "_runner", None)
 
     def _build_runner_snapshot(self) -> Dict[str, Any]:
         """提取 runner / run_state 关键字段，供 parallel worker 跨进程回传 trainer。
@@ -805,10 +714,9 @@ class V8Env:
 
         返回 dict 字段（全部可 pickle 的基础类型）：
             floor, act, hp, max_hp, gold, game_won, deck_size, relics_size
-        runner 不存在时返回 0-填充的 dict（don't raise）。
+        backend 不存在时返回 0-填充的 dict（don't raise）。
         """
-        runner = self._runner
-        if runner is None:
+        if self._backend is None:
             return {
                 "floor": 0,
                 "act": 1,
@@ -819,17 +727,7 @@ class V8Env:
                 "deck_size": 0,
                 "relics_size": 0,
             }
-        rs = getattr(runner, "run_state", None)
-        return {
-            "floor": int(getattr(rs, "floor", 0) or 0) if rs else 0,
-            "act": int(getattr(rs, "act", 1) or 1) if rs else 1,
-            "hp": int(getattr(rs, "current_hp", 0) or 0) if rs else 0,
-            "max_hp": int(getattr(rs, "max_hp", 0) or 0) if rs else 0,
-            "gold": int(getattr(rs, "gold", 0) or 0) if rs else 0,
-            "game_won": bool(getattr(runner, "game_won", False)),
-            "deck_size": len(getattr(rs, "deck", []) or []) if rs else 0,
-            "relics_size": len(getattr(rs, "relics", []) or []) if rs else 0,
-        }
+        return self._backend.build_runner_snapshot()
 
     # ---------------------------------------------------------------------
     # Internal: 内部 loop 推进到元决策 phase
@@ -842,16 +740,15 @@ class V8Env:
 
         返回：本次推进过程中是否发生过 COMBAT（True 即战斗结束，触发 post-battle）。
         """
-        assert self._runner is not None
-        assert self._adapter is not None
+        assert self._backend is not None
 
         battle_happened = False
         guard = 0
         guard_cap = self.max_steps_per_episode * 4  # internal step 比 RL step 多
 
-        while not self._runner.game_over and guard < guard_cap:  # noqa: PLR0915
+        while not self._backend.game_over and guard < guard_cap:  # noqa: PLR0915
             guard += 1
-            phase = self._runner.phase
+            phase = self._backend.phase
 
             # 诊断：floor 变化日志（每次 floor 跳变都打一次，不管是哪种 room）
             # 放在最前面：MAP→COMBAT 中间 floor 已 +1，combat enter 之前先打
@@ -883,12 +780,12 @@ class V8Env:
                 if self._in_combat:
                     # combat 中游戏直接结束 → 一般是 defeat
                     self._log_combat_exit(
-                        reason="defeat" if not self._runner.game_won else "victory"
+                        reason="defeat" if not self._backend.game_won else "victory"
                     )
                 return battle_happened
 
             # 其他 phase（不应到这里）：取第一个合法 action 推进
-            actions = self._runner.get_available_actions()
+            actions = self._backend.get_available_actions()
             if not actions:
                 logger.warning(
                     "V8Env._advance: no actions available at phase=%s, abort",
@@ -899,13 +796,13 @@ class V8Env:
                 return battle_happened
             self._last_action_repr = _safe_action_repr(actions[0])
             self._recent_actions.append(self._last_action_repr)
-            self._runner.take_action(actions[0])
+            self._backend.take_action(actions[0])
             self._actions_taken += 1
 
         # while 退出时如果还在 combat 但 game_over（defeat 或最终 victory），补打 exit
-        if self._in_combat and self._runner.game_over:
+        if self._in_combat and self._backend.game_over:
             self._log_combat_exit(
-                reason="victory" if self._runner.game_won else "defeat"
+                reason="victory" if self._backend.game_won else "defeat"
             )
 
         if guard >= guard_cap:
@@ -924,9 +821,9 @@ class V8Env:
 
     def _log_combat_enter(self) -> None:
         """[combat] enter 日志（每场战斗起始打一次）+ 记录战斗 reward 快照。"""
-        assert self._runner is not None
-        rs = self._runner.run_state
-        enemies = _combat_enemies_brief(self._runner)
+        assert self._backend is not None
+        rs = self._backend.run_state
+        enemies = _combat_enemies_brief(self._backend)
         names = [e["id"] for e in enemies]
         self._in_combat = True
         self._combat_enter_hp = int(getattr(rs, "current_hp", 0) or 0)
@@ -939,7 +836,7 @@ class V8Env:
             int(e.get("max_hp", 0) or 0) for e in enemies
         )
         try:
-            room_type = self._runner.current_room_type or "monster"
+            room_type = self._backend.current_room_type or "monster"
         except Exception:  # noqa: BLE001
             room_type = "?"
         deck_size = len(getattr(rs, "deck", []) or [])
@@ -959,8 +856,8 @@ class V8Env:
           让 _advance_to_meta_decision 在 reward 处理完落到 MAP 时补打 [deck]。
         - 算本场 combat_reward 加到 _pending_combat_reward（下次 step() 取出来一次性塞 reward）。
         """
-        assert self._runner is not None
-        rs = self._runner.run_state
+        assert self._backend is not None
+        rs = self._backend.run_state
         hp_after = int(getattr(rs, "current_hp", 0) or 0)
         turn_actions = self._actions_taken - self._combat_enter_turn_actions
 
@@ -970,7 +867,7 @@ class V8Env:
         # 此处转成纯 dict 快照存到 self._last_combat_card_log，给阶段 2 评分用。
         # 本阶段只存、不算分。
         try:
-            raw_entries = getattr(self._runner, "last_combat_card_log", None) or []
+            raw_entries = self._backend.last_combat_card_log or []
             self._last_combat_card_log = [
                 {
                     "turn": int(getattr(e, "turn", 0) or 0),
@@ -994,7 +891,7 @@ class V8Env:
         # 真实回合数）。current_combat 万一还活着也再读一次取最大值兜底。
         turns = int(self._last_combat_turn or 0)
         try:
-            cc = getattr(self._runner, "current_combat", None)
+            cc = self._backend.current_combat
             if cc is not None:
                 st = getattr(cc, "state", None)
                 if st is not None:
@@ -1015,7 +912,7 @@ class V8Env:
             # 拿剩余敌人 hp 总和（current_combat 可能还活着）
             remaining_hp = 0
             try:
-                cc = getattr(self._runner, "current_combat", None)
+                cc = self._backend.current_combat
                 if cc is not None:
                     st = getattr(cc, "state", None)
                     if st is not None:
@@ -1063,7 +960,7 @@ class V8Env:
 
         # 这场战斗的 room type（boss 相关奖励都用它判定，算一次）。
         try:
-            rt0 = self._runner.current_room_type
+            rt0 = self._backend.current_room_type
         except Exception:  # noqa: BLE001
             rt0 = None
         rt0_str = (rt0 or "").lower() if isinstance(rt0, str) else \
@@ -1098,7 +995,7 @@ class V8Env:
         # 胜利 + elite/boss → 准备 [deck] 日志（等 reward 处理完）
         if reason == "victory":
             try:
-                rt = self._runner.current_room_type
+                rt = self._backend.current_room_type
             except Exception:  # noqa: BLE001
                 rt = None
             rt_str = (rt or "").lower() if isinstance(rt, str) else \
@@ -1116,13 +1013,11 @@ class V8Env:
         否则 fallback 到 current_room_type（只在 combat 时设 monster/elite/boss）。
         NEOW（floor=0，map_position 在 start）返回 'unknown'。
         """
-        assert self._runner is not None
+        assert self._backend is not None
         # 先 try 地图上的 RoomType enum（覆盖 REST/SHOP/EVENT/TREASURE）
         rt_enum = None
         try:
-            getter = getattr(self._runner, "get_current_room_type", None)
-            if getter is not None:
-                rt_enum = getter()
+            rt_enum = self._backend.get_current_room_type()
         except Exception:  # noqa: BLE001
             rt_enum = None
         if rt_enum is not None:
@@ -1130,12 +1025,12 @@ class V8Env:
             return self._normalize_room_name(name)
         # fallback 到 combat 内置的 current_room_type 字符串（combat 中才设值）
         try:
-            rt = self._runner.current_room_type
+            rt = self._backend.current_room_type
         except Exception:  # noqa: BLE001
             rt = None
         # NEOW / 初始位置：current_room_type 默认 'monster' 是误导，
         # 这里只有 phase=COMBAT 时才信任它
-        if self._runner.phase == GamePhase.COMBAT:
+        if self._backend.phase == GamePhase.COMBAT:
             if isinstance(rt, str) and rt:
                 return self._normalize_room_name(rt)
             if rt is not None:
@@ -1185,9 +1080,9 @@ class V8Env:
 
         死亡局 current_hp=0 → 0；满血通关 → 1。拿不到 max_hp（防除零）退 0。
         """
-        if self._runner is None:
+        if self._backend is None:
             return 0.0
-        rs = self._runner.run_state
+        rs = self._backend.run_state
         cur_hp = int(getattr(rs, "current_hp", 0) or 0)
         max_hp = int(getattr(rs, "max_hp", 0) or 0)
         if max_hp <= 0:
@@ -1201,8 +1096,8 @@ class V8Env:
         compute_floor_progress_reward 到 _pending_floor_reward（step() 取出塞进 reward）。
         _last_logged_floor 初值 -1（sentinel）时只记录不发奖（首次进图基线）。
         """
-        assert self._runner is not None
-        rs = self._runner.run_state
+        assert self._backend is not None
+        rs = self._backend.run_state
         cur_floor = int(getattr(rs, "floor", 0) or 0)
         if cur_floor == self._last_logged_floor:
             return
@@ -1225,12 +1120,12 @@ class V8Env:
     def _maybe_log_deck(self) -> None:
         """如果有 pending elite/boss victory，且现在落在 MAP_NAVIGATION（reward 已处理完），
         打一行 [deck] 日志并清 pending。"""
-        assert self._runner is not None
+        assert self._backend is not None
         if self._pending_deck_room is None:
             return
-        if self._runner.phase != GamePhase.MAP_NAVIGATION:
+        if self._backend.phase != GamePhase.MAP_NAVIGATION:
             return
-        rs = self._runner.run_state
+        rs = self._backend.run_state
         # 按 (card_id, upgraded) 计数
         counter: Counter = Counter()
         for c in getattr(rs, "deck", []) or []:
@@ -1271,11 +1166,11 @@ class V8Env:
 
         全部 introspection 用 try/except 兜底，缺/改字段不影响训练。
         """
-        if self._runner is None:
+        if self._backend is None:
             return
         try:
-            cur_phase = self._runner.phase
-            cur_event_state = getattr(self._runner, "current_event_state", None)
+            cur_phase = self._backend.phase
+            cur_event_state = self._backend.current_event_state
             in_event = (
                 cur_phase == GamePhase.EVENT
                 and cur_event_state is not None
@@ -1296,10 +1191,10 @@ class V8Env:
                 # 收集 choices（防御性，调用 runner 的高层 API）
                 choices_repr: List[str] = []
                 try:
-                    eh = getattr(self._runner, "event_handler", None)
+                    eh = self._backend.event_handler
                     if eh is not None:
                         choice_list = eh.get_available_choices(
-                            cur_event_state, self._runner.run_state
+                            cur_event_state, self._backend.run_state
                         )
                         for ch in choice_list:
                             idx = getattr(ch, "index", "?")
@@ -1311,7 +1206,7 @@ class V8Env:
                         type(e).__name__, e,
                     )
 
-                rs = self._runner.run_state
+                rs = self._backend.run_state
                 if self._last_event_phase is None or self._last_event_id != event_id:
                     # enter（要么之前不在 event，要么 event_id 跳变了）
                     logger.info(
@@ -1345,7 +1240,7 @@ class V8Env:
             else:
                 # 不在 EVENT phase：如果之前在，补 exit
                 if self._last_event_phase is not None:
-                    rs = self._runner.run_state
+                    rs = self._backend.run_state
                     cur_phase_name = getattr(cur_phase, "name", str(cur_phase))
                     # exit reason：根据 cur_phase 推测
                     if cur_phase == GamePhase.COMBAT:
@@ -1392,10 +1287,10 @@ class V8Env:
         action_idx + n_available + floor + hp 快照。
         log 量 = 元决策 step 数（每局几百行级），可控且可 grep。
         """
-        if self._runner is None or self._current_state is None:
+        if self._backend is None or self._current_state is None:
             return
         try:
-            rs = self._runner.run_state
+            rs = self._backend.run_state
             phase_str = self._current_state.phase or "?"
             action_str = _safe_action_repr(chosen_action)
             logger.info(
@@ -1431,18 +1326,18 @@ class V8Env:
         labels = model 看到的 action 字符串（get_available_actions 返回值，与
         engine_actions 一一对齐）；如长度对不上 fallback 用 _safe_action_repr。
         """
-        if self._runner is None or self._current_state is None:
+        if self._backend is None or self._current_state is None:
             return
         phase_str = self._current_state.phase or ""
         # 跳过 EVENT（已有 [event] choice）和 COMBAT（走 search adapter，不进这里）和未知
         if phase_str in ("EVENT", "COMBAT", ""):
             return
         try:
-            rs = self._runner.run_state
+            rs = self._backend.run_state
             # 取 model-visible label 列表（与 engine_actions 等长）
             try:
-                labels = get_available_actions(
-                    self._current_state, runner=self._runner
+                labels = self._backend.get_available_action_labels(
+                    self._current_state
                 )
             except Exception:  # noqa: BLE001
                 labels = []
@@ -1486,12 +1381,12 @@ class V8Env:
         """
         if not isinstance(action, EventAction):
             return
-        if self._runner is None:
+        if self._backend is None:
             return
         try:
-            rs = self._runner.run_state
+            rs = self._backend.run_state
             choice_idx = int(getattr(action, "choice_index", -1))
-            cur_event_state = getattr(self._runner, "current_event_state", None)
+            cur_event_state = self._backend.current_event_state
             event_id = "?"
             event_phase_str = "?"
             choice_text = ""
@@ -1502,10 +1397,10 @@ class V8Env:
                     getattr(ep, "name", str(ep)) if ep is not None else "?"
                 )
                 try:
-                    eh = getattr(self._runner, "event_handler", None)
+                    eh = self._backend.event_handler
                     if eh is not None:
                         choice_list = eh.get_available_choices(
-                            cur_event_state, self._runner.run_state
+                            cur_event_state, self._backend.run_state
                         )
                         for ch in choice_list:
                             if getattr(ch, "index", None) == choice_idx:
@@ -1547,10 +1442,10 @@ class V8Env:
         """
         if not isinstance(action, EventAction):
             return False
-        if self._runner is None:
+        if self._backend is None:
             return False
         try:
-            cur_event_state = getattr(self._runner, "current_event_state", None)
+            cur_event_state = self._backend.current_event_state
             event_id = "?"
             event_phase_str = "?"
             if cur_event_state is not None:
@@ -1562,7 +1457,7 @@ class V8Env:
             self._event_choice_count[event_id] += 1
             count = self._event_choice_count[event_id]
             if count >= self._event_stall_threshold:
-                rs = self._runner.run_state
+                rs = self._backend.run_state
                 logger.warning(
                     "[event_stall] ep=%s event_id=%s count=%d threshold=%d "
                     "event_phase=%s floor=%s act=%s hp=%s/%s FORCE_TERMINATE",
@@ -1582,9 +1477,9 @@ class V8Env:
 
     def _log_guard_cap(self, *, battle_happened: bool, guard_cap: int) -> None:
         """guard_cap 触发时打详细诊断日志（key=value 单行，便于 grep）。"""
-        assert self._runner is not None
-        rs = self._runner.run_state
-        cur_phase = self._runner.phase
+        assert self._backend is not None
+        rs = self._backend.run_state
+        cur_phase = self._backend.phase
         phase_name = getattr(cur_phase, "name", str(cur_phase))
         # 当前位置 (map_position)
         mp = getattr(rs, "map_position", None)
@@ -1593,9 +1488,9 @@ class V8Env:
 
         # combat-specific 字段（不在 combat 时给 0）
         in_combat = cur_phase == GamePhase.COMBAT or self._in_combat
-        enemies = _combat_enemies_brief(self._runner) if in_combat else []
+        enemies = _combat_enemies_brief(self._backend) if in_combat else []
         hand_size, draw_size, discard_size = (
-            _combat_pile_sizes(self._runner) if in_combat else (0, 0, 0)
+            _combat_pile_sizes(self._backend) if in_combat else (0, 0, 0)
         )
 
         logger.warning(
@@ -1616,94 +1511,42 @@ class V8Env:
     def _force_terminate_run(self, *, reason: str) -> None:
         """强制把当前 run 标成 terminal（loss）。
 
-        上层 step() 会读 runner.game_over → done=True，trainer 走完正常的
+        上层 step() 会读 backend.game_over → done=True，trainer 走完正常的
         end-of-episode 流程（compute_final_reward / 关闭 env / 下一 episode）。
+        实际置位由 backend.force_terminate() 完成（中间层重构后行为不变）。
         """
-        assert self._runner is not None
-        try:
-            self._runner.game_over = True
-            self._runner.game_won = False
-            self._runner.phase = GamePhase.RUN_COMPLETE
-        except Exception as e:  # noqa: BLE001
-            # 兜底：即便 runner 内部状态异常无法赋值，也要让 done=True，靠
-            # env.step 自己的 _runner.game_over 读取分支兜底
-            logger.warning(
-                "V8Env._force_terminate_run(reason=%s): set attrs failed: %s: %s",
-                reason, type(e).__name__, e,
-            )
+        assert self._backend is not None
+        self._backend.force_terminate()
 
     def _run_combat_turn(self) -> None:
-        """战斗内：调 TurnSolver 选一个 CombatAction 执行。
+        """战斗内：让 backend 走一个 CombatAction（封装 TurnSolver 搜索 + fallback）。
 
-        与 v8_bot._pick_action(COMBAT) 同套搜索预算。每次只走一个 action（因为
-        runner.phase 在战斗里一直是 COMBAT，外层 while 会重复进来直到 COMBAT 结束）。
+        中间层重构（2026-06）：搜索 + take_action 逻辑搬到 backend.run_combat_turn；
+        env 仍负责 combat turn 缓存 / recent_actions / _actions_taken 计数，行为不变。
 
-        简化版本（不接 SIGALRM 硬超时）：搜索内部已有 deadline，hard cap 由
-        adapter 自身的 multi_turn deadline 控制。
+        每次只走一个 action（phase 在战斗里一直是 COMBAT，外层 while 重复进来直到结束）。
         """
-        assert self._runner is not None
-        assert self._adapter is not None
+        assert self._backend is not None
 
-        actions = self._runner.get_available_actions()
-        if not actions:
+        result = self._backend.run_combat_turn(solver_budgets=self._solver_budgets)
+        if result.get("no_actions"):
             return
 
-        # 阶段 0：战斗进行中 current_combat 还在，缓存真实回合数供 [combat] exit 用
-        # （战斗结束 current_combat 被置 None，exit 时直接读会拿不到 → fallback 到
-        # turn_actions，导致日志 turns 实际等于动作数而非真实回合数）。
-        try:
-            cc = getattr(self._runner, "current_combat", None)
-            if cc is not None:
-                st = getattr(cc, "state", None)
-                if st is not None:
-                    t = int(getattr(st, "turn", 0) or 0)
-                    if t > self._last_combat_turn:
-                        self._last_combat_turn = t
-        except Exception:  # noqa: BLE001
-            pass
+        # 阶段 0：缓存战斗进行中读到的真实回合数（backend 在动作前读 current_combat.state.turn），
+        # 供 [combat] exit 用（战斗结束 current_combat 被置 None 拿不到）。
+        t = int(result.get("turn", 0) or 0)
+        if t > self._last_combat_turn:
+            self._last_combat_turn = t
 
-        room_type = self._runner.current_room_type or "monster"
-
-        # 同步 multi_turn 的外层 deadline 与 cap_ms 一致（与 v8_bot 一致）
-        rt_key = (room_type or "monster").lower() if isinstance(room_type, str) else "monster"
-        budgets = self._solver_budgets.get(rt_key)
-        cap_ms = budgets[2] if budgets else 3000.0
-        try:
-            self._adapter._multi_turn.time_budget_ms = float(cap_ms)
-        except (AttributeError, Exception):  # noqa: BLE001
-            pass
-
-        # 直接调 adapter（不接 SIGALRM；smoke 阶段足够，hard timeout 在 RL trainer 阶段
-        # 视情况再补，避免 env 本身带太多副作用）
-        action: Optional[Any] = None
+        # 计数 + recent_actions：与重构前等价。combat_search_calls 每回合 +1。
         self.combat_search_calls += 1
-        try:
-            action = self._adapter.pick_action(actions, self._runner, room_type=room_type)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "V8Env._run_combat_turn: adapter.pick_action raised %s: %s",
-                type(e).__name__, e,
-            )
-
-        if action is None:
-            # fallback：找 end_turn，否则第一个
-            action = next(
-                (
-                    a for a in actions
-                    if isinstance(a, CombatAction) and a.action_type == "end_turn"
-                ),
-                actions[0],
-            )
-
-        self._last_action_repr = _safe_action_repr(action)
+        self._last_action_repr = result.get("action_repr", "") or ""
         self._recent_actions.append(self._last_action_repr)
-        ok = self._runner.take_action(action)
         self._actions_taken += 1
-        if not ok:
-            # 失败：强制取第一个 fallback
-            self._last_action_repr = _safe_action_repr(actions[0])
+        if result.get("fallback_used"):
+            # take_action 失败时 backend 已补走 actions[0]；env 同步计数 / recent。
+            self._last_action_repr = result.get("fallback_repr", "") or ""
             self._recent_actions.append(self._last_action_repr)
-            self._runner.take_action(actions[0])
             self._actions_taken += 1
 
 
