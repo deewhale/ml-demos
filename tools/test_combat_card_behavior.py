@@ -41,6 +41,11 @@ def check_expectation(probe: CombatProbe, exp: CardExpectation) -> List[str]:
             got = res.enemy_statuses.get(name, 0)
             if got != layers:
                 fails.append(f"敌人状态 {name}={got} != 期望 {layers}")
+    if exp.expect_player_status is not None:
+        for name, layers in exp.expect_player_status.items():
+            got = res.player_statuses.get(name, 0)
+            if got != layers:
+                fails.append(f"玩家状态 {name}={got} != 期望 {layers}")
     return fails
 
 
