@@ -90,3 +90,6 @@ data/v8_smoke/
 data/v8_smoke_resume_base/
 data/v8_smoke_resume_test/
 logs_smoke_stderr.txt
+
+# Rust 引擎持久 worktree（不追踪，避免污染 git status）
+external/stsrl_rust_main/
