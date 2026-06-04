@@ -31,6 +31,8 @@ def test_combat_setup_and_result_are_neutral():
         enemy_statuses={},
         player_statuses={},
         effects=[{"type": "damage", "target": "JawWorm", "amount": 6}],
+        all_enemy_hp_deltas=[6],
+        all_enemy_statuses=[{}],
     )
     assert res.success is True
     assert res.enemy_hp_delta == 6

@@ -26,6 +26,8 @@ class CardExpectation:
     expect_energy_delta: Optional[int] = None
     expect_enemy_status: Optional[Dict[str, int]] = None  # 子集匹配
     expect_player_status: Optional[Dict[str, int]] = None  # 子集匹配（玩家自身状态）
+    expect_all_enemies_hp_delta: Optional[int] = None      # 每个敌人都应掉这么多
+    expect_all_enemies_status: Optional[Dict[str, int]] = None  # 每个敌人都应有这些状态（子集匹配）
     source: str = ""                                      # 标准答案出处
 
 
@@ -454,5 +456,83 @@ ORACLE: List[CardExpectation] = [
         expect_player_status={'Strength': 2},
         expect_energy_delta=0,
         source='https://slaythespire.wiki.gg/wiki/J.A.X.',
+    ),
+    # ===== 第三轮：multi_enemy AoE 卡（enemy_count=3 验全体）=====
+    # 固定全体伤害 / debuff 卡
+    CardExpectation(
+        card_id='Cleave',
+        label='Cleave AoE',
+        setup=CombatSetup(hand=('Cleave',), enemy_count=3),
+        target_index=0,
+        expect_all_enemies_hp_delta=8,
+        expect_energy_delta=1,
+        source='https://slaythespire.wiki.gg/wiki/Cleave (AoE 8 to all)',
+    ),
+    CardExpectation(
+        card_id='Thunderclap',
+        label='Thunderclap AoE',
+        setup=CombatSetup(hand=('Thunderclap',), enemy_count=3),
+        target_index=0,
+        expect_all_enemies_hp_delta=4,
+        expect_all_enemies_status={'Vulnerable': 1},
+        expect_energy_delta=1,
+        source='https://slaythespire.wiki.gg/wiki/Thunderclap (AoE 4 + 1 Vulnerable to all)',
+    ),
+    CardExpectation(
+        card_id='Intimidate',
+        label='Intimidate AoE',
+        setup=CombatSetup(hand=('Intimidate',), enemy_count=3),
+        target_index=0,
+        expect_all_enemies_hp_delta=0,
+        expect_all_enemies_status={'Weakened': 1},
+        expect_energy_delta=0,
+        source='https://slaythespire.wiki.gg/wiki/Intimidate (AoE 1 Weak to all, exhaust)',
+    ),
+    CardExpectation(
+        card_id='Shockwave',
+        label='Shockwave AoE',
+        setup=CombatSetup(hand=('Shockwave',), enemy_count=3),
+        target_index=0,
+        expect_all_enemies_hp_delta=0,
+        expect_all_enemies_status={'Weakened': 3, 'Vulnerable': 3},
+        expect_energy_delta=2,
+        source='https://slaythespire.wiki.gg/wiki/Shockwave (cost 2; AoE 3 Weak + 3 Vulnerable to all, exhaust)',
+    ),
+    CardExpectation(
+        card_id='Immolate',
+        label='Immolate AoE',
+        setup=CombatSetup(hand=('Immolate',), enemy_count=3),
+        target_index=0,
+        expect_all_enemies_hp_delta=21,
+        expect_energy_delta=2,
+        source='https://slaythespire.wiki.gg/wiki/Immolate (AoE 21 to all + Burn to discard)',
+    ),
+    CardExpectation(
+        card_id='Reaper',
+        label='Reaper AoE',
+        setup=CombatSetup(hand=('Reaper',), enemy_count=3),
+        target_index=0,
+        expect_all_enemies_hp_delta=4,
+        expect_energy_delta=2,
+        source='https://slaythespire.wiki.gg/wiki/Reaper (AoE 4 to all + lifesteal, exhaust)',
+    ),
+    CardExpectation(
+        card_id='Dramatic Entrance',
+        label='Dramatic Entrance AoE',
+        setup=CombatSetup(hand=('Dramatic Entrance',), enemy_count=3),
+        target_index=0,
+        expect_all_enemies_hp_delta=8,
+        expect_energy_delta=0,
+        source='https://slaythespire.wiki.gg/wiki/Dramatic_Entrance (AoE 8 to all, exhaust)',
+    ),
+    # 随机分配伤害卡：多敌不可逐敌确定性断言，改用 enemy_count=1 验单敌总伤
+    CardExpectation(
+        card_id='Sword Boomerang',
+        label='Sword Boomerang (single-enemy, 随机分配仅单敌可确定测)',
+        setup=CombatSetup(hand=('Sword Boomerang',), enemy_count=1),
+        target_index=0,
+        expect_enemy_hp_delta=9,
+        expect_energy_delta=1,
+        source='https://slaythespire.wiki.gg/wiki/Sword_Boomerang (3x3 random target; single enemy all hits land = 9)',
     ),
 ]

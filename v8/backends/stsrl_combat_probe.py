@@ -35,35 +35,43 @@ class StSRLCombatProbe:
     ) -> CardPlayResult:
         engine = self._build_engine(setup)
         read_idx = target_index if target_index >= 0 else 0
-        enemy_hp_before = engine.state.enemies[read_idx].hp
+        hp_before = [e.hp for e in engine.state.enemies]
         block_before = engine.state.player.block
         energy_before = engine.state.energy
 
         result: Dict[str, Any] = engine.play_card(hand_index, target_index)
 
-        enemy_after = engine.state.enemies[read_idx]
+        enemies_after = engine.state.enemies
+        all_hp_deltas = [hp_before[i] - enemies_after[i].hp for i in range(len(enemies_after))]
+        all_statuses = [dict(e.statuses) for e in enemies_after]
+        enemy_after = enemies_after[read_idx]
         return CardPlayResult(
             success=bool(result.get("success", False)),
-            enemy_hp_delta=enemy_hp_before - enemy_after.hp,
+            enemy_hp_delta=all_hp_deltas[read_idx],
             player_block_delta=engine.state.player.block - block_before,
             energy_delta=energy_before - engine.state.energy,
             enemy_statuses=dict(enemy_after.statuses),
             player_statuses=dict(engine.state.player.statuses),
             effects=list(result.get("effects", []) or []),
+            all_enemy_hp_deltas=all_hp_deltas,
+            all_enemy_statuses=all_statuses,
         )
 
     @staticmethod
     def _build_engine(setup: CombatSetup):
-        enemy = create_enemy(
-            setup.enemy_id,
-            GameRandom(_ENEMY_SEED),
-            ascension=0,
-            hp_rng=GameRandom(_ENEMY_SEED),
-        )
-        enemy.state.current_hp = setup.enemy_hp
-        enemy.state.max_hp = setup.enemy_hp
+        enemies = []
+        for i in range(setup.enemy_count):
+            enemy = create_enemy(
+                setup.enemy_id,
+                GameRandom(_ENEMY_SEED + i),
+                ascension=0,
+                hp_rng=GameRandom(_ENEMY_SEED + i),
+            )
+            enemy.state.current_hp = setup.enemy_hp
+            enemy.state.max_hp = setup.enemy_hp
+            enemies.append(enemy)
         engine = create_combat_from_enemies(
-            enemies=[enemy],
+            enemies=enemies,
             player_hp=setup.player_hp,
             player_max_hp=setup.player_hp,
             deck=list(setup.hand),

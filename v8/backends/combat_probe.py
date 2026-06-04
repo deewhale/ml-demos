@@ -22,6 +22,7 @@ class CombatSetup:
     relics: Tuple[str, ...] = ()
     player_block: int = 0          # 出牌前预设玩家格挡（测 Body Slam 等）
     player_strength: int = 0       # 出牌前预设玩家力量（测 Heavy Blade 等；可为负）
+    enemy_count: int = 1           # 战斗中敌人数量（测 AoE 卡）
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ class CardPlayResult:
     enemy_statuses: Dict[str, int]   # 目标敌人出牌后的状态层数
     player_statuses: Dict[str, int]  # 玩家出牌后的状态层数
     effects: List[Dict[str, Any]]    # play_card 返回的结构化 effects（纯 dict）
+    all_enemy_hp_deltas: List[int]            # 每个敌人的掉血（按 enemies 顺序）
+    all_enemy_statuses: List[Dict[str, int]]  # 每个敌人出牌后的状态
 
 
 @runtime_checkable
