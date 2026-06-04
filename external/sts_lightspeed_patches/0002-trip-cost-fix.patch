@@ -1,0 +1,20 @@
+diff --git a/include/constants/Cards.h b/include/constants/Cards.h
+index 9583f6c..e3aba7c 100644
+--- a/include/constants/Cards.h
++++ b/include/constants/Cards.h
+@@ -738,6 +738,7 @@ namespace sts {
+             case CardId::SECRET_WEAPON:
+             case CardId::SWIFT_STRIKE:
+             case CardId::THINKING_AHEAD:
++            case CardId::TRIP: // 无色 Trip 是 0 费（wiki + StSRLSolver 一致）；原实现错放在 1 费组
+             case CardId::VIOLENCE:
+             case CardId::WARCRY:
+                 return 0;
+@@ -752,7 +753,6 @@ namespace sts {
+             case CardId::STRIKE_PURPLE:
+             case CardId::STRIKE_RED:
+             case CardId::SWORD_BOOMERANG:
+-            case CardId::TRIP:
+             case CardId::TRUE_GRIT:
+             case CardId::WILD_STRIKE:
+                 return 1;

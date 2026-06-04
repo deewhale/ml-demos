@@ -1,0 +1,20 @@
+diff --git a/src/combat/BattleContext.cpp b/src/combat/BattleContext.cpp
+index 965faef..76ca3d8 100644
+--- a/src/combat/BattleContext.cpp
++++ b/src/combat/BattleContext.cpp
+@@ -1263,10 +1263,11 @@ void BattleContext::useSkillCard() {
+             break;
+ 
+         case CardId::DARK_SHACKLES:
+-            addToBot( Actions::DebuffEnemy<MS::STRENGTH>(t, up ? 15 : 9) );
+-            if (monsters.arr[t].hasStatus<MS::ARTIFACT>()) {
+-                addToBot( Actions::BuffEnemy<MS::SHACKLED>(t, up ? 15 : 9) );
+-            }
++            // Dark Shackles: 目标本回合「失去 X 力量」（debuff），回合开始时由 SHACKLED 还回去。
++            // 原实现给的是正 +X（符号反了，实际给敌人加力量），且只在 ARTIFACT 时才挂 SHACKLED。
++            // 正确语义：STRENGTH 减 X（临时），SHACKLED +X（敌人回合开始还原），二者恒成对出现。
++            addToBot( Actions::DebuffEnemy<MS::STRENGTH>(t, up ? -15 : -9, false) );
++            addToBot( Actions::BuffEnemy<MS::SHACKLED>(t, up ? 15 : 9) );
+             break;
+ 
+         case CardId::DEEP_BREATH:

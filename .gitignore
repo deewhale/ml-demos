@@ -76,7 +76,11 @@ data/MNIST/
 scratch/
 
 # 外部 clone（仅参考用，不入库）
-external/
+# 注：不能直接写 `external/`，否则其下的 sts_lightspeed_patches/ 无法用 ! 反选回来
+# （git 规则：父目录被整体排除后无法再 re-include 子文件）。改为只排除已知的子目录。
+external/*
+# 例外：sts_lightspeed 本地补丁记录必须入库（防重 clone 丢失，见该目录 README）
+!external/sts_lightspeed_patches/
 
 # web/ 数据产物（不入 git）
 web/data/*.sqlite
