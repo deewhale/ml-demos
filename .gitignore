@@ -93,3 +93,5 @@ logs_smoke_stderr.txt
 
 # Rust 引擎持久 worktree（不追踪，避免污染 git status）
 external/stsrl_rust_main/
+
+external/sts_lightspeed/
