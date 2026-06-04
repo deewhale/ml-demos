@@ -75,5 +75,7 @@ def test_starting_cards_behavior():
 
 
 if __name__ == "__main__":
-    test_starting_cards_behavior()
-    print("ALL PASS")
+    from v8.backends.stsrl_combat_probe import StSRLCombatProbe
+    probe = StSRLCombatProbe()
+    failed = run_all(probe)
+    print(f"\n[审计模式] 完成；{failed} 张未对上 wiki（红灯=疑似引擎坏卡，需人工核）")
