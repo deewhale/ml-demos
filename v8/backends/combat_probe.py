@@ -23,6 +23,9 @@ class CombatSetup:
     player_block: int = 0          # 出牌前预设玩家格挡（测 Body Slam 等）
     player_strength: int = 0       # 出牌前预设玩家力量（测 Heavy Blade 等；可为负）
     enemy_count: int = 1           # 战斗中敌人数量（测 AoE 卡）
+    draw_pile: Tuple[str, ...] = ()  # 预置抽牌堆卡 id（底->顶；测 Mind Blast/牌堆机制）
+    clear_draw_pile: bool = False    # True = 先清空引擎默认发的起始抽牌堆，让 draw_pile 确定可控
+    energy: int = -1               # 覆写出牌前能量（<0 = 不覆写，用 player_energy）；测 X 费卡缩放
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,15 @@ class CardPlayResult:
     effects: List[Dict[str, Any]]    # play_card 返回的结构化 effects（纯 dict）
     all_enemy_hp_deltas: List[int]            # 每个敌人的掉血（按 enemies 顺序）
     all_enemy_statuses: List[Dict[str, int]]  # 每个敌人出牌后的状态
+    # ---- 牌堆内容（pile inspection；探针不支持则留空 list / 0）----
+    hand: Tuple[str, ...] = ()               # 出牌后手牌卡名
+    draw_pile: Tuple[str, ...] = ()          # 出牌后抽牌堆卡名（底->顶）
+    discard_pile: Tuple[str, ...] = ()       # 出牌后弃牌堆卡名
+    exhaust_pile: Tuple[str, ...] = ()       # 出牌后消耗堆卡名
+    hand_size: int = 0
+    draw_pile_size: int = 0
+    discard_pile_size: int = 0
+    exhaust_pile_size: int = 0
 
 
 @runtime_checkable

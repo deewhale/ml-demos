@@ -84,6 +84,33 @@ _PY_TO_CARDID: Dict[str, str] = {
     "Reaper": "REAPER",
     "Dramatic Entrance": "DRAMATIC_ENTRANCE",
     "Sword Boomerang": "SWORD_BOOMERANG",
+    # ---- 本轮新接：pile_inspection / deck_composition / x_cost / multi_play / other ----
+    "Clash": "CLASH",
+    "Headbutt": "HEADBUTT",
+    "Perfected Strike": "PERFECTED_STRIKE",
+    "Wild Strike": "WILD_STRIKE",
+    "Reckless Charge": "RECKLESS_CHARGE",
+    "Power Through": "POWER_THROUGH",
+    "Sever Soul": "SEVER_SOUL",
+    "Fiend Fire": "FIEND_FIRE",
+    "Mind Blast": "MIND_BLAST",
+    "Whirlwind": "WHIRLWIND",
+    "Transmutation": "TRANSMUTATION",
+    "Rampage": "RAMPAGE",
+    "Burning Pact": "BURNING_PACT",
+    "True Grit": "TRUE_GRIT",
+    "Second Wind": "SECOND_WIND",
+    "Warcry": "WARCRY",
+    "Dual Wield": "DUAL_WIELD",
+    "Havoc": "HAVOC",
+    "Seeing Red": "SEEING_RED",
+    "Offering": "OFFERING",
+    "Bandage Up": "BANDAGE_UP",
+    "Master of Strategy": "MASTER_OF_STRATEGY",
+    "Infernal Blade": "INFERNAL_BLADE",
+    "Jack Of All Trades": "JACK_OF_ALL_TRADES",
+    "Hand of Greed": "HAND_OF_GREED",
+    "HandOfGreed": "HAND_OF_GREED",
 }
 
 
@@ -109,6 +136,11 @@ def _status_dict(entity: Dict) -> Dict[str, int]:
     _maybe(out, "Frail", entity.get("frail"))
     _maybe(out, "Dexterity", entity.get("dexterity"))
     _maybe(out, "Poison", entity.get("poison"))
+    # ---- 卡牌验收新增暴露字段 -> oracle canonical 键 ----
+    _maybe(out, "NoDraw", entity.get("no_draw"))         # Battle Trance
+    _maybe(out, "No Block", entity.get("no_block"))      # Panic Button
+    _maybe(out, "Barricade", entity.get("barricade"))    # Barricade
+    _maybe(out, "Shackled", entity.get("shackled"))      # Dark Shackles（敌人）
     return out
 
 
@@ -143,24 +175,35 @@ class LightspeedCombatProbe:
         else:
             encounter = self._single_encounter
 
-        # 2. 手牌：把目标卡放在 hand_index 位置，确切控制（不依赖随机抽牌）。
-        #    其余位置塞 Defend 占位（不影响目标卡判定）。
+        # 2. 手牌：按 setup.hand 原样映射每张牌（不再用 Defend 占位覆盖其它槽位）——
+        #    Sever Soul / Fiend Fire / Burning Pact / Clash 等依赖手牌真实构成的卡需要
+        #    确切的其它手牌，占位覆盖会污染判定。能映射的才进手牌；映射不到的占位用 Defend。
         hand = []
-        for i, c in enumerate(setup.hand):
-            hand.append(self._card_enum(c) if i == hand_index else sts.CardId.DEFEND_RED)
+        for c in setup.hand:
+            try:
+                hand.append(self._card_enum(c))
+            except CardNotMappedError:
+                hand.append(sts.CardId.DEFEND_RED)
         if not hand:
             hand = [card_enum]
+
+        # 出牌前能量：setup.energy 覆写优先，否则用 player_energy。
+        energy = setup.energy if setup.energy >= 0 else setup.player_energy
+        # 预置抽牌堆（Mind Blast / 牌堆机制 / deck_composition）
+        draw_pile = [self._card_enum(c) for c in setup.draw_pile]
 
         gc = sts.GameContext(sts.CharacterClass.IRONCLAD, 1, 0)
         bc = sts.make_test_combat(
             gc,
             encounter,
             player_hp=setup.player_hp,
-            energy=setup.player_energy,
+            energy=energy,
             hand=hand,
             enemy_hps=[setup.enemy_hp],  # 见下：会按实际怪数补齐
             strength=setup.player_strength,
             block=setup.player_block,
+            draw_pile=draw_pile,
+            clear_draw_pile=setup.clear_draw_pile,
         )
 
         snap_before = sts.get_combat_snapshot(bc)
@@ -171,11 +214,13 @@ class LightspeedCombatProbe:
                 gc,
                 encounter,
                 player_hp=setup.player_hp,
-                energy=setup.player_energy,
+                energy=energy,
                 hand=hand,
                 enemy_hps=[setup.enemy_hp] * n_enemies,
                 strength=setup.player_strength,
                 block=setup.player_block,
+                draw_pile=draw_pile,
+                clear_draw_pile=setup.clear_draw_pile,
             )
             snap_before = sts.get_combat_snapshot(bc)
             n_enemies = len(snap_before["enemies"])
@@ -189,8 +234,11 @@ class LightspeedCombatProbe:
 
         success = True
         try:
-            sts.play_card(bc, hand_index, tgt)
-        except Exception:  # 非法出牌 / binding 抛错
+            # binding 现在返回 bool：False = 引擎判定该卡当前不可打出（如 Clash 手里有
+            # 非攻击牌），已安全 no-op，不会崩溃。
+            played = sts.play_card(bc, hand_index, tgt)
+            success = bool(played)
+        except Exception:  # binding 抛错
             success = False
 
         snap_after = sts.get_combat_snapshot(bc)
@@ -210,6 +258,14 @@ class LightspeedCombatProbe:
             effects=[],  # binding 不给结构化 effects
             all_enemy_hp_deltas=all_hp_deltas,
             all_enemy_statuses=all_statuses,
+            hand=tuple(snap_after.get("hand", [])),
+            draw_pile=tuple(snap_after.get("draw_pile", [])),
+            discard_pile=tuple(snap_after.get("discard_pile", [])),
+            exhaust_pile=tuple(snap_after.get("exhaust_pile", [])),
+            hand_size=snap_after.get("hand_size", 0),
+            draw_pile_size=snap_after.get("draw_pile_size", 0),
+            discard_pile_size=snap_after.get("discard_pile_size", 0),
+            exhaust_pile_size=snap_after.get("exhaust_pile_size", 0),
         )
 
     def _card_enum(self, py_id: str):

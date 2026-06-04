@@ -28,7 +28,11 @@ def check_expectation(probe: CombatProbe, exp: CardExpectation) -> List[str]:
         exp.setup, hand_index=hand_index, target_index=exp.target_index
     )
     fails: List[str] = []
-    if not res.success:
+    if exp.expect_unplayable:
+        # 期望该卡当前不可打出：success 应为 False，且不掉血
+        if res.success:
+            fails.append("期望该卡不可打出，但引擎允许打出了")
+    elif not res.success:
         fails.append(f"play_card 未成功（effects={res.effects}）")
     if exp.expect_enemy_hp_delta is not None and res.enemy_hp_delta != exp.expect_enemy_hp_delta:
         fails.append(f"敌人掉血 {res.enemy_hp_delta} != 期望 {exp.expect_enemy_hp_delta}")
@@ -55,6 +59,30 @@ def check_expectation(probe: CombatProbe, exp: CardExpectation) -> List[str]:
             for name, layers in exp.expect_all_enemies_status.items():
                 if st.get(name, 0) != layers:
                     fails.append(f"敌人[{i}]状态 {name}={st.get(name,0)} != 期望全体 {layers}")
+    # ---- 牌堆维度 ----
+    if exp.expect_draw_pile_size is not None and res.draw_pile_size != exp.expect_draw_pile_size:
+        fails.append(f"抽牌堆张数 {res.draw_pile_size} != 期望 {exp.expect_draw_pile_size}")
+    if exp.expect_discard_pile_size is not None and res.discard_pile_size != exp.expect_discard_pile_size:
+        fails.append(f"弃牌堆张数 {res.discard_pile_size} != 期望 {exp.expect_discard_pile_size}")
+    if exp.expect_exhaust_pile_size is not None and res.exhaust_pile_size != exp.expect_exhaust_pile_size:
+        fails.append(f"消耗堆张数 {res.exhaust_pile_size} != 期望 {exp.expect_exhaust_pile_size}")
+    if exp.expect_hand_size is not None and res.hand_size != exp.expect_hand_size:
+        fails.append(f"手牌张数 {res.hand_size} != 期望 {exp.expect_hand_size}")
+
+    def _check_contains(pile, spec, label):
+        for name, n in spec.items():
+            got = sum(1 for c in pile if c == name)
+            if got < n:
+                fails.append(f"{label} 含 {name}={got} < 期望 ≥{n}（pile={list(pile)}）")
+
+    if exp.expect_draw_pile_contains is not None:
+        _check_contains(res.draw_pile, exp.expect_draw_pile_contains, "抽牌堆")
+    if exp.expect_discard_pile_contains is not None:
+        _check_contains(res.discard_pile, exp.expect_discard_pile_contains, "弃牌堆")
+    if exp.expect_exhaust_pile_contains is not None:
+        _check_contains(res.exhaust_pile, exp.expect_exhaust_pile_contains, "消耗堆")
+    if exp.expect_hand_contains is not None:
+        _check_contains(res.hand, exp.expect_hand_contains, "手牌")
     return fails
 
 
