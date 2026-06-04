@@ -38,21 +38,31 @@ from sts_paths import ensure_on_sys_path
 
 ensure_on_sys_path()
 
-# StSRLSolver 引擎 phase / action 类型枚举。
+# StSRLSolver 引擎 action 类型。
 # 中间层重构（2026-06）：env 不再直接 import GameRunner / TurnSolverAdapter，
 # 引擎生命周期 / 动作 / 战斗都走 GameBackend（默认 StSRLBackend）。
-# 这里仍 import GamePhase（phase 是 pass-through 引擎枚举，env 做 _META_PHASES
-# 等映射判定）和 EventAction（[event] 日志 isinstance 判定）。其余 action 类型
+# stage2 抹平 phase 透传债：backend.phase 已中性化为规范字符串，env 不再 import
+# GamePhase 枚举，phase 判定一律用 protocol 的 PHASE_* / META_PHASES 字符串。
+# 仍 import EventAction（[event] 日志 isinstance 判定）；其余 action 类型
 # （PathAction/NeowAction/RewardAction/...）env 不再直接引用。
 from packages.engine.game import (  # noqa: E402
-    GamePhase,
     EventAction,
 )
 
 # V8 内部模块
 from v8.state import V8State
 from v8.action_space import get_available_actions
-from v8.backends.protocol import GameBackend
+from v8.backends.protocol import (
+    GameBackend,
+    META_PHASES as _META_PHASES,
+    PHASE_COMBAT,
+    PHASE_EVENT,
+    PHASE_MAP,
+    PHASE_REST,
+    PHASE_RUN_COMPLETE,
+    PHASE_SHOP,
+    PHASE_TREASURE,
+)
 from v8.backends.stsrl_backend import StSRLBackend
 from v8.reward import (
     compute_step_reward,
@@ -72,32 +82,8 @@ from v8.card_scorer import CardScorer
 logger = logging.getLogger(__name__)
 
 
-# StSRLSolver GamePhase → V8 phase 名 映射
-_ENGINE_TO_V8_PHASE: Dict[Any, str] = {
-    GamePhase.NEOW: "NEOW",
-    GamePhase.MAP_NAVIGATION: "MAP",
-    GamePhase.COMBAT: "COMBAT",
-    GamePhase.COMBAT_REWARDS: "CARD_REWARDS",
-    GamePhase.EVENT: "EVENT",
-    GamePhase.SHOP: "SHOP",
-    GamePhase.REST: "REST",
-    GamePhase.TREASURE: "TREASURE",
-    GamePhase.BOSS_REWARDS: "BOSS_REWARDS",
-    GamePhase.RUN_COMPLETE: "RUN_COMPLETE",
-}
-
-
-# 元决策 phase（写入 RL trajectory）
-_META_PHASES = {
-    GamePhase.NEOW,
-    GamePhase.MAP_NAVIGATION,
-    GamePhase.COMBAT_REWARDS,
-    GamePhase.EVENT,
-    GamePhase.SHOP,
-    GamePhase.REST,
-    GamePhase.TREASURE,
-    GamePhase.BOSS_REWARDS,
-}
+# 规范 phase 字符串 / 元决策 phase 集合（_META_PHASES）由 protocol 提供，见上方
+# import（stage2 抹平 phase 透传债：backend.phase 返回规范字符串，env 字符串比较）。
 
 
 # Solver 预算（与 v8_bot.SOLVER_BUDGETS 对齐，让战斗内搜索行为一致）
@@ -219,20 +205,20 @@ def _detect_node_reward(
     if prev_phase is None or prev_phase == next_phase:
         return 0.0
 
-    if prev_phase == GamePhase.EVENT:
+    if prev_phase == PHASE_EVENT:
         if new_max_hp > prev_max_hp or new_relics_count > prev_relics_count:
             return NODE_REWARD_EVENT_SUCCESS
         return 0.0
 
-    if prev_phase == GamePhase.SHOP:
+    if prev_phase == PHASE_SHOP:
         if new_relics_count > prev_relics_count:
             return NODE_REWARD_SHOP_RELIC
         return 0.0
 
-    if prev_phase == GamePhase.REST:
+    if prev_phase == PHASE_REST:
         return NODE_REWARD_REST_USE
 
-    if prev_phase == GamePhase.TREASURE:
+    if prev_phase == PHASE_TREASURE:
         if new_relics_count > prev_relics_count:
             return NODE_REWARD_TREASURE
         return 0.0
@@ -582,7 +568,7 @@ class V8Env:
         if not ok:
             logger.warning(
                 "V8Env.step: take_action returned False at floor=%d phase=%s action=%s",
-                rs.floor, self._backend.phase.name, chosen_action,
+                rs.floor, self._backend.phase, chosen_action,
             )
             info["error"] = "take_action_failed"
 
@@ -767,7 +753,7 @@ class V8Env:
                 return battle_happened
 
             # 进入 COMBAT 内部 turn loop
-            if phase == GamePhase.COMBAT:
+            if phase == PHASE_COMBAT:
                 if not self._in_combat:
                     self._log_combat_enter()
                 battle_happened = True
@@ -776,7 +762,7 @@ class V8Env:
                 continue
 
             # RUN_COMPLETE：游戏结束
-            if phase == GamePhase.RUN_COMPLETE:
+            if phase == PHASE_RUN_COMPLETE:
                 if self._in_combat:
                     # combat 中游戏直接结束 → 一般是 defeat
                     self._log_combat_exit(
@@ -789,10 +775,10 @@ class V8Env:
             if not actions:
                 logger.warning(
                     "V8Env._advance: no actions available at phase=%s, abort",
-                    phase.name,
+                    phase,
                 )
                 # 卡死了：没合法 action → 强制结束，避免上层把 episode 当 not done 又跑一遍
-                self._force_terminate_run(reason=f"no_actions_at_{phase.name}")
+                self._force_terminate_run(reason=f"no_actions_at_{phase}")
                 return battle_happened
             self._last_action_repr = _safe_action_repr(actions[0])
             self._recent_actions.append(self._last_action_repr)
@@ -1030,7 +1016,7 @@ class V8Env:
             rt = None
         # NEOW / 初始位置：current_room_type 默认 'monster' 是误导，
         # 这里只有 phase=COMBAT 时才信任它
-        if self._backend.phase == GamePhase.COMBAT:
+        if self._backend.phase == PHASE_COMBAT:
             if isinstance(rt, str) and rt:
                 return self._normalize_room_name(rt)
             if rt is not None:
@@ -1123,7 +1109,7 @@ class V8Env:
         assert self._backend is not None
         if self._pending_deck_room is None:
             return
-        if self._backend.phase != GamePhase.MAP_NAVIGATION:
+        if self._backend.phase != PHASE_MAP:
             return
         rs = self._backend.run_state
         # 按 (card_id, upgraded) 计数
@@ -1172,7 +1158,7 @@ class V8Env:
             cur_phase = self._backend.phase
             cur_event_state = self._backend.current_event_state
             in_event = (
-                cur_phase == GamePhase.EVENT
+                cur_phase == PHASE_EVENT
                 and cur_event_state is not None
             )
 
@@ -1241,11 +1227,11 @@ class V8Env:
                 # 不在 EVENT phase：如果之前在，补 exit
                 if self._last_event_phase is not None:
                     rs = self._backend.run_state
-                    cur_phase_name = getattr(cur_phase, "name", str(cur_phase))
+                    cur_phase_name = str(cur_phase)
                     # exit reason：根据 cur_phase 推测
-                    if cur_phase == GamePhase.COMBAT:
+                    if cur_phase == PHASE_COMBAT:
                         reason = "combat_started"
-                    elif cur_phase == GamePhase.RUN_COMPLETE:
+                    elif cur_phase == PHASE_RUN_COMPLETE:
                         reason = "run_complete"
                     else:
                         reason = f"resolved->{cur_phase_name}"
@@ -1480,14 +1466,14 @@ class V8Env:
         assert self._backend is not None
         rs = self._backend.run_state
         cur_phase = self._backend.phase
-        phase_name = getattr(cur_phase, "name", str(cur_phase))
+        phase_name = str(cur_phase)
         # 当前位置 (map_position)
         mp = getattr(rs, "map_position", None)
         map_x = getattr(mp, "x", -1) if mp is not None else -1
         map_y = getattr(mp, "y", -1) if mp is not None else -1
 
         # combat-specific 字段（不在 combat 时给 0）
-        in_combat = cur_phase == GamePhase.COMBAT or self._in_combat
+        in_combat = cur_phase == PHASE_COMBAT or self._in_combat
         enemies = _combat_enemies_brief(self._backend) if in_combat else []
         hand_size, draw_size, discard_size = (
             _combat_pile_sizes(self._backend) if in_combat else (0, 0, 0)

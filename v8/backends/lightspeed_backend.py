@@ -216,13 +216,12 @@ class LightspeedBackend:
         return self._gc.outcome == self._sts.GameOutcome.PLAYER_VICTORY
 
     @property
-    def phase(self) -> Any:
-        """当前 V8 phase 名（str）。
+    def phase(self) -> str:
+        """当前 phase（规范字符串，与 protocol.PHASE_* / StSRLBackend 同口径）。
 
-        StSRLBackend 这里返回引擎 GamePhase 枚举（env 用 _META_PHASES 等做映射判定）。
-        lightspeed 无该枚举——返回 V8 phase 名字符串。**注意**：env.py 现以
-        `phase in _META_PHASES`（GamePhase 枚举集合）判定，字符串不会命中，这是
-        透传债之一（见模块末尾 TODO）；本中性核心只保证 phase 可读、可日志。
+        stage2 中性化：两个后端 phase 都返回规范字符串，env.py 用字符串比较
+        （`phase in META_PHASES` / `phase == PHASE_COMBAT` 等）。lightspeed 由
+        get_state['screen'] 经 _SCREEN_TO_V8_PHASE 映射；终态返回 RUN_COMPLETE。
         """
         if self.game_over:
             return "RUN_COMPLETE"

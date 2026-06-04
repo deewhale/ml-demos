@@ -13,8 +13,8 @@ env 只跟本接口说话；不再直接 import / 触碰 GameRunner / TurnSolver
 1. 生命周期 (lifecycle)
    - reset(seed)              : 开新局，推进到第一个元决策点前的引擎初始化
    - game_over / game_won     : 终态标志
-   - phase                    : 当前引擎 phase（**pass-through 引擎 GamePhase 枚举**，
-                                env 用 _ENGINE_TO_V8_PHASE / _META_PHASES 映射）
+   - phase                    : 当前 phase（**规范字符串**，见模块顶部 PHASE_* /
+                                META_PHASES；两个后端统一返回字符串，env 字符串比较）
    - force_terminate()        : 强制把当前 run 标 terminal（loss）
    - close()                  : 释放后端资源
 
@@ -54,9 +54,10 @@ pass-through 债（stage2 中性化目标）
 ------------------------------------------------------------------------------
 以下属性当前直接返回引擎对象（duck-typed），env 的诊断日志 / action_space 直接
 introspection 其内部字段。这是接缝，stage2 接真机 / Rust 时要把它们换成中性数据结构：
-    phase, run_state, current_room_type, get_current_room_type, current_combat,
+    run_state, current_room_type, get_current_room_type, current_combat,
     current_event_state, event_handler, current_rewards, current_shop,
     neow_blessings, last_combat_card_log, get_available_actions(返回引擎动作对象)
+（phase 已中性化为规范字符串，不再是 pass-through 债）
 
 中性化的部分（已不暴露引擎对象）：
     reset / game_over / game_won / force_terminate / close / build_v8_state /
@@ -72,6 +73,39 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from v8.state import V8State
+
+
+# =============================================================================
+# 规范 phase 字符串常量（中性化：两个后端 phase 都返回这套字符串）
+# =============================================================================
+# stage2 抹平 phase 透传债：原本 backend.phase 返回引擎 GamePhase 枚举（StSRLSolver
+# 特有），env.py 用 `phase == GamePhase.X` / `phase in _META_PHASES` 判定，导致
+# 字符串后端（lightspeed）永不命中。现统一成下面这套中性字符串：两个后端的 phase
+# 属性都映射成这些常量，env.py 改成跟字符串比。语义沿用原 _ENGINE_TO_V8_PHASE。
+PHASE_NEOW = "NEOW"
+PHASE_MAP = "MAP"
+PHASE_COMBAT = "COMBAT"
+PHASE_CARD_REWARDS = "CARD_REWARDS"
+PHASE_EVENT = "EVENT"
+PHASE_SHOP = "SHOP"
+PHASE_REST = "REST"
+PHASE_TREASURE = "TREASURE"
+PHASE_BOSS_REWARDS = "BOSS_REWARDS"
+PHASE_RUN_COMPLETE = "RUN_COMPLETE"
+
+# 元决策 phase（写入 RL trajectory；env 在这些 phase 停下让 model 选）。
+# 注意：COMBAT 不在内（战斗走搜索 / play_battle，不进 trajectory）；
+# RUN_COMPLETE 不在内（终态）。
+META_PHASES = frozenset({
+    PHASE_NEOW,
+    PHASE_MAP,
+    PHASE_CARD_REWARDS,
+    PHASE_EVENT,
+    PHASE_SHOP,
+    PHASE_REST,
+    PHASE_TREASURE,
+    PHASE_BOSS_REWARDS,
+})
 
 
 @runtime_checkable
@@ -97,8 +131,12 @@ class GameBackend(Protocol):
         """当前 run 是否通关。"""
 
     @property
-    def phase(self) -> Any:
-        """当前引擎 phase（pass-through 引擎 GamePhase 枚举）。"""
+    def phase(self) -> str:
+        """当前 phase（规范字符串，见模块顶部 PHASE_* 常量 / META_PHASES）。
+
+        stage2 中性化后：两个后端都返回规范字符串（不再透传引擎 GamePhase 枚举）。
+        StSRLBackend 把引擎枚举映射成字符串；LightspeedBackend 把 screen 映射成字符串。
+        env.py 用字符串比较（`phase in META_PHASES` / `phase == PHASE_COMBAT` 等）。"""
 
     def force_terminate(self) -> None:
         """强制把 run 标 terminal（loss）：game_over=True / game_won=False /

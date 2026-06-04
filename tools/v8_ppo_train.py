@@ -766,6 +766,15 @@ def parse_args() -> argparse.Namespace:
              " forward。子进程内 combat_net_wrapper=None（regression：战斗 leaf 走纯搜索）。"
              " eval 路径保持串行（用 V8Env），不受影响。",
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        default="stsrl",
+        choices=["stsrl", "lightspeed"],
+        help="选引擎后端。stsrl=默认 StSRLSolver Python 引擎（战斗走 TurnSolver 搜索）；"
+             "lightspeed=sts_lightspeed C++ 模拟器（战斗黑盒走引擎 MCTS play_battle）。"
+             "lightspeed 暂只支持 n_envs=1 串行。",
+    )
     return parser.parse_args()
 
 
@@ -862,6 +871,22 @@ def main() -> None:
         env_kwargs["max_steps_per_episode"] = int(args.max_steps_per_episode)
     if args.deck_eval_freq is not None:
         env_kwargs["deck_eval_freq"] = int(args.deck_eval_freq)
+    # 引擎后端切换：lightspeed 注入 backend_factory（战斗黑盒走引擎 MCTS，不用 wrapper）。
+    if args.engine == "lightspeed":
+        from v8.backends.lightspeed_backend import LightspeedBackend  # noqa: E402
+        # V8Env 默认 character=ironclad / ascension=0（训练入口无对应 CLI，固定默认）
+        env_kwargs["combat_net_wrapper"] = None  # lightspeed 战斗黑盒，wrapper 用不上
+        env_kwargs["backend_factory"] = (
+            lambda: LightspeedBackend(character="ironclad", ascension=0)
+        )
+        if int(args.n_envs) > 1:
+            logger.warning(
+                "[engine] lightspeed 暂只支持 n_envs=1，已忽略 n_envs=%d", args.n_envs
+            )
+            args.n_envs = 1
+        logger.info("[engine] backend=lightspeed (战斗走引擎 MCTS play_battle)")
+    else:
+        logger.info("[engine] backend=stsrl (战斗走 TurnSolver 搜索)")
     env = V8Env(**env_kwargs)
 
     # ---- Parallel env (rollout 加速)：n_envs > 1 时启动 ----

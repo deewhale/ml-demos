@@ -229,8 +229,13 @@ class StSRLBackend:
         return bool(self._runner.game_won) if self._runner is not None else False
 
     @property
-    def phase(self) -> Any:
-        return self._runner.phase if self._runner is not None else None
+    def phase(self) -> str:
+        """当前 phase（规范字符串）。把引擎 GamePhase 枚举映射成 V8 规范字符串
+        （stage2 中性化：env.py 现以字符串比较）。无 runner 时返回 RUN_COMPLETE。"""
+        if self._runner is None:
+            return "RUN_COMPLETE"
+        eng_phase = self._runner.phase
+        return _ENGINE_TO_V8_PHASE.get(eng_phase, getattr(eng_phase, "name", str(eng_phase)))
 
     def force_terminate(self) -> None:
         """强制把 run 标 terminal（从 env._force_terminate_run 搬，行为一致）。"""
