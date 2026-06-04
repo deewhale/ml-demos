@@ -39,6 +39,18 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 - 归档但保留参考：`v8_bot.py`（战斗内 search infra，元决策 dispatch 已被 V8 RL 取代）、
   `v8_data_collector.py`（JSONL schema 参考，import 已 archive 模块所以无法直接运行）。
 
+#### 引擎验收测试台（2026-06-04 新增，证伪 legacy 引擎 + 验证 lightspeed）
+引擎无关的卡牌/遗物/怪物行为测试台：用独立 wiki oracle 当金标准，跨后端跑同一组用例验数值。
+- `v8/backends/combat_probe.py` — 后端无关的战斗探针接口（各引擎实现它即可被测）。
+- `v8/backends/stsrl_combat_probe.py` / `rust_combat_probe.py` / `rust_engine_loader.py` —
+  legacy Python 与 Rust 版 StSRLSolver 的探针 + 加载器（证伪 legacy、评估 Rust 用）。
+- `v8/backends/lightspeed_loader.py` / `lightspeed_combat_probe.py` /
+  `lightspeed_relic_probe.py` / `lightspeed_monster_probe.py` — sts_lightspeed 的加载器 +
+  战斗/遗物/怪物三类探针（现役准确引擎，验收通过）。
+- `tools/card_oracle.py` / `relic_oracle.py` / `monster_oracle.py` — 独立 wiki 金标准期望值。
+- `tools/test_card_behavior.py` / `test_relic_behavior.py` / `test_monster_behavior.py` —
+  跑器：把 oracle 期望值喂给各后端探针逐条比对。
+
 ### 诊断日志（V8 RL 训练 / eval 输出，可 grep）
 
 - `[startup]` / `[heartbeat]` — episode 级：ep#, steps, secs, reward, floor, beat_boss,
@@ -153,7 +165,26 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-06-02 (本次变更: 奖励重设计转向坐实——redesign_v5 fresh 1024 局打过一幕 30%/到达 60% 清白对齐, 证伪「评分当奖励」(刷分→死亡局净赚 +485)、确立「赢为主轴 + 评分降级为模型输入特征 + 健康到达 boss」方向; redesign_v6 续训到 2048 局现役 PID 3988) -->
+<!-- last-verified: 2026-06-04 (本次变更: 建引擎无关测试台证伪 legacy Python StSRLSolver 系统性坏, 拿测试集验证 sts_lightspeed 为准确引擎, 现役方向是把训练引擎从 StSRLSolver 换到 lightspeed) -->
+- 2026-06-04: **引擎换代——测试台证伪 legacy Python 引擎、锁定并验证 sts_lightspeed 为准确引擎，现役方向是换引擎到 lightspeed**。
+  - **建测试台**：引擎无关的卡牌/遗物/怪物行为测试台（`CombatProbe` 接口 + 独立 wiki
+    oracle + 后端无关跑器），证明能逮真 bug。新增代码见下方「活跃代码」段「引擎验收测试台」。
+  - **证伪在用引擎**：用测试台证明在用的 **legacy Python StSRLSolver 系统性坏**——
+    一整类 effect 串无 handler 被静默丢弃。确诊坏卡：Dark Shackles / Panacea /
+    Panic Button / J.A.X. / Sword Boomerang（细账记 `docs/v8_engine_card_bug_ledger.md`）。
+  - **Rust StSRLSolver 不够用**：战斗更准但整局只支持 Watcher，不适合直接训 Ironclad。
+  - **锁定金标准 = sts_lightspeed**（gamerpuppy/sts_lightspeed，C++17 + pybind11，MIT，
+    机制社区公认最准，全 Ironclad + 全四幕，clone 在 `external/sts_lightspeed`，gitignored）。
+  - **测试集验收 lightspeed（mac 编译通 + 写绑定）**：卡牌可验数值 **51/51 对**、
+    开战遗物 **11/11 对**、怪物 HP/意图/pre-battle **17/18 对**（1 个是表示差异非 bug）。
+    历史「开战效果不触发」重灾区 lightspeed 全部正确；能从 Python 驱动打完整局 Ironclad
+    （整局导航已绑）。
+  - **现役方向**：把训练引擎从 StSRLSolver 换成 **sts_lightspeed**。剩余：补全卡/遗物/
+    怪物穷尽覆盖 → 一轮实机 (CommunicationMod) 交叉验证 → 把 V8 训练接到 lightspeed
+    后端（写 `LightspeedBackend` 实现 `GameBackend`、增量抹平 `v8/env.py` 透传债）。
+  - 设计/计划细节见 `docs/superpowers/specs/2026-06-04-game-backend-test-harness-design.md`、
+    `docs/superpowers/plans/2026-06-04-combat-probe-card-test-harness.md`、
+    `docs/v8_card_test_set_scheme.md`。
 - 2026-06-02: **奖励重设计转向坐实——「赢为主轴 + 评分当特征」证明有效，redesign_v6 现役**。
   - **证伪「评分当奖励」**：之前把「per-card 卡组评分增长」(`strength_reward`) 当奖励，
     归因证明严重跑偏——每打一场仗按伤害发奖占总奖励 73%、连死亡局都净赚 +485，
