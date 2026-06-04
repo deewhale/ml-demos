@@ -57,12 +57,12 @@ def run_all(probe: CombatProbe) -> int:
         fails = check_expectation(probe, exp)
         if fails:
             failed += 1
-            print(f"[FAIL] {exp.card_id}")
+            print(f"[FAIL] {exp.label or exp.card_id}")
             for f in fails:
                 print(f"         - {f}")
             print(f"         (oracle 来源: {exp.source})")
         else:
-            print(f"[ OK ] {exp.card_id}")
+            print(f"[ OK ] {exp.label or exp.card_id}")
     print(f"\n卡牌行为测试：{total - failed}/{total} 通过，{failed} 失败")
     return failed
 

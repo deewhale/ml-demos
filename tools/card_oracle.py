@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from v8.backends.combat_probe import CombatSetup
@@ -16,6 +16,9 @@ from v8.backends.combat_probe import CombatSetup
 @dataclass(frozen=True)
 class CardExpectation:
     card_id: str
+    # 场景标签（同一张卡多场景时区分）；空则显示 card_id。kw_only 让它声明在
+    # card_id 之后又不强制后续 setup/target_index 带默认值。
+    label: str = field(default="", kw_only=True)
     setup: CombatSetup
     target_index: int                                    # 敌人 idx；<0 = 自我
     expect_enemy_hp_delta: Optional[int] = None
@@ -121,5 +124,72 @@ ORACLE: List[CardExpectation] = [
         expect_player_status={"Strength": 2},
         expect_energy_delta=1,
         source="STS wiki: Inflame power, +2 Strength",
+    ),
+    # ---- 力量注入对照：证明 player_strength 注入真生效 ----
+    CardExpectation(
+        card_id="Strike_R",
+        label="Strike_R (+3 Str control)",
+        setup=CombatSetup(hand=("Strike_R",), player_strength=3),
+        target_index=0,
+        expect_enemy_hp_delta=9,   # 6 基础 + 3 力量
+        expect_energy_delta=1,
+        source="STS: Strike 6 + Strength 3 = 9（力量注入对照）",
+    ),
+    # ---- Body Slam：伤害=当前格挡，力量加性不是乘性，且不消耗格挡 ----
+    CardExpectation(
+        card_id="Body Slam",
+        label="Body Slam (10 block)",
+        setup=CombatSetup(hand=("Body Slam",), player_block=10, player_strength=0),
+        target_index=0,
+        expect_enemy_hp_delta=10,
+        expect_player_block_delta=0,
+        expect_energy_delta=1,
+        source="STS wiki: Body Slam damage = current Block(10); block not consumed",
+    ),
+    CardExpectation(
+        card_id="Body Slam",
+        label="Body Slam (10 block +3 Str)",
+        setup=CombatSetup(hand=("Body Slam",), player_block=10, player_strength=3),
+        target_index=0,
+        expect_enemy_hp_delta=13,
+        expect_energy_delta=1,
+        source="STS wiki: Body Slam = Block + Strength additive = 13",
+    ),
+    CardExpectation(
+        card_id="Body Slam",
+        label="Body Slam (0 block +5 Str)",
+        setup=CombatSetup(hand=("Body Slam",), player_block=0, player_strength=5),
+        target_index=0,
+        expect_enemy_hp_delta=5,
+        expect_energy_delta=1,
+        source="STS wiki: Body Slam 0 block + 5 Str = 5",
+    ),
+    # ---- Heavy Blade：基础 14，力量×3 倍率，cost 2 ----
+    CardExpectation(
+        card_id="Heavy Blade",
+        label="Heavy Blade (0 Str)",
+        setup=CombatSetup(hand=("Heavy Blade",), player_strength=0),
+        target_index=0,
+        expect_enemy_hp_delta=14,
+        expect_energy_delta=2,
+        source="STS wiki: Heavy Blade base 14",
+    ),
+    CardExpectation(
+        card_id="Heavy Blade",
+        label="Heavy Blade (+3 Str)",
+        setup=CombatSetup(hand=("Heavy Blade",), player_strength=3),
+        target_index=0,
+        expect_enemy_hp_delta=23,   # 14 + 3×3
+        expect_energy_delta=2,
+        source="STS wiki: Heavy Blade 14 + Strength×3 = 23",
+    ),
+    CardExpectation(
+        card_id="Heavy Blade",
+        label="Heavy Blade (-2 Str)",
+        setup=CombatSetup(hand=("Heavy Blade",), player_strength=-2),
+        target_index=0,
+        expect_enemy_hp_delta=8,    # 14 + (-2)×3
+        expect_energy_delta=2,
+        source="STS wiki: Heavy Blade 14 + (-2)×3 = 8",
     ),
 ]

@@ -20,6 +20,8 @@ class CombatSetup:
     player_hp: int = 80
     player_energy: int = 3
     relics: Tuple[str, ...] = ()
+    player_block: int = 0          # 出牌前预设玩家格挡（测 Body Slam 等）
+    player_strength: int = 0       # 出牌前预设玩家力量（测 Heavy Blade 等；可为负）
 
 
 @dataclass(frozen=True)

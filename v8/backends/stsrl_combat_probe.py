@@ -72,4 +72,8 @@ class StSRLCombatProbe:
         )
         engine.start_combat()
         engine.state.hand = list(setup.hand)
+        if setup.player_block:
+            engine.state.player.block = setup.player_block
+        if setup.player_strength:
+            engine.state.player.statuses["Strength"] = setup.player_strength
         return engine
