@@ -775,6 +775,22 @@ def parse_args() -> argparse.Namespace:
              "lightspeed=sts_lightspeed C++ 模拟器（战斗黑盒走引擎 MCTS play_battle）。"
              "lightspeed 暂只支持 n_envs=1 串行。",
     )
+    parser.add_argument(
+        "--combat_tier",
+        action="store_true",
+        help="（仅 --engine lightspeed）开启按房型分级的战斗搜索预算 combat_sim_counts："
+             "小怪 normal / 精英 elite / boss 各用不同 sim_count。默认不开 = 全 flat "
+             "--sim_count（保持现状）。开启后档位为 "
+             "{normal:1000, elite:4000, boss:--boss_sim_count}。"
+             "训练 rollout 与 deterministic eval 共用同一 backend_factory，故两边同配置。",
+    )
+    parser.add_argument(
+        "--boss_sim_count",
+        type=int,
+        default=6000,
+        help="（仅 --combat_tier）boss 战 play_battle 的 sim_count。训练默认 6000 平衡成本"
+             "（boss 战只占每局少数）；eval 基线用 10000。normal=1000 / elite=4000 固定。",
+    )
     return parser.parse_args()
 
 
@@ -876,8 +892,28 @@ def main() -> None:
         from v8.backends.lightspeed_backend import LightspeedBackend  # noqa: E402
         # V8Env 默认 character=ironclad / ascension=0（训练入口无对应 CLI，固定默认）
         env_kwargs["combat_net_wrapper"] = None  # lightspeed 战斗黑盒，wrapper 用不上
+        # 分级战斗搜索预算：--combat_tier 开启时按房型给 boss/精英更高 sim_count，
+        # 让 agent 在「战斗能正常发挥」的环境里学元决策。默认 None=全 flat 1000（现状不破坏）。
+        # 注意：env.reset() 每局调一次 backend_factory，训练 rollout 与 eval 共用同一个
+        #       factory（run_eval(trainer, env) 用同一个 env），故 train/eval 自动同配置。
+        _combat_sim_counts = None
+        if args.combat_tier:
+            _combat_sim_counts = {
+                "normal": 1000,
+                "elite": 4000,
+                "boss": int(args.boss_sim_count),
+            }
+            logger.info(
+                "[engine] combat_tier 开启：分级战斗搜索 combat_sim_counts=%s "
+                "(train rollout 与 eval 共用)",
+                _combat_sim_counts,
+            )
         env_kwargs["backend_factory"] = (
-            lambda: LightspeedBackend(character="ironclad", ascension=0)
+            lambda: LightspeedBackend(
+                character="ironclad",
+                ascension=0,
+                combat_sim_counts=_combat_sim_counts,
+            )
         )
         if int(args.n_envs) > 1:
             logger.warning(
