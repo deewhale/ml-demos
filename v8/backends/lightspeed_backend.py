@@ -130,6 +130,12 @@ class LightspeedBackend:
         verbose: bool = False,
         sim_count: int = 1000,
         boss_mult: float = 3.0,
+        # 按房型分级的战斗搜索预算（play_battle sim_count）。默认 None = 关闭分级，
+        # 所有战斗一视同仁用 `sim_count`（保持训练现状不变）。eval 时显式传分级
+        # 配置（如 {"normal":1000,"elite":4000,"boss":10000}）开高 boss/精英搜索。
+        # 房型判定：play_battle 前读 get_state()['room']（lightspeed 战斗中 room enum
+        # 为 MONSTER/ELITE/BOSS），映射到 normal/elite/boss 三档；读不出退回 normal。
+        combat_sim_counts: Optional[Dict[str, int]] = None,
         # 兼容 StSRLBackend 构造签名（env backend_factory 会传这些，lightspeed 用不上）
         solver_budgets: Optional[Dict[str, Tuple[float, int, int]]] = None,
         combat_net_wrapper: Optional[Any] = None,
@@ -139,6 +145,14 @@ class LightspeedBackend:
         self.verbose = verbose
         self._sim_count = int(sim_count)
         self._boss_mult = float(boss_mult)
+        # 分级配置（None = 不分级）。补全缺省档位（缺哪档用 flat sim_count 兜底）。
+        self._combat_sim_counts: Optional[Dict[str, int]] = None
+        if combat_sim_counts:
+            self._combat_sim_counts = {
+                "normal": int(combat_sim_counts.get("normal", self._sim_count)),
+                "elite": int(combat_sim_counts.get("elite", self._sim_count)),
+                "boss": int(combat_sim_counts.get("boss", self._sim_count)),
+            }
 
         self._sts = load_lightspeed()
         self._gc: Optional[Any] = None
@@ -166,11 +180,30 @@ class LightspeedBackend:
         name = (self.character or "ironclad").upper()
         return getattr(cc, name, cc.IRONCLAD)
 
+    def _battle_sim_count(self, room: Any) -> int:
+        """按当前战斗房型选 play_battle 的 sim_count。
+
+        分级关闭（_combat_sim_counts is None）→ 一律 flat self._sim_count（训练现状）。
+        分级开启 → 读 lightspeed room enum 名（MONSTER/ELITE/BOSS），映射到
+        normal/elite/boss 三档；非战斗 room 或读不出 → 退回 normal 档。
+        """
+        if self._combat_sim_counts is None:
+            return self._sim_count
+        rn = str(getattr(room, "name", room) or "").upper()
+        if "BOSS" in rn:
+            tier = "boss"
+        elif "ELITE" in rn:
+            tier = "elite"
+        else:
+            tier = "normal"
+        return self._combat_sim_counts[tier]
+
     def _advance_past_battles(self) -> None:
         """若当前停在 BATTLE screen，调 play_battle 打完，推进到下一个元决策点。
 
         play_battle 是黑盒：打完后 gc 要么进下一个 screen（胜），要么 outcome=LOSS（死）。
         单 take_action 后理论上最多触发一场战斗，但 event→combat 链式可能多场，故 while。
+        每场战斗按当前 room 选 sim_count（分级开启时 boss/精英用更高搜索预算）。
         """
         if self._gc is None:
             return
@@ -182,7 +215,9 @@ class LightspeedBackend:
         ):
             guard += 1
             self.combat_search_calls += 1
-            self._sts.play_battle(self._gc, self._sim_count, self._boss_mult)
+            room = self._sts.get_state(self._gc).get("room", None)
+            sim_count = self._battle_sim_count(room)
+            self._sts.play_battle(self._gc, sim_count, self._boss_mult)
 
     # =====================================================================
     # 1. 生命周期
