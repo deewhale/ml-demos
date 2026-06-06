@@ -50,13 +50,16 @@ HANG_LIMIT_SEC="${HANG_LIMIT_SEC:-10800}" # 单 trial 超 3h 无 heartbeat 进�
 HEARTBEAT_POLL_SEC=120                     # hang 检测轮询间隔
 
 # ---------------- 起点：当前最优 ckpt + 基线分 ----------------
-# v6 ep6304 是停旧循环时定出的当前最优（a1=0.90 a2=0.4375 won=0 floor=33.81）。
+# v6 ep6304 是停旧循环时定出的当前最优。
+# 基线分用与 parse_summary 同口径（末 2 次 eval 均值，roll2）重算，否则单峰 77.56
+# 当门槛会让所有 trial 都超不过（噪声峰卡死）。v6 ep6304 history 末 2 次 eval：
+#   eval-1: a1=0.958 a2=0.3125 floor=32.42 ；eval-2: a1=0.896 a2=0.4375 floor=33.81
+#   roll2 均值：a1=0.93 a2=0.375 won=0 floor=33.11 → score = 0 + 37.5 + 33.11 = 70.61
 BEST_CKPT="${BEST_CKPT:-$REPO_ROOT/sts_models/v8_ppo_lightspeed_v6/v8_ppo_ep6304.pt}"
 BEST_EP="${BEST_EP:-6304}"
-# 基线分（score 公式同下）：won*1000 + a2*100 + floor = 0 + 43.75 + 33.81 = 77.56
-BEST_SCORE="${BEST_SCORE:-77.56}"
+BEST_SCORE="${BEST_SCORE:-70.61}"
 BEST_LABEL="baseline_v6_ep6304"
-BEST_DESC="a1=0.90 a2=0.4375 won=0 floor=33.81"
+BEST_DESC="a1=0.93 a2=0.3750 won=0 floor=33.11 roll2"
 
 # ---------------- 内置配置搜索空间（安全 CLI 旋钮组合）----------------
 # 格式："label|<额外 CLI 旋钮>"。空旋钮 = baseline。
@@ -80,26 +83,35 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $LOG_PREFIX $*"; }
 
 # ---------------- 算 score（从 summary.json 读 eval）----------------
 # 输出三行：score / detail / exit_reason；解析失败 score=FAIL。
+# 滚动均值口径（2026-06-06）：score 取**末 2 次 deterministic eval 的均值**，
+# 不再用单次末值 eval_history[-1]——单峰 eval 噪声（±一两 pp / ±一两层）会让模型被
+# 噪声峰当门槛卡死（v6 单峰 a2=0.4375=77.56 几乎无法被超过，但其实是抖出来的）。
+# 一个 768 局 trial（eval_freq=384）正好出 2 次 eval，取末 2 次均值刚好平滑掉边界局翻转。
+# 末 eval 不足 2 次（早停 / 配置异常）时退化为取全部可用 eval 的均值。
 parse_summary() {
   local summary="$1"
   "$PY" - "$summary" <<'PYEOF'
 import json, sys
 p = sys.argv[1]
+ROLL_N = 2  # 取末 N 次 eval 均值（与 trainer roll_mean 同口径思路）
 try:
     d = json.load(open(p))
     er = d.get("exit_reason", "unknown")
     eh = d.get("eval_history") or []
     if not eh:
         print("FAIL"); print("no eval_history"); print(er); sys.exit(0)
-    e = eh[-1]
-    won = float(e.get("won_game_rate") or 0.0)
-    a2 = float(e.get("act2_boss_beat_rate") or 0.0)
-    a1 = float(e.get("act1_boss_beat_rate") or 0.0)
-    fl = float(e.get("floor_mean") or 0.0)
-    ent = float(e.get("entropy") or 0.0)
+    rec = eh[-ROLL_N:]              # 末 N 次（不足 N 则取全部可用）
+    n = len(rec)
+    def avg(key):
+        return sum(float(e.get(key) or 0.0) for e in rec) / n
+    won = avg("won_game_rate")
+    a2 = avg("act2_boss_beat_rate")
+    a1 = avg("act1_boss_beat_rate")
+    fl = avg("floor_mean")
+    ent = avg("entropy")
     score = won * 1000.0 + a2 * 100.0 + fl
     print(f"{score:.2f}")
-    print(f"a1={a1:.2f} a2={a2:.4f} won={won:.2f} floor={fl:.1f} ent={ent:.3f}")
+    print(f"a1={a1:.2f} a2={a2:.4f} won={won:.2f} floor={fl:.1f} ent={ent:.3f} roll{n}")
     print(er)
 except Exception as ex:
     print("FAIL"); print(f"{type(ex).__name__}: {ex}"); print("parse_error")
@@ -121,7 +133,7 @@ write_status() {
     echo
     echo "- ckpt：\`$BEST_CKPT\`"
     echo "- 来源 label：$BEST_LABEL"
-    echo "- score：**$BEST_SCORE**（= won×1000 + a2×100 + floor_mean）"
+    echo "- score：**$BEST_SCORE**（= won×1000 + a2×100 + floor_mean，末 2 次 eval 滚动均值口径）"
     echo "- ep：$BEST_EP"
     echo "- eval：$BEST_DESC"
     echo
