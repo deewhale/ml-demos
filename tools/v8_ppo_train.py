@@ -720,6 +720,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=_PARSER_DEFAULTS["batch_size"],
                         help="每多少 episodes 做一次 PPO update")
     parser.add_argument("--lr", type=float, default=_PARSER_DEFAULTS["lr"])
+    parser.add_argument(
+        "--entropy_coef",
+        type=float,
+        default=None,
+        help="探索度（熵奖励）初始系数，透传 V8PPOTrainer。不传=保持 trainer 默认行为不变"
+             "（初值 0.01，自适应控制器 target=0.06 / cap=0.12 / floor=0.03）。"
+             "若显式传一个更高值（如 0.05 / 0.08），驱动会同时把自适应 target_entropy 抬到该值、"
+             "并把 cap 抬到 max(0.12, 该值)，让「探索更多」这个旋钮真正生效（否则会被自适应控制器"
+             "和 [0.03,0.12] 区间夹回去）。仅用于安全的探索度搜索。",
+    )
     parser.add_argument("--device", type=str, default=_PARSER_DEFAULTS["device"],
                         help="mps / cpu / cuda")
     parser.add_argument(
@@ -947,7 +957,22 @@ def main() -> None:
         )
 
     # 4) Trainer
-    trainer = V8PPOTrainer(model=model, lr=args.lr, device=str(device))
+    # ---- 探索度旋钮（--entropy_coef）安全透传 ----
+    # 不传 → 完全保持 trainer 默认（行为不变）。
+    # 显式传一个更高值 → 同时抬 target_entropy 和 cap，让「探索更多」真正生效
+    #   （否则会被自适应控制器 + [floor, cap] 夹回 0.06 附近）。
+    _trainer_kwargs: Dict[str, Any] = {}
+    if getattr(args, "entropy_coef", None) is not None:
+        ec = float(args.entropy_coef)
+        _trainer_kwargs["entropy_coef"] = ec
+        # 只在用户抬高探索度时联动调整 target / cap；不降默认行为。
+        _trainer_kwargs["target_entropy"] = max(0.06, ec)
+        _trainer_kwargs["entropy_coef_max"] = max(0.12, ec)
+        logger.info(
+            "[entropy] 显式 --entropy_coef=%.4f → 联动 target_entropy=%.4f cap=%.4f",
+            ec, _trainer_kwargs["target_entropy"], _trainer_kwargs["entropy_coef_max"],
+        )
+    trainer = V8PPOTrainer(model=model, lr=args.lr, device=str(device), **_trainer_kwargs)
 
     # ---- Resume：从指定 ckpt 加载 model+optimizer state，恢复 ep 计数 ----
     # ckpt metadata 历史上字段名不统一（episodes_done 或 episode 或 num_episodes_so_far），
