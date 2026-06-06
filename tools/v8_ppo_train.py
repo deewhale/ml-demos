@@ -801,6 +801,14 @@ def parse_args() -> argparse.Namespace:
         help="（仅 --combat_tier）boss 战 play_battle 的 sim_count。训练默认 6000 平衡成本"
              "（boss 战只占每局少数）；eval 基线用 10000。normal=1000 / elite=4000 固定。",
     )
+    parser.add_argument(
+        "--late_boss_bonus",
+        action="store_true",
+        help="实验（推通关牵引，默认关）：过 act2/act3 boss + 健康到达 act2/act3 boss 的奖励"
+             "按 act 放大（act2 ×2 / act3 ×3，act1 不变）。底层由 reward.py 经环境变量 "
+             "V8_LATE_BOSS_BONUS 控制；本 flag 仅把该环境变量置 1，不传时行为与现状逐字节一致。"
+             "用于把梯度往更深 act 拉，破纯 CLI 调参卡通关=0 的瓶颈。",
+    )
     return parser.parse_args()
 
 
@@ -847,6 +855,16 @@ def main() -> None:
     args = parse_args()
     if args.smoke:
         apply_smoke_overrides(args, defaults=_PARSER_DEFAULTS)
+
+    # 推通关牵引实验（默认关）：把 --late_boss_bonus 翻译成 reward.py 读的环境变量。
+    # 必须在训练循环 / env 实例化前置好（reward 函数在 runtime 读 os.environ）。
+    if getattr(args, "late_boss_bonus", False):
+        os.environ["V8_LATE_BOSS_BONUS"] = "1"
+        logger.info(
+            "[reward-variant] late_boss_bonus 开启：act2 boss 奖 ×%s / act3 ×%s（act1 不变）",
+            os.environ.get("V8_LATE_BOSS_ACT2_SCALE", "2.0"),
+            os.environ.get("V8_LATE_BOSS_ACT3_SCALE", "3.0"),
+        )
 
     # 安装 SIGINT handler（必须在 heavy import / 训练循环开始前）
     _install_sigint_handler()

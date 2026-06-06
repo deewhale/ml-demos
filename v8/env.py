@@ -953,8 +953,15 @@ class V8Env:
             (getattr(rt0, "name", "") or "").lower()
         is_boss_room = (rt0_str == "boss")
 
+        # 当前 act（推通关牵引实验 V8_LATE_BOSS_BONUS 用来按 act 放大 boss 奖励；
+        # 默认关时 reward 侧 _act_scale 恒 1.0，传不传都不改变行为）。
+        try:
+            cur_act = int(getattr(self._backend.run_state, "act", 1) or 1)
+        except Exception:  # noqa: BLE001
+            cur_act = 1
+
         # 过 act boss 进度奖励（boss 战**胜利**时给一次）。
-        boss_reward = compute_boss_beat_reward() if (won and is_boss_room) else 0.0
+        boss_reward = compute_boss_beat_reward(cur_act) if (won and is_boss_room) else 0.0
 
         # 「健康到达 act boss」高效奖励（v5 起）：这场是 boss 战时，按**进入 boss 战
         # 那一刻**的 hp_ratio（_combat_enter_hp / _combat_enter_max_hp）给奖——量的是
@@ -964,7 +971,7 @@ class V8Env:
         if is_boss_room:
             enter_max = float(self._combat_enter_max_hp or 0)
             arrival_ratio = (self._combat_enter_hp / enter_max) if enter_max > 0 else 0.0
-            boss_hp_reward = compute_boss_hp_reward(arrival_ratio)
+            boss_hp_reward = compute_boss_hp_reward(arrival_ratio, cur_act)
 
         # 进奖励的只有：单场胜负小信号 + 过 act boss 进度 + 健康到达 boss（strength_reward 已删）。
         self._pending_combat_reward += combat_reward + boss_reward + boss_hp_reward

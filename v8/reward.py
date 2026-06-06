@@ -45,10 +45,57 @@
 
 from __future__ import annotations
 
+import os
 from typing import Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from v8.state import V8State
+
+
+# ============================================================
+# 实验：推通关牵引（env var 控制，默认关 —— 默认行为完全不变）
+# ============================================================
+# 背景（2026-06-06）：纯 CLI 调参（entropy / boss_sim / lr）的 4-6 个配置都没把
+# 通关从 0 推动，floor 卡三幕中段、二幕在 0.3-0.44 抖 → 纯调参大概率到顶，需代码级
+# 牵引。本变体把「过 act boss」+「健康到达 boss」的奖励按 act 放大——act1 boss 维持
+# 原权重（不破坏现状），act2/act3 boss 给更大奖（越深越值钱），把梯度往更深 act 拉。
+#
+# 设计成 env var 控制、默认关：未设 V8_LATE_BOSS_BONUS=1 时，act_scale 恒为 1.0，
+# compute_boss_beat_reward / compute_boss_hp_reward 行为与旧版逐字节一致。
+#
+# 反 reward-hacking 守线：只放大「过更深 act boss」和「健康到达更深 act boss」，不碰
+# 战斗胜负 / floor / strength —— 不引入新的「奖打架 / 奖刷分」通道，只是把既有的
+# 「赢为主轴」信号在更深 act 处加重，方向与通关一致。
+
+def _late_boss_enabled() -> bool:
+    """实验开关：环境变量 V8_LATE_BOSS_BONUS ∈ {1,true,yes,on} 时启用，默认关。"""
+    return os.environ.get("V8_LATE_BOSS_BONUS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _act_scale(act: int) -> float:
+    """按 act 的 boss 奖励放大系数（仅实验开启时 != 1.0）。
+
+    默认关时恒返回 1.0（行为不变）。开启时：
+        act<=1 → 1.0（act1 boss 维持原权重，不破坏已验证的一幕表现）
+        act==2 → V8_LATE_BOSS_ACT2_SCALE（默认 2.0，过二幕 boss 奖 ×2）
+        act>=3 → V8_LATE_BOSS_ACT3_SCALE（默认 3.0，过三幕 boss 奖 ×3）
+    """
+    if not _late_boss_enabled():
+        return 1.0
+    a = int(act or 1)
+    if a <= 1:
+        return 1.0
+    if a == 2:
+        try:
+            return max(1.0, float(os.environ.get("V8_LATE_BOSS_ACT2_SCALE", "2.0")))
+        except (TypeError, ValueError):
+            return 2.0
+    try:
+        return max(1.0, float(os.environ.get("V8_LATE_BOSS_ACT3_SCALE", "3.0")))
+    except (TypeError, ValueError):
+        return 3.0
 
 
 # ============================================================
@@ -135,13 +182,17 @@ def compute_floor_progress_reward(num_new_floors: int = 1) -> float:
     return W_FLOOR_PROGRESS * float(max(int(num_new_floors or 0), 0))
 
 
-def compute_boss_beat_reward() -> float:
-    """过一个 act boss 的进度奖励（env 在 boss 战斗胜利时给一次）。"""
-    return BOSS_BEAT_BONUS
+def compute_boss_beat_reward(act: int = 1) -> float:
+    """过一个 act boss 的进度奖励（env 在 boss 战斗胜利时给一次）。
+
+    act：当前所在 act（默认 1 → 不放大，兼容旧调用）。实验
+    V8_LATE_BOSS_BONUS 开启时，act2/act3 boss 按 _act_scale 放大（默认关时恒 ×1）。
+    """
+    return BOSS_BEAT_BONUS * _act_scale(act)
 
 
-def compute_boss_hp_reward(boss_arrival_hp_ratio: float) -> float:
-    """「健康到达 act boss」奖励 = W_BOSS_HP × boss_arrival_hp_ratio。
+def compute_boss_hp_reward(boss_arrival_hp_ratio: float, act: int = 1) -> float:
+    """「健康到达 act boss」奖励 = W_BOSS_HP × boss_arrival_hp_ratio × act_scale。
 
     env 在 boss 战结束时给一次，用的是**进入 boss 战那一刻**的 hp_ratio
     （current_hp / max_hp ∈ [0,1]，即「走到 boss 面前还剩多少血」），
@@ -152,7 +203,7 @@ def compute_boss_hp_reward(boss_arrival_hp_ratio: float) -> float:
     """
     r = float(boss_arrival_hp_ratio or 0.0)
     r = max(0.0, min(1.0, r))  # clamp 到 [0,1]
-    return W_BOSS_HP * r
+    return W_BOSS_HP * r * _act_scale(act)
 
 
 def compute_hp_terminal_reward(final_hp_ratio: float) -> float:
