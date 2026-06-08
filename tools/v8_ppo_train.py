@@ -809,6 +809,16 @@ def parse_args() -> argparse.Namespace:
              "V8_LATE_BOSS_BONUS 控制；本 flag 仅把该环境变量置 1，不传时行为与现状逐字节一致。"
              "用于把梯度往更深 act 拉，破纯 CLI 调参卡通关=0 的瓶颈。",
     )
+    parser.add_argument(
+        "--eval_only",
+        action="store_true",
+        help="只评估不训练：加载 --resume_from 的 ckpt，用 deterministic argmax 跑 "
+             "--eval_seeds 个固定种子（起点 EVAL_SEED_OFFSET，与训练期 eval 同种子集，"
+             "故 96 种子是 48 种子的超集、可比），把单次 eval 指标写进 output_dir/"
+             "v8_ppo_summary.json 的 eval_history（exit_reason=eval_only_completed），"
+             "随后直接退出、不进训练 loop、不存 final ckpt。用于自驱迭代采纳判定的"
+             "大种子复测（通关是 ~6% 稀有事件，48 种子几乎测不到，需更大 N 测准 won）。",
+    )
     return parser.parse_args()
 
 
@@ -1109,6 +1119,48 @@ def main() -> None:
             exit_reason, num_episodes_done, time.time() - t_start,
             final_ckpt_local, wrapper.call_count,
         )
+
+    # ===== eval-only 模式：只评估不训练（自驱迭代大种子复测用）=====
+    # 加载的 ckpt 已在上面 resume 完成（model + optimizer state）。这里用同一套
+    # run_eval（deterministic argmax）跑 args.eval_seeds 个种子，把指标写进 summary
+    # 的 eval_history（单条），exit_reason=eval_only_completed，随后直接 return。
+    # 不进训练 loop、不存 final ckpt（避免覆盖 best ckpt）。
+    if getattr(args, "eval_only", False):
+        logger.info(
+            "[eval_only] 只评估不训练：ckpt=%s eval_seeds=%d seed_offset=%d "
+            "(seeds [%d,%d))",
+            args.resume_from, args.eval_seeds, EVAL_SEED_OFFSET,
+            EVAL_SEED_OFFSET, EVAL_SEED_OFFSET + args.eval_seeds,
+        )
+        eo_t0 = time.time()
+        eval_metrics = run_eval(
+            trainer,
+            env,
+            num_seeds=args.eval_seeds,
+            seed_offset=EVAL_SEED_OFFSET,
+        )
+        eval_metrics["episodes_done"] = num_episodes_done
+        eval_metrics["secs"] = time.time() - eo_t0
+        eval_history.append(eval_metrics)
+        exit_reason = "eval_only_completed"
+        try:
+            with open(output_dir / "v8_ppo_summary.json", "w") as f:
+                json.dump(_make_final_summary_payload(), f, indent=2, default=str, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[eval_only] summary write failed: %s: %s", type(e).__name__, e)
+        logger.info(
+            "[eval_only] done seeds=%d won=%.4f a2=%.4f a1=%.4f floor=%.2f ent=%.4f "
+            "elapsed=%.1fs → summary=%s",
+            args.eval_seeds,
+            eval_metrics.get("won_game_rate", 0.0),
+            eval_metrics.get("act2_boss_beat_rate", 0.0),
+            eval_metrics.get("act1_boss_beat_rate", 0.0),
+            eval_metrics.get("floor_mean", 0.0),
+            eval_metrics.get("entropy", 0.0),
+            time.time() - eo_t0,
+            output_dir / "v8_ppo_summary.json",
+        )
+        return
 
     while num_episodes_done < args.num_episodes:
         # ---- 收 batch_size 个 rollout ----

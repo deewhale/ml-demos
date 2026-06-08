@@ -44,22 +44,35 @@ TRIAL_EPISODES="${TRIAL_EPISODES:-768}"   # 每个 trial 增量训多少局（�
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_FREQ="${EVAL_FREQ:-384}"             # trial 内 eval 频率（+768 → 跑到末尾出新 eval）
 CKPT_FREQ="${CKPT_FREQ:-768}"            # trial 内 ckpt 频率
+# 采纳判定专用大种子复测（2026-06-08）：训练期中间 eval 仍 48 种子（省时），但**采纳判定**
+# 改用对该 trial final ckpt 单独跑一次 ADOPT_EVAL_SEEDS 种子的 deterministic eval。
+# 原因：通关是 ~6% 稀有事件，48 种子几乎永远测到 won=0，导致 score 里权重最大的 won×1000
+# 项从不触发、搜索其实没在优化通关。96 种子是 48 的超集（同 seed_offset），可比且能测准 won。
+ADOPT_EVAL_SEEDS="${ADOPT_EVAL_SEEDS:-96}"
 DEVICE=mps
 ENGINE_ARGS="--engine lightspeed --combat_tier"
 HANG_LIMIT_SEC="${HANG_LIMIT_SEC:-10800}" # 单 trial 超 3h 无 heartbeat 进展 → 杀
 HEARTBEAT_POLL_SEC=120                     # hang 检测轮询间隔
 
 # ---------------- 起点：当前最优 ckpt + 基线分 ----------------
-# v6 ep6304 是停旧循环时定出的当前最优。
-# 基线分用与 parse_summary 同口径（末 2 次 eval 均值，roll2）重算，否则单峰 77.56
-# 当门槛会让所有 trial 都超不过（噪声峰卡死）。v6 ep6304 history 末 2 次 eval：
-#   eval-1: a1=0.958 a2=0.3125 floor=32.42 ；eval-2: a1=0.896 a2=0.4375 floor=33.81
-#   roll2 均值：a1=0.93 a2=0.375 won=0 floor=33.11 → score = 0 + 37.5 + 33.11 = 70.61
-BEST_CKPT="${BEST_CKPT:-$REPO_ROOT/sts_models/v8_ppo_lightspeed_v6/v8_ppo_ep6304.pt}"
-BEST_EP="${BEST_EP:-6304}"
-BEST_SCORE="${BEST_SCORE:-70.61}"
-BEST_LABEL="baseline_v6_ep6304"
-BEST_DESC="a1=0.93 a2=0.3750 won=0 floor=33.11 roll2"
+# 当前最优 = trial#29 c2_explore++ ckpt（ep8608）。
+# 【2026-06-08 评分口径变更：48 种子 roll2 → ADOPT_EVAL_SEEDS(=96) 种子单次复测】
+# 旧口径（48 种子 roll2）下 trial#29 score=91.15（a2=0.5417 floor=37.0 won=0）。但 48 种子
+# 几乎永远测到 won=0，won×1000 项从不触发，搜索其实没在优化通关。新口径对 final ckpt
+# 单独跑 96 种子（同 seed_offset=10000，48 的超集）测准 won。
+# trial#29 ckpt 96 种子复测（同 c2 配置：--combat_tier --entropy_coef 0.08, boss_sim=6000）：
+#   won=0.0000 a2=0.4271 a1=0.9896 floor=34.95 → score = 0 + 42.71 + 34.95 = 77.66
+# （96 种子 a2 比 48 种子低，因多出的 48 个种子更难；且单次非 roll2。这是新口径的真实基线。）
+# 注：trial#29 在 6000 boss 搜索预算下 96 局通关 0（能到 act3 floor49 但 act3 boss 团灭）；
+#     更高搜索预算的 trial（boss_sim20k 等）才可能出通关种子，届时 won×1000 激活、能被采纳。
+BEST_CKPT="${BEST_CKPT:-$REPO_ROOT/sts_models/iter_best/best_t0029_c2_explore++.pt}"
+BEST_EP="${BEST_EP:-8608}"
+BEST_SCORE="${BEST_SCORE:-77.66}"
+BEST_LABEL="baseline_t0029_c2_explore++_96seed"
+BEST_DESC="a1=0.99 a2=0.4271 won=0.00 floor=34.95 (96种子复测)"
+# 采纳判定的 BEST ckpt 复测时要用的 config 旋钮（与 BEST 当初训练/eval 的战斗预算一致）。
+# trial#29 = c2_explore++ = --entropy_coef 0.08（boss_sim 默认 6000）。
+BEST_FLAGS="${BEST_FLAGS:---entropy_coef 0.08}"
 
 # ---------------- 内置配置搜索空间（安全 CLI 旋钮组合）----------------
 # 格式："label|<额外 CLI 旋钮>"。空旋钮 = baseline。
@@ -118,6 +131,39 @@ except Exception as ex:
 PYEOF
 }
 
+# ---------------- 采纳判定专用大种子复测 ----------------
+# 对给定 ckpt 单独跑 ADOPT_EVAL_SEEDS 种子的 deterministic eval（只评估不训练），
+# 把结果写到 <out_dir>/v8_ppo_summary.json（单条 eval_history）。
+# 参数：$1=ckpt 路径  $2=输出目录  $3=config 旋钮（与该 ckpt 训练/eval 同战斗预算）
+# 返回：0=成功（summary 存在且 exit_reason=eval_only_completed）；非 0=失败。
+# 注：用 nice 降优先级，避免与正在跑的 trial 抢 MPS（本驱动串行，复测时无 trial 在跑，
+#     但 nice 仍无害）。日志写 <out_dir>.adopt_eval.log。
+run_adopt_eval() {
+  local ckpt="$1" out_dir="$2" cfg_flags="$3"
+  local elog="${out_dir}.adopt_eval.log"
+  rm -rf "$out_dir"; mkdir -p "$out_dir"
+  log "采纳复测：对 $ckpt 跑 $ADOPT_EVAL_SEEDS 种子 deterministic eval（flags='$cfg_flags'）→ $out_dir"
+  # shellcheck disable=SC2086
+  nice -n 5 "$PY" "$TRAIN" $ENGINE_ARGS \
+      --eval_only --eval_seeds "$ADOPT_EVAL_SEEDS" \
+      --resume_from "$ckpt" \
+      --output_dir "$out_dir" \
+      --device "$DEVICE" \
+      $cfg_flags \
+      > "$elog" 2>&1
+  local rc=$?
+  local summary="$out_dir/v8_ppo_summary.json"
+  if [ "$rc" -ne 0 ] || [ ! -f "$summary" ]; then
+    log "采纳复测失败：rc=$rc summary=$([ -f "$summary" ] && echo y || echo n)（见 $elog）"
+    return 1
+  fi
+  if grep -qE 'Traceback|FATAL' "$elog" 2>/dev/null; then
+    log "采纳复测日志含 Traceback/FATAL（见 $elog）→ 视为失败"
+    return 1
+  fi
+  return 0
+}
+
 # ---------------- 更新状态文件（leaderboard）----------------
 write_status() {
   local disk
@@ -133,7 +179,7 @@ write_status() {
     echo
     echo "- ckpt：\`$BEST_CKPT\`"
     echo "- 来源 label：$BEST_LABEL"
-    echo "- score：**$BEST_SCORE**（= won×1000 + a2×100 + floor_mean，末 2 次 eval 滚动均值口径）"
+    echo "- score：**$BEST_SCORE**（= won×1000 + a2×100 + floor_mean，对 final ckpt 单独跑 ${ADOPT_EVAL_SEEDS} 种子复测口径）"
     echo "- ep：$BEST_EP"
     echo "- eval：$BEST_DESC"
     echo
@@ -344,7 +390,37 @@ while true; do
     continue
   fi
 
-  # ---- 解析 eval + 算 score（bash 3.2 无 mapfile，用逐行 read）----
+  # ---- 训练健康门：训练 summary 的 exit_reason 必须 completed（确认训练正常跑完，
+  #      不是中途崩/早停）。这里只做 gate，不用训练期 48 种子 eval 算分。----
+  TRAIN_EXIT="$("$PY" - "$SUMMARY" <<'PYEOF'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("exit_reason", "unknown"))
+except Exception:
+    print("parse_error")
+PYEOF
+)"
+  if [ "$TRAIN_EXIT" != "completed" ]; then
+    log "trial #$TRIAL_SEQ 训练未正常完成（exit_reason=$TRAIN_EXIT）-> 删 ckpt 继续"
+    push_result "| #$TRIAL_SEQ | $local_label | - | ❌FAIL | train_exit=$TRAIN_EXIT |"
+    purge_trial "$TRIAL_DIR"
+    write_status
+    continue
+  fi
+
+  # ---- 采纳判定大种子复测：对 final ckpt 单独跑 ADOPT_EVAL_SEEDS 种子 deterministic eval ----
+  # （训练期中间 eval 仍 48 种子省时；采纳判定改用 96 种子测准通关 won，见脚本顶部说明）。
+  ADOPT_EVAL_DIR="$TRIAL_DIR/adopt_eval"
+  if ! run_adopt_eval "$TRIAL_DIR/v8_ppo_final.pt" "$ADOPT_EVAL_DIR" "$local_flags"; then
+    log "trial #$TRIAL_SEQ 采纳复测失败 → 删 ckpt 继续下一个"
+    push_result "| #$TRIAL_SEQ | $local_label | - | ❌FAIL | adopt_eval_failed |"
+    purge_trial "$TRIAL_DIR"
+    write_status
+    continue
+  fi
+
+  # ---- 解析 96 种子复测 eval + 算 score（bash 3.2 无 mapfile，用逐行 read）----
+  ADOPT_SUMMARY="$ADOPT_EVAL_DIR/v8_ppo_summary.json"
   SCORE="FAIL"; DETAIL="?"; EXIT_REASON="?"
   _i=0
   while IFS= read -r _line; do
@@ -354,11 +430,11 @@ while true; do
       2) EXIT_REASON="$_line" ;;
     esac
     _i=$((_i + 1))
-  done < <(parse_summary "$SUMMARY")
+  done < <(parse_summary "$ADOPT_SUMMARY")
 
-  if [ "$SCORE" = "FAIL" ] || [ "$EXIT_REASON" != "completed" ]; then
-    log "trial #$TRIAL_SEQ 解析失败或未正常完成（score=$SCORE exit_reason=$EXIT_REASON ${DETAIL}）-> 删 ckpt 继续"
-    push_result "| #$TRIAL_SEQ | $local_label | $SCORE | ❌FAIL | exit=$EXIT_REASON $DETAIL |"
+  if [ "$SCORE" = "FAIL" ] || [ "$EXIT_REASON" != "eval_only_completed" ]; then
+    log "trial #$TRIAL_SEQ 96种子复测解析失败（score=$SCORE exit_reason=$EXIT_REASON ${DETAIL}）-> 删 ckpt 继续"
+    push_result "| #$TRIAL_SEQ | $local_label | $SCORE | ❌FAIL | adopt_exit=$EXIT_REASON $DETAIL |"
     purge_trial "$TRIAL_DIR"
     write_status
     continue
