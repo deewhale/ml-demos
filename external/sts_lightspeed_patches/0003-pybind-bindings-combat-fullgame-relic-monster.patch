@@ -1,0 +1,604 @@
+diff --git a/bindings/slaythespire.cpp b/bindings/slaythespire.cpp
+index a9afe35..0315e7e 100644
+--- a/bindings/slaythespire.cpp
++++ b/bindings/slaythespire.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include <sstream>
+ #include <algorithm>
++#include <limits>
+ 
+ #include "sim/ConsoleSimulator.h"
+ #include "sim/search/ScumSearchAgent2.h"
+@@ -16,11 +17,491 @@
+ #include "sim/PrintHelpers.h"
+ #include "game/Game.h"
+ 
++#include "combat/BattleContext.h"
++#include "sim/search/Action.h"
++#include "sim/search/GameAction.h"
++#include "sim/search/ScumSearchAgent2.h"
++
+ #include "slaythespire.h"
+ 
+ 
+ using namespace sts;
+ 
++// ============================================================================
++//  受控战斗探针绑定 (combat probe bindings)
++//  目标: 让 Python 能 "构造受控战斗 -> 打单卡 -> 读状态"
++//  设计: 在 C++ 侧封一个 make_test_combat helper, 把 init + 覆写手牌/敌人 hp/
++//        玩家 buff 全部封在一个函数里, 避免暴露太多裸字段。
++// ============================================================================
++namespace sts::probe {
++
++    // 构造一个受控战斗:
++    //   gc          : Python 侧构造好的 GameContext (提供 seed / map / relic 等基底)
++    //   encounter   : 选哪个遭遇 (如 MonsterEncounter.JAW_WORM / CULTIST)
++    //   player_hp   : 覆写玩家当前血量 (<=0 表示不覆写)
++    //   energy      : 覆写本回合能量 (<0 表示不覆写)
++    //   hand        : 手牌卡 id 列表 (按顺序塞进 hand[0..n))
++    //   enemy_hps   : 每个敌人的 curHp 覆写 (按 monster idx, 空/越界则不覆写)
++    //   strength    : 玩家力量 (覆写绝对值)
++    //   block       : 玩家护甲 (覆写绝对值)
++    //   relics      : 要装到玩家身上的遗物 id 列表。在 bc.init() 之前先 obtainRelic 到
++    //                 gc.relics, 这样 BattleContext::initRelics + executeActions 会真实
++    //                 触发 atBattleStart / atBattleStartPreDraw 效果 (这正是要验收的核心)。
++    BattleContext make_test_combat(
++            const GameContext &gc,
++            MonsterEncounter encounter,
++            int player_hp,
++            int energy,
++            const std::vector<CardId> &hand,
++            const std::vector<int> &enemy_hps,
++            int strength,
++            int block,
++            const std::vector<RelicId> &relics,
++            const std::vector<CardId> &draw_pile,
++            bool clear_draw_pile) {
++
++        // gc 是 const ref, 但装遗物需要改 gc.relics。复制一份本地 gc 再装遗物。
++        GameContext gcLocal = gc;
++        // player_hp 在 init 前写到 gcLocal: init 里 player.curHp = gc.curHp, 这样
++        // Blood Vial 这类开战回血会叠在设定血量之上 (而非被 init 后覆写清掉)。
++        if (player_hp > 0) {
++            gcLocal.curHp = player_hp;
++            if (player_hp > gcLocal.maxHp) {
++                gcLocal.maxHp = player_hp;
++            }
++        }
++        for (RelicId rid : relics) {
++            if (rid != RelicId::INVALID && !gcLocal.relics.has(rid)) {
++                gcLocal.obtainRelic(rid);
++            }
++        }
++
++        BattleContext bc;
++        bc.init(gcLocal, encounter);
++
++        // ---- 覆写玩家 ----
++        if (energy >= 0) {
++            bc.player.energy = energy;
++        }
++        // strength/block 用 INT_MIN 当 "不覆写" 哨兵: 这样遗物 (Vajra 力量 / Anchor 护甲)
++        // 在 init 里施加的效果不会被覆写清掉。显式传值 (含 0) 仍按绝对值覆写。
++        static const int NO_OVERRIDE = std::numeric_limits<int>::min();
++        if (strength != NO_OVERRIDE) {
++            bc.player.strength = strength;
++        }
++        if (block != NO_OVERRIDE) {
++            bc.player.block = block;
++        }
++
++        // ---- 覆写手牌 ----
++        // init 不发牌 (DrawCards 被注释掉), 这里手动塞牌进 hand。
++        int n = static_cast<int>(hand.size());
++        if (n > CardManager::MAX_HAND_SIZE) {
++            n = CardManager::MAX_HAND_SIZE;
++        }
++        for (int i = 0; i < n; ++i) {
++            CardInstance ci(hand[i], false);
++            ci.setUniqueId(bc.cards.nextUniqueCardId++);
++            bc.cards.hand[i] = ci;
++        }
++        bc.cards.cardsInHand = n;
++
++        // ---- 塞抽牌堆 (draw_pile) ----
++        // init 会按 master deck 把起始牌发进抽牌堆。clear_draw_pile=true 时先清空,
++        // 这样 draw_pile 参数能确定性控制抽堆内容 (验 Mind Blast 伤害=抽堆张数 /
++        // 牌堆内容断言)。底->顶按列表顺序 push, 末尾元素是堆顶 (popFromDrawPile 取末尾)。
++        if (clear_draw_pile) {
++            bc.cards.drawPile.clear();
++        }
++        for (CardId cid : draw_pile) {
++            if (cid == CardId::INVALID) {
++                continue;
++            }
++            CardInstance ci(cid, false);
++            ci.setUniqueId(bc.cards.nextUniqueCardId++);
++            bc.cards.drawPile.push_back(ci);
++        }
++
++        // ---- 重算派生计数 (strikeCount 等) ----
++        // init 已按它自己发的 drawPile 算过一次 strikeCount, 但我们覆写了手牌 +
++        // 重塞了抽牌堆, 故从实际 hand + drawPile + discardPile 重新数 Strike 牌,
++        // 否则 Perfected Strike (按 combat 内 Strike 数加伤) 会算错。
++        {
++            int strikeCount = 0;
++            for (int i = 0; i < bc.cards.cardsInHand; ++i) {
++                if (bc.cards.hand[i].isStrikeCard()) { ++strikeCount; }
++            }
++            for (const auto &ci : bc.cards.drawPile) {
++                if (ci.isStrikeCard()) { ++strikeCount; }
++            }
++            for (const auto &ci : bc.cards.discardPile) {
++                if (ci.isStrikeCard()) { ++strikeCount; }
++            }
++            bc.cards.strikeCount = strikeCount;
++        }
++
++        // ---- 覆写敌人 hp ----
++        int m = static_cast<int>(enemy_hps.size());
++        for (int i = 0; i < m && i < bc.monsters.monsterCount; ++i) {
++            if (enemy_hps[i] > 0) {
++                bc.monsters.arr[i].curHp = enemy_hps[i];
++                if (enemy_hps[i] > bc.monsters.arr[i].maxHp) {
++                    bc.monsters.arr[i].maxHp = enemy_hps[i];
++                }
++            }
++        }
++
++        return bc;
++    }
++
++    // 只构造战斗、不覆写敌人 hp / 不塞手牌 / 不覆写玩家 buff 的 helper:
++    //   要验收 "怪物按 seed 随机生成的真实 HP / 首回合意图 / pre-battle 开战机制",
++    //   必须让引擎自己 init 怪物 (setRandomHp / rollMove 首招 / preBattleAction 开战 buff)
++    //   而不被任何覆写污染。返回 init 完的 BattleContext, snapshot 里读到的就是引擎真值。
++    //     gc        : Python 侧构造好的 GameContext (seed / ascension 等基底)
++    //     encounter : 选哪个遭遇
++    //     player_hp : 覆写玩家当前血量 (<=0 表示不覆写, 不影响怪物验收)
++    //     energy    : 覆写本回合能量 (<0 表示不覆写)
++    //     relics    : 装到玩家身上的遗物 (init 前 obtain, 这样 atBattleStart 真触发)
++    BattleContext make_encounter(
++            const GameContext &gc,
++            MonsterEncounter encounter,
++            int player_hp,
++            int energy,
++            const std::vector<RelicId> &relics) {
++        GameContext gcLocal = gc;
++        if (player_hp > 0) {
++            gcLocal.curHp = player_hp;
++            if (player_hp > gcLocal.maxHp) {
++                gcLocal.maxHp = player_hp;
++            }
++        }
++        for (RelicId rid : relics) {
++            if (rid != RelicId::INVALID && !gcLocal.relics.has(rid)) {
++                gcLocal.obtainRelic(rid);
++            }
++        }
++        BattleContext bc;
++        bc.init(gcLocal, encounter);
++        if (energy >= 0) {
++            bc.player.energy = energy;
++        }
++        // 注意: 不动 enemy hp / hand / strength / block, 全部保留引擎按 seed 生成的真值。
++        return bc;
++    }
++
++    // 打出指定手牌索引的卡, target_index 指敌人 idx (非目标卡可填 0)。
++    // 先用 isValidAction 校验: 不合法 (如 Clash 手里有非攻击牌时不可打出) 直接返回
++    // false 不执行, 避免 execute 内部 assert/UB 崩溃。合法则打出返回 true。
++    bool play_card(BattleContext &bc, int hand_index, int target_index) {
++        search::Action action(search::ActionType::CARD, hand_index, target_index);
++        if (!action.isValidAction(bc)) {
++            return false;
++        }
++        action.execute(bc);
++        return true;
++    }
++
++    // 结束当前回合 (会触发敌人行动)
++    void end_turn(BattleContext &bc) {
++        search::Action(search::ActionType::END_TURN).execute(bc);
++    }
++
++    // 读取战斗快照, 中性 dict 结构:
++    //   { player: {...}, enemies: [ {...}, ... ], outcome: str, turn: int }
++    pybind11::dict get_combat_snapshot(const BattleContext &bc) {
++        namespace py = pybind11;
++        py::dict snap;
++
++        py::dict player;
++        player["hp"] = bc.player.curHp;
++        player["max_hp"] = bc.player.maxHp;
++        player["block"] = bc.player.block;
++        player["energy"] = bc.player.energy;
++        player["strength"] = bc.player.getStatus<PS::STRENGTH>();
++        player["dexterity"] = bc.player.getStatus<PS::DEXTERITY>();
++        player["artifact"] = bc.player.getStatus<PS::ARTIFACT>();
++        player["vulnerable"] = bc.player.getStatus<PS::VULNERABLE>();
++        player["weak"] = bc.player.getStatus<PS::WEAK>();
++        player["frail"] = bc.player.getStatus<PS::FRAIL>();
++        // ---- 遗物验收新增字段 ----
++        player["thorns"] = bc.player.getStatus<PS::THORNS>();
++        player["metallicize"] = bc.player.getStatus<PS::METALLICIZE>();
++        player["regen"] = bc.player.getStatus<PS::REGEN>();
++        player["ritual"] = bc.player.getStatus<PS::RITUAL>();
++        player["vigor"] = bc.player.getStatus<PS::VIGOR>();
++        // ---- 卡牌验收新增字段 (此前 snapshot 不暴露, 导致这些状态卡误判红灯) ----
++        player["no_draw"] = bc.player.getStatus<PS::NO_DRAW>();        // Battle Trance
++        player["no_block"] = bc.player.getStatus<PS::NO_BLOCK>();      // Panic Button
++        // BARRICADE 是 bit-only boolean power (不写 statusMap), getStatus 会 .at() 抛异常,
++        // 必须用 hasStatus 读 (0/1)。
++        player["barricade"] = bc.player.hasStatus<PS::BARRICADE>() ? 1 : 0;  // Barricade
++        player["strength"] = bc.player.getStatus<PS::STRENGTH>();
++        player["energy_per_turn"] = bc.player.energyPerTurn;          // Berserk (+1/turn)
++        snap["player"] = player;
++
++        py::list enemies;
++        for (int i = 0; i < bc.monsters.monsterCount; ++i) {
++            const auto &e = bc.monsters.arr[i];
++            py::dict ed;
++            ed["idx"] = i;
++            ed["name"] = e.getName();
++            ed["hp"] = e.curHp;
++            ed["max_hp"] = e.maxHp;
++            ed["block"] = e.block;
++            ed["alive"] = e.isAlive();
++            ed["strength"] = e.getStatus<MS::STRENGTH>();
++            ed["vulnerable"] = e.getStatus<MS::VULNERABLE>();
++            ed["weak"] = e.getStatus<MS::WEAK>();
++            ed["poison"] = e.getStatus<MS::POISON>();
++            ed["metallicize"] = e.getStatus<MS::METALLICIZE>();
++            ed["ritual"] = e.getStatus<MS::RITUAL>();
++            ed["artifact"] = e.getStatus<MS::ARTIFACT>();
++            // Dark Shackles: 临时 -X 力量, 引擎记为 SHACKLED 层数 (回合末还回去)
++            ed["shackled"] = e.getStatus<MS::SHACKLED>();
++            // GENERIC_STRENGTH_UP: 部分怪 (如 Orb Walker) 的开战力量是 "每回合开始 +X 力量"
++            // 的 power, 不是开战瞬间的 STRENGTH 叠层。导出供验收区分 "真没加力量" vs "力量是 power 形式"。
++            ed["strength_up"] = e.getStatus<MS::GENERIC_STRENGTH_UP>();
++            // ---- 怪物意图验收新增字段 ----
++            // 当前/本回合招式 = moveHistory[0] (setMove 最近写入的那个; isAttacking() 也读它)。
++            MMID move = e.moveHistory[0];
++            ed["move_id"] = static_cast<int>(move);
++            ed["intent"] = std::string(monsterMoveStrings[static_cast<int>(move)]);
++            bool isAttack = isMoveAttack(move);
++            ed["is_attack"] = isAttack;
++            if (isAttack) {
++                // getMoveBaseDamage 返回本招式的基础伤害 + 段数 (未含玩家侧 vuln 等)。
++                DamageInfo di = e.getMoveBaseDamage(bc);
++                ed["intent_damage"] = di.damage;
++                ed["intent_hits"] = di.attackCount;
++            } else {
++                // 非攻击意图: damage 标 -1 表示 "无攻击伤害", 段数 0。
++                ed["intent_damage"] = -1;
++                ed["intent_hits"] = 0;
++            }
++            enemies.append(ed);
++        }
++        snap["enemies"] = enemies;
++
++        // ---- 牌堆内容 (pile inspection) ----
++        // 每堆导出卡名 list + 大小, 供验 Anger(复制进弃堆) / Wild Strike(Wound 进抽堆) /
++        // Pommel Strike(抽牌) / Pummel(Exhaust) / deck_composition 等机制。
++        // hand 只读 cardsInHand 张; draw/discard/exhaust 读整 vector。
++        auto pileNames = [](const auto &begin, const auto &end) {
++            namespace py = pybind11;
++            py::list names;
++            for (auto it = begin; it != end; ++it) {
++                names.append(std::string(it->getName()));
++            }
++            return names;
++        };
++        py::list handNames;
++        for (int i = 0; i < bc.cards.cardsInHand && i < CardManager::MAX_HAND_SIZE; ++i) {
++            handNames.append(std::string(bc.cards.hand[i].getName()));
++        }
++        snap["hand"] = handNames;
++        snap["draw_pile"] = pileNames(bc.cards.drawPile.begin(), bc.cards.drawPile.end());
++        snap["discard_pile"] = pileNames(bc.cards.discardPile.begin(), bc.cards.discardPile.end());
++        snap["exhaust_pile"] = pileNames(bc.cards.exhaustPile.begin(), bc.cards.exhaustPile.end());
++        snap["hand_size"] = bc.cards.cardsInHand;
++        snap["draw_pile_size"] = static_cast<int>(bc.cards.drawPile.size());
++        snap["discard_pile_size"] = static_cast<int>(bc.cards.discardPile.size());
++        snap["exhaust_pile_size"] = static_cast<int>(bc.cards.exhaustPile.size());
++
++        snap["outcome"] = static_cast<int>(bc.outcome);
++        snap["turn"] = bc.turn;
++        snap["cards_in_hand"] = bc.cards.cardsInHand;
++        return snap;
++    }
++
++    // ========================================================================
++    //  整局导航 (whole-game navigation)
++    //  目标: 让 Python 在每个元决策点 "读 screen/state + 可选项 -> 选一个", 把战斗
++    //        当黑盒交给引擎 MCTS 解决, 一直推进到 outcome != UNDECIDED。
++    //  设计: 统一用引擎自带的 search::GameAction::getAllActionsInState(gc) 枚举当前
++    //        screen 的所有合法动作, a.execute(gc) 应用。战斗单开一个 play_battle()。
++    // ========================================================================
++
++    static const char* screenStateName(ScreenState s) {
++        switch (s) {
++            case ScreenState::INVALID: return "INVALID";
++            case ScreenState::EVENT_SCREEN: return "EVENT_SCREEN";
++            case ScreenState::REWARDS: return "REWARDS";
++            case ScreenState::BOSS_RELIC_REWARDS: return "BOSS_RELIC_REWARDS";
++            case ScreenState::CARD_SELECT: return "CARD_SELECT";
++            case ScreenState::MAP_SCREEN: return "MAP_SCREEN";
++            case ScreenState::TREASURE_ROOM: return "TREASURE_ROOM";
++            case ScreenState::REST_ROOM: return "REST_ROOM";
++            case ScreenState::SHOP_ROOM: return "SHOP_ROOM";
++            case ScreenState::BATTLE: return "BATTLE";
++            default: return "?";
++        }
++    }
++
++    static const char* roomName(Room r) {
++        switch (r) {
++            case Room::SHOP: return "SHOP";
++            case Room::REST: return "REST";
++            case Room::EVENT: return "EVENT";
++            case Room::ELITE: return "ELITE";
++            case Room::MONSTER: return "MONSTER";
++            case Room::TREASURE: return "TREASURE";
++            case Room::BOSS: return "BOSS";
++            case Room::BOSS_TREASURE: return "BOSS_TREASURE";
++            case Room::NONE: return "NONE";
++            default: return "INVALID";
++        }
++    }
++
++    // 给一个 GameAction 在当前 screen 下生成人类可读 label (用于诊断/Python 侧打印)
++    static std::string actionLabel(const GameContext &gc, const search::GameAction &a) {
++        using RAT = search::GameAction::RewardsActionType;
++        std::ostringstream os;
++        switch (gc.screenState) {
++            case ScreenState::MAP_SCREEN:
++                os << "MAP->node_x=" << a.getIdx1();
++                break;
++            case ScreenState::EVENT_SCREEN:
++                os << "EVENT_choice=" << a.getIdx1();
++                break;
++            case ScreenState::REWARDS: {
++                switch (a.getRewardsActionType()) {
++                    case RAT::CARD: {
++                        const auto &r = gc.info.rewardsContainer;
++                        int ri = a.getIdx1();
++                        int ci = a.getIdx2();
++                        if (ri < r.cardRewardCount && ci < r.cardRewards[ri].size()) {
++                            os << "REWARD_card=" << r.cardRewards[ri][ci].getName();
++                        } else {
++                            os << "REWARD_card[" << ri << "," << ci << "]";
++                        }
++                        break;
++                    }
++                    case RAT::GOLD: os << "REWARD_gold"; break;
++                    case RAT::RELIC: os << "REWARD_relic"; break;
++                    case RAT::POTION: os << "REWARD_potion"; break;
++                    case RAT::KEY: os << "REWARD_key"; break;
++                    case RAT::CARD_REMOVE: os << "REWARD_card_remove"; break;
++                    case RAT::SKIP: os << "REWARD_skip/done"; break;
++                    default: os << "REWARD_?"; break;
++                }
++                break;
++            }
++            case ScreenState::SHOP_ROOM: {
++                switch (a.getRewardsActionType()) {
++                    case RAT::CARD: {
++                        const auto &s = gc.info.shop;
++                        os << "SHOP_buy_card=" << s.cards[a.getIdx1()].getName()
++                           << "($" << s.cardPrice(a.getIdx1()) << ")";
++                        break;
++                    }
++                    case RAT::RELIC: os << "SHOP_buy_relic[" << a.getIdx1() << "]"; break;
++                    case RAT::POTION: os << "SHOP_buy_potion[" << a.getIdx1() << "]"; break;
++                    case RAT::CARD_REMOVE: os << "SHOP_card_remove"; break;
++                    case RAT::SKIP: os << "SHOP_leave"; break;
++                    default: os << "SHOP_?"; break;
++                }
++                break;
++            }
++            case ScreenState::REST_ROOM: {
++                static const char* rest[] = {"REST", "SMITH", "RECALL", "LIFT", "TOKE", "DIG", "SKIP"};
++                int i = a.getIdx1();
++                os << "CAMPFIRE_" << ((i >= 0 && i <= 6) ? rest[i] : "?");
++                break;
++            }
++            case ScreenState::TREASURE_ROOM:
++                os << (a.getIdx1() == 0 ? "TREASURE_open" : "TREASURE_skip");
++                break;
++            case ScreenState::BOSS_RELIC_REWARDS:
++                os << (a.getIdx1() == 3 ? "BOSS_RELIC_skip" : ("BOSS_RELIC_pick=" + std::to_string(a.getIdx1())));
++                break;
++            case ScreenState::CARD_SELECT: {
++                int i = a.getIdx1();
++                if (i < gc.info.toSelectCards.size()) {
++                    os << "CARD_SELECT=" << gc.info.toSelectCards[i].card.getName();
++                } else {
++                    os << "CARD_SELECT[" << i << "]";
++                }
++                break;
++            }
++            default:
++                os << "action_bits=" << a.bits;
++                break;
++        }
++        return os.str();
++    }
++
++    // 读当前整局状态 + 当前决策点的所有合法动作 (中性 dict)。
++    //   { outcome, screen, room, act, floor, hp, max_hp, gold, deck_size,
++    //     relics_size, map_x, map_y, in_battle, encounter, choices: [ {idx, label} ] }
++    // choices 的 idx 就是传给 step_choice 的索引 (0..len-1)。
++    pybind11::dict get_state(const GameContext &gc) {
++        namespace py = pybind11;
++        py::dict d;
++        d["outcome"] = static_cast<int>(gc.outcome);
++        d["screen"] = screenStateName(gc.screenState);
++        d["room"] = roomName(gc.curRoom);
++        d["act"] = gc.act;
++        d["floor"] = gc.floorNum;
++        d["hp"] = gc.curHp;
++        d["max_hp"] = gc.maxHp;
++        d["gold"] = gc.gold;
++        d["deck_size"] = gc.deck.size();
++        d["relics_size"] = static_cast<int>(gc.relics.relics.size());
++        d["map_x"] = gc.curMapNodeX;
++        d["map_y"] = gc.curMapNodeY;
++        d["in_battle"] = (gc.screenState == ScreenState::BATTLE);
++        d["encounter"] = static_cast<int>(gc.info.encounter);
++
++        py::list choices;
++        if (gc.outcome == GameOutcome::UNDECIDED && gc.screenState != ScreenState::BATTLE) {
++            auto actions = search::GameAction::getAllActionsInState(gc);
++            for (size_t i = 0; i < actions.size(); ++i) {
++                py::dict c;
++                c["idx"] = static_cast<int>(i);
++                c["label"] = actionLabel(gc, actions[i]);
++                choices.append(c);
++            }
++        }
++        d["choices"] = choices;
++        return d;
++    }
++
++    // 应用当前 screen 下第 choice_index 个合法动作 (来自 get_state 的 choices 索引)。
++    // 返回 true 表示成功; false 表示索引越界 / 当前不是可选动作的 screen。
++    bool step_choice(GameContext &gc, int choice_index) {
++        if (gc.outcome != GameOutcome::UNDECIDED) return false;
++        if (gc.screenState == ScreenState::BATTLE) return false;
++        auto actions = search::GameAction::getAllActionsInState(gc);
++        if (choice_index < 0 || choice_index >= static_cast<int>(actions.size())) {
++            return false;
++        }
++        actions[choice_index].execute(gc);
++        return true;
++    }
++
++    // 把当前战斗当黑盒交给引擎 MCTS 打完, 结束后写回 gc 并 regainControl (回到地图/奖励)。
++    //   sim_count: 每回合 MCTS 模拟数 (越大越强越慢); boss_mult: boss 战的额外倍率。
++    // 调用前提: gc.screenState == BATTLE。打完后 gc 要么进入下一个 screen (胜),
++    //           要么 outcome = PLAYER_LOSS (死)。
++    void play_battle(GameContext &gc, int sim_count, double boss_mult) {
++        if (gc.screenState != ScreenState::BATTLE) {
++            return;
++        }
++        search::ScumSearchAgent2 agent;
++        agent.simulationCountBase = sim_count;
++        agent.bossSimulationMultiplier = boss_mult;
++        agent.printLogs = false;
++        agent.printActions = false;
++
++        BattleContext bc;
++        bc.init(gc);
++        agent.playoutBattle(bc);
++        bc.exitBattle(gc);
++    }
++
++}
++
+ PYBIND11_MODULE(slaythespire, m) {
+     m.doc() = "pybind11 example plugin"; // optional module docstring
+     m.def("play", &sts::py::play, "play Slay the Spire Console");
+@@ -105,6 +586,59 @@ PYBIND11_MODULE(slaythespire, m) {
+         .def_readwrite("speedrun_pace", &GameContext::speedrunPace)
+         .def_readwrite("note_for_yourself_card", &GameContext::noteForYourselfCard);
+ 
++    // ===== 受控战斗探针 (combat probe) =====
++    pybind11::class_<BattleContext> battleContext(m, "BattleContext");
++    battleContext
++        .def("__repr__", [](const BattleContext &bc) {
++            std::ostringstream oss;
++            oss << bc;
++            return oss.str();
++        });
++
++    m.def("make_test_combat", &sts::probe::make_test_combat,
++          pybind11::arg("gc"),
++          pybind11::arg("encounter"),
++          pybind11::arg("player_hp") = 0,
++          pybind11::arg("energy") = 3,
++          pybind11::arg("hand") = std::vector<CardId>{},
++          pybind11::arg("enemy_hps") = std::vector<int>{},
++          pybind11::arg("strength") = std::numeric_limits<int>::min(),
++          pybind11::arg("block") = std::numeric_limits<int>::min(),
++          pybind11::arg("relics") = std::vector<RelicId>{},
++          pybind11::arg("draw_pile") = std::vector<CardId>{},
++          pybind11::arg("clear_draw_pile") = false,
++          "construct a controlled BattleContext: override player hp/energy/strength/block, hand cards, enemy hps, "
++          "equip relics (obtained before init so atBattleStart effects fire), and seed the draw pile "
++          "(list order = bottom->top, last element is top of draw pile). clear_draw_pile=true wipes the "
++          "init-dealt starter draw pile first for deterministic pile contents");
++    m.def("make_encounter", &sts::probe::make_encounter,
++          pybind11::arg("gc"),
++          pybind11::arg("encounter"),
++          pybind11::arg("player_hp") = 0,
++          pybind11::arg("energy") = 3,
++          pybind11::arg("relics") = std::vector<RelicId>{},
++          "construct a BattleContext WITHOUT overriding enemy hp/hand/buffs: lets the engine "
++          "roll seed-based monster hp, first-turn intent, and pre-battle (atBattleStart) effects "
++          "so they can be audited as engine ground truth");
++    m.def("play_card", &sts::probe::play_card,
++          pybind11::arg("bc"), pybind11::arg("hand_index"), pybind11::arg("target_index") = 0,
++          "play the card at hand_index against enemy target_index");
++    m.def("end_turn", &sts::probe::end_turn,
++          pybind11::arg("bc"), "end the player turn (triggers monster actions)");
++    m.def("get_combat_snapshot", &sts::probe::get_combat_snapshot,
++          pybind11::arg("bc"), "return a neutral dict snapshot of player + enemies state");
++
++    // ===== 整局导航 (whole-game navigation) =====
++    m.def("get_state", &sts::probe::get_state,
++          pybind11::arg("gc"),
++          "read current whole-game state + all legal choices at the current decision point");
++    m.def("step_choice", &sts::probe::step_choice,
++          pybind11::arg("gc"), pybind11::arg("choice_index"),
++          "apply the choice_index-th legal action from get_state(gc)['choices']");
++    m.def("play_battle", &sts::probe::play_battle,
++          pybind11::arg("gc"), pybind11::arg("sim_count") = 1000, pybind11::arg("boss_mult") = 3.0,
++          "let the engine MCTS play out the current battle as a black box, then return to the map");
++
+     pybind11::class_<RelicInstance> relic(m, "Relic");
+     relic.def_readwrite("id", &RelicInstance::id)
+         .def_readwrite("data", &RelicInstance::data);
+diff --git a/include/constants/Cards.h b/include/constants/Cards.h
+index 9583f6c..e3aba7c 100644
+--- a/include/constants/Cards.h
++++ b/include/constants/Cards.h
+@@ -738,6 +738,7 @@ namespace sts {
+             case CardId::SECRET_WEAPON:
+             case CardId::SWIFT_STRIKE:
+             case CardId::THINKING_AHEAD:
++            case CardId::TRIP: // 无色 Trip 是 0 费（wiki + StSRLSolver 一致）；原实现错放在 1 费组
+             case CardId::VIOLENCE:
+             case CardId::WARCRY:
+                 return 0;
+@@ -752,7 +753,6 @@ namespace sts {
+             case CardId::STRIKE_PURPLE:
+             case CardId::STRIKE_RED:
+             case CardId::SWORD_BOOMERANG:
+-            case CardId::TRIP:
+             case CardId::TRUE_GRIT:
+             case CardId::WILD_STRIKE:
+                 return 1;
+diff --git a/src/combat/BattleContext.cpp b/src/combat/BattleContext.cpp
+index 965faef..76ca3d8 100644
+--- a/src/combat/BattleContext.cpp
++++ b/src/combat/BattleContext.cpp
+@@ -1263,10 +1263,11 @@ void BattleContext::useSkillCard() {
+             break;
+ 
+         case CardId::DARK_SHACKLES:
+-            addToBot( Actions::DebuffEnemy<MS::STRENGTH>(t, up ? 15 : 9) );
+-            if (monsters.arr[t].hasStatus<MS::ARTIFACT>()) {
+-                addToBot( Actions::BuffEnemy<MS::SHACKLED>(t, up ? 15 : 9) );
+-            }
++            // Dark Shackles: 目标本回合「失去 X 力量」（debuff），回合开始时由 SHACKLED 还回去。
++            // 原实现给的是正 +X（符号反了，实际给敌人加力量），且只在 ARTIFACT 时才挂 SHACKLED。
++            // 正确语义：STRENGTH 减 X（临时），SHACKLED +X（敌人回合开始还原），二者恒成对出现。
++            addToBot( Actions::DebuffEnemy<MS::STRENGTH>(t, up ? -15 : -9, false) );
++            addToBot( Actions::BuffEnemy<MS::SHACKLED>(t, up ? 15 : 9) );
+             break;
+ 
+         case CardId::DEEP_BREATH:

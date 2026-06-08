@@ -33,8 +33,17 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
   —— 死亡局净赚 +485 —— 删除）。战斗 per-card 细账由引擎 `CombatResult.card_log` /
   `game.last_combat_card_log` 导出，env 存 `_last_combat_card_log`
   （引擎 fork commit `75cb883d` + 主仓 `5cc87a9`），现仅供 `card_scorer` 打分作特征。
+- `v8/backends/lightspeed_backend.py` — **现役训练引擎后端**：LightspeedBackend 实现
+  `GameBackend` 中间层，把 V8 训练接到 sts_lightspeed（C++ .dylib，社区金标准，gitignored
+  clone 在 `external/sts_lightspeed`）。phase 透传债已抹平。比旧 StSRLSolver 快 30-135×。
 - `tools/v8_ppo_train.py` — 训练入口。常用参数：`--num_episodes` `--batch_size`
-  `--checkpoint_frequency` `--eval_frequency` `--output_dir` `--smoke`。
+  `--checkpoint_frequency` `--eval_frequency` `--output_dir` `--smoke`，
+  **lightspeed 时代新开关**：`--engine lightspeed` `--combat_tier`（按房型分级 sim_count）
+  `--entropy_coef` `--boss_sim_count` `--eval_only`。
+- `tools/v8_autoiterate.sh` — **7×24 永续自驱迭代驱动**（配置搜索 + 只留改善 + 删废盘 +
+  队列注入 + 96 种子采纳复测）。日志 `/tmp/v8_autoiterate.out`、状态 `/tmp/v8_autoiterate_status.md`、
+  队列 `/tmp/v8_iter_queue.txt`、停止信号 `/tmp/v8_iter_STOP`。**会话恢复见
+  `docs/v8_autoiterate_runbook.md`**。
 - `data/sts_data.py` — STS 数据提取（V6 遗留，可能复用）。
 - 归档但保留参考：`v8_bot.py`（战斗内 search infra，元决策 dispatch 已被 V8 RL 取代）、
   `v8_data_collector.py`（JSONL schema 参考，import 已 archive 模块所以无法直接运行）。
@@ -165,7 +174,32 @@ ML 学习进阶项目：监督学习 → DQN → PPO+Transformer。最终目标�
 
 ## 当前状态
 
-<!-- last-verified: 2026-06-04 (本次变更: 建引擎无关测试台证伪 legacy Python StSRLSolver 系统性坏, 拿测试集验证 sts_lightspeed 为准确引擎, 现役方向是把训练引擎从 StSRLSolver 换到 lightspeed) -->
+<!-- last-verified: 2026-06-08 (本次变更: 引擎已换 lightspeed 并经测试台验证现役训练; 当前最优 agent best_t0029_c2_explore++ 96 种子真实指标一幕~99%/二幕~43%/通关0/floor~35; 7×24 自驱迭代在跑; CLI 旋钮搜索 plateau, 下一步转持续长训; 会话恢复见 docs/v8_autoiterate_runbook.md) -->
+- 2026-06-08: **引擎已换 sts_lightspeed 并现役训练 + 7×24 自驱迭代在跑（CLI 旋钮 plateau，下一步转长训）**。
+  - **引擎换代落地**：训练引擎从 legacy StSRLSolver 换成 **sts_lightspeed**（社区金标准，
+    C++ + pybind11，clone 在 `external/sts_lightspeed` gitignored，已编译 .dylib）。
+    引擎无关测试台验收：卡 84/84（修 2 个 bug 后）、遗物 11/11、怪物 17/18。比旧引擎快 30-135×。
+    训练现役走 `v8/backends/lightspeed_backend.py`（LightspeedBackend 实现 GameBackend，
+    phase 透传债已抹平），入口 `tools/v8_ppo_train.py --engine lightspeed`。
+  - **当前最优 agent**：`sts_models/iter_best/best_t0029_c2_explore++.pt`（ep8608）。
+    **96 种子严格口径**（采纳复测，对 final ckpt 单独跑）：一幕 ~99% / 二幕 ~43%（a2=0.4271）/
+    通关 0 / floor_mean ~35。（注：旧 48 种子报的「二幕 54% / 通关 6%」是小样本噪声；
+    96 种子才是诚实值。归因复核里一组跑出 won 6/96=6.25%，仍是稀有事件，采纳口径记 won=0。）
+  - **7×24 自驱迭代在跑**：`tools/v8_autoiterate.sh`（永续配置搜索 + 只留改善 + 删废 +
+    96 种子采纳复测 + 队列注入）。状态 `/tmp/v8_autoiterate_status.md`、日志
+    `/tmp/v8_autoiterate.out`、队列 `/tmp/v8_iter_queue.txt`、停止信号 `/tmp/v8_iter_STOP`。
+  - **plateau + 下一步**：CLI 旋钮搜索（探索熵 / boss 搜索预算 / late_boss_bonus 牵引）已
+    **plateau、通关恒 0**。**下一步转持续长训**——拿最优配置（c2_explore++:
+    `--combat_tier --entropy_coef 0.08`）从最优 ckpt 长训到 ~20000-24000 局，给 agent
+    时间学三幕 boss（确切命令见 `docs/v8_autoiterate_runbook.md`）。
+  - **前沿 + 根因**：三幕 boss 打不过（到 floor49 团灭）；根因 = 慢性失血（46%，多在
+    mid-act 精英 / 怪）+ 二幕 boss 满血团灭（24%）；boss 搜索是边际杠杆非主因（已证伪）；
+    「健康到达 boss」奖励（W_BOSS_HP）已现役。
+  - **待人工审 / 授权**：① reward 级「血量管理 / 强牌组」塑形——因反作弊风险（教苟活 / 逃战）
+    压着没上，要上需设计后人工审；② t0064 孤儿 ckpt（~76M）删除需用户授权（destructive）；
+    ③ lightspeed pybind11 绑定在 gitignored clone 里没进 git，已导成
+    `external/sts_lightspeed_patches/0003-*.patch` 存档（重 clone 必须 apply）。
+  - **会话恢复见 `docs/v8_autoiterate_runbook.md`**（接管手册：查状态 / 停 / 长训命令 / 巡检 prompt）。
 - 2026-06-04: **引擎换代——测试台证伪 legacy Python 引擎、锁定并验证 sts_lightspeed 为准确引擎，现役方向是换引擎到 lightspeed**。
   - **建测试台**：引擎无关的卡牌/遗物/怪物行为测试台（`CombatProbe` 接口 + 独立 wiki
     oracle + 后端无关跑器），证明能逮真 bug。新增代码见下方「活跃代码」段「引擎验收测试台」。

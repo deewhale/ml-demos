@@ -9,15 +9,21 @@
 
 ## 如何应用
 
+> **重要**：`0003` 是从工作树整体导出的（含全套 pybind11 绑定 **+ 0001 / 0002 两个 bug
+> 修也已包含在内**）。所以 **fresh clone 只 apply `0003` 一个就够**，不要再 apply
+> 0001 / 0002（会与 0003 里的同段改动冲突）。0001 / 0002 保留作单点 bug 的可读说明 + 备份。
+
 ```bash
 cd external/sts_lightspeed
-for p in ../sts_lightspeed_patches/*.patch; do
-    git apply "$p"
-done
-# 重编（用本仓库 venv 的 cmake）
-.../.venv/bin/cmake --build build --target slaythespire -j 10
-# 验收
-.../.venv/bin/python tools/test_lightspeed_card_behavior.py   # 应 84/84 全过
+# 一步到位：0003 已含绑定 + 两个 bug 修
+git apply ../sts_lightspeed_patches/0003-pybind-bindings-combat-fullgame-relic-monster.patch \
+  || git apply --3way ../sts_lightspeed_patches/0003-pybind-bindings-combat-fullgame-relic-monster.patch
+# 绑定依赖 pybind11 子模块
+git submodule update --init --recursive
+# 重编（用本仓库 venv 的 cmake；<repo> = ml-demos 仓库根）
+<repo>/.venv/bin/cmake -S . -B build && <repo>/.venv/bin/cmake --build build --target slaythespire -j 10
+# 验收（应 84/84 全过）
+<repo>/.venv/bin/python tools/test_card_behavior.py
 ```
 
 > 注：补丁是 `git diff` 格式（`a/...` `b/...` 相对仓库根），对 fresh clone 用
@@ -50,3 +56,16 @@ done
   （无色 Trip 应 0 费），不是同名异卡 —— 改引擎，不改 oracle。
 - **修复**：把 `CardId::TRIP` 从 `getEnergyCost` 的 `return 1` 组挪到 `return 0` 组。
 - **验收**：oracle 断言 `expect_energy_delta=0` + `Vulnerable: 2`。修前费 1 → energy_delta=-1 = 红灯，修后绿。
+
+### 0003-pybind-bindings-combat-fullgame-relic-monster.patch（**主补丁，fresh clone 只 apply 这个**）
+- **文件**：`bindings/slaythespire.cpp`（+534 行绑定）、`include/constants/Cards.h`、
+  `src/combat/BattleContext.cpp`（后两者即 0001 / 0002 的 bug 修，已合并进来）。
+- **内容**：从工作树整体导出的全套 **pybind11 绑定**——这是把 V8 训练接到 lightspeed 的命脉，
+  也是 gitignored clone 里**唯一没进本仓库 git** 的关键源码。绑定覆盖：
+  - 战斗探针：`make_test_combat` / `get_state` / `step_choice` 等（供测试台 CombatProbe）；
+  - 整局驱动：`play_battle` / `make_encounter`（供 LightspeedBackend 整局导航）；
+  - 遗物 / 怪物字段：遗物状态、敌人 HP / 意图字段等（供 relic / monster probe + 训练状态编码）。
+- **为什么是主补丁**：`0003` = 绑定 + 0001 + 0002 三者合一。重 clone 后 **只 apply 0003**
+  即可拿到全部修复 + 绑定，**别再 apply 0001 / 0002**（会与 0003 内同段改动冲突）。
+- **重建依赖**：apply 后必须 `git submodule update --init --recursive`（pybind11 子模块），
+  否则编译找不到 pybind11 头。重编 + 验收命令见上方「如何应用」。
