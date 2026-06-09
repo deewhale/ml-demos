@@ -71,6 +71,7 @@ from v8.reward import (
     compute_floor_progress_reward,
     compute_boss_beat_reward,
     compute_boss_hp_reward,
+    compute_deck_leanness_reward,
     NODE_REWARD_EVENT_SUCCESS,
     NODE_REWARD_SHOP_RELIC,
     NODE_REWARD_REST_USE,
@@ -300,6 +301,10 @@ class V8Env:
         # reward 计算需要的历史
         self._prev_state: Optional[V8State] = None
 
+        # 牌组精简引导（实验 V8_DECK_LEANNESS）：跨 step 记录上一元决策点的 deck_size，
+        # 用本 step 的 old→new 变化算 compute_deck_leanness_reward（默认关时不影响 reward）。
+        self._prev_deck_size: int = 0
+
         # 真实战斗 reward 缓存：_log_combat_exit 算好，step() 下次 reward 计算时取出
         # 一次性塞进去。单 step 内多场战斗（罕见 e.g. event→combat→event→combat）会累加。
         self._pending_combat_reward: float = 0.0
@@ -473,6 +478,8 @@ class V8Env:
 
         self._current_state = state
         self._prev_state = state
+        # 牌组精简引导：记开局 deck_size 作为下一 step 的「old」基线（默认关时仅记录不用）。
+        self._prev_deck_size = len(state.deck or [])
         return state
 
     def step(
@@ -611,13 +618,28 @@ class V8Env:
         self._pending_floor_reward = 0.0
         info["floor_reward"] = floor_reward
 
-        # 计算 step reward（进度主轴 + 战斗小信号 + 节点收益）
+        # 牌组精简引导（实验 V8_DECK_LEANNESS，默认关 → 恒 0、不影响 reward）：
+        # 用本 step 的 old→new deck_size 变化算精简奖励（只在拿牌/删牌那步非 0）。
+        old_deck_size = int(self._prev_deck_size)
+        new_deck_size = len(next_state.deck or [])
+        deck_leanness_reward = compute_deck_leanness_reward(old_deck_size, new_deck_size)
+        info["deck_leanness_reward"] = deck_leanness_reward
+        if deck_leanness_reward != 0.0:
+            logger.info(
+                "[deck_lean] ep=%s floor=%s deck %d->%d delta_reward=%.2f",
+                self._episode_idx, getattr(next_state, "floor", "?"),
+                old_deck_size, new_deck_size, deck_leanness_reward,
+            )
+        self._prev_deck_size = new_deck_size
+
+        # 计算 step reward（进度主轴 + 战斗小信号 + 节点收益 + 牌组精简引导）
         step_reward = compute_step_reward(
             prev_state=self._prev_state if self._prev_state is not None else next_state,
             next_state=next_state,
             node_reward=node_reward,
             combat_reward=combat_reward,
             floor_reward=floor_reward,
+            deck_leanness_reward=deck_leanness_reward,
         )
 
         # done 判定

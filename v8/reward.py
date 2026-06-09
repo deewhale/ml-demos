@@ -99,6 +99,94 @@ def _act_scale(act: int) -> float:
 
 
 # ============================================================
+# 实验：牌组精简引导（env var 控制，默认关 —— 默认行为逐字节不变）
+# ============================================================
+# 诊断结论（2026-06-08）：模型搭的牌组臃肿 —— 到三幕 boss 平均 36 张、开局 5 打击
+# 4 防御从不删、平均仅 1.5 张成长卡无核心 → 健康到达 boss 却打不动。现成 card_scorer
+# 是「总伤害和」会鼓励囤牌、不能用。本变体只奖「精简」、不碰总伤害，做干净 A/B。
+#
+# 设计成 env var 控制、默认关：未设 V8_DECK_LEANNESS=1 时，本项恒返回 0.0，
+# step / combat / final reward 与旧版逐字节一致，保证基线不被污染。
+#
+# **量级设计意图（关键，吸取 strength_reward 教训）**：
+#   2026-06-01 (commit 60ea0b9) 删除的 strength_reward（8×Δdeck_strength）因占总奖励
+#   ~73%（死亡局都净赚 +485）被证明是 reward-hacking 元凶。本项严守「极小权重 + 只压囤积」
+#   避坑：一整局总影响设计在 O(±5) 量级，远小于 floor 主轴(~150)/过 boss(+25)/通关(+100)，
+#   绝不让它接近主轴量级、绝不变成新的刷分通道。
+#
+# **反作弊硬约束**（防 skip-all / 删到残废）：
+#   1. target(=30) 及以下拿牌零惩罚 —— 鼓励正常成型，只压超标囤积，不逼 skip-all。
+#   2. 拿牌只罚「这一张把牌组顶到超标的边际牌」的增量（不重复罚已超标存量）。
+#   3. 删牌奖励只在 deck > target 时给（删到 target 即停奖），防把牌组删到残废。
+
+def _deck_leanness_enabled() -> bool:
+    """实验开关：环境变量 V8_DECK_LEANNESS ∈ {1,true,yes,on} 时启用，默认关。"""
+    return os.environ.get("V8_DECK_LEANNESS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _deck_size_target() -> int:
+    """牌组目标上限（默认 30 张）；30 及以下不罚。env var V8_DECK_TARGET 可调。"""
+    try:
+        return int(os.environ.get("V8_DECK_TARGET", "30"))
+    except (TypeError, ValueError):
+        return 30
+
+
+def _w_deck_bloat() -> float:
+    """拿牌后超目标的每张牌惩罚权重（默认 0.5）。env var V8_DECK_BLOAT_W 可调。"""
+    try:
+        return float(os.environ.get("V8_DECK_BLOAT_W", "0.5"))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _w_deck_thin() -> float:
+    """删牌（处于超标区间）奖励权重（默认 0.5）。env var V8_DECK_THIN_W 可调。"""
+    try:
+        return float(os.environ.get("V8_DECK_THIN_W", "0.5"))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def compute_deck_leanness_reward(old_deck_size: int, new_deck_size: int) -> float:
+    """牌组精简引导奖励（默认关；V8_DECK_LEANNESS=1 才生效）。
+
+    只在 deck 发生变化的那一步触发（拿牌 / 删牌），不是每步累计。
+
+    逻辑（target=DECK_SIZE_TARGET，默认 30）：
+      - 拿牌（new > old 且 new > target）：罚「把牌组顶到超标的边际牌」的增量
+            r -= W_DECK_BLOAT × max(0, new - max(target, old))
+        即只罚这一步新增的、处于超标区间(>target)的那部分，不重复罚已超标存量。
+      - 删牌（new < old 且 old > target）：奖删掉的、处于超标区间的牌数
+            r += W_DECK_THIN × (min(old, removed_in_bloat_zone))
+        精确点：奖 max(0, old - max(target, new))（删前超标、删到 target 即停奖）。
+
+    反作弊：target 及以下拿牌零惩罚；删到 target 后删牌不再奖（防删残）。
+
+    返回：float（默认关时恒 0.0，行为不变）。
+    """
+    if not _deck_leanness_enabled():
+        return 0.0
+    try:
+        old = int(old_deck_size or 0)
+        new = int(new_deck_size or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if new == old:
+        return 0.0
+    target = _deck_size_target()
+    if new > old:
+        # 拿牌：只罚把牌组顶进超标区间(>target)的边际新增牌
+        bloat_added = max(0, new - max(target, old))
+        return -_w_deck_bloat() * float(bloat_added)
+    # 删牌：只奖删掉的、删前处于超标区间(>target)的牌
+    bloat_removed = max(0, old - max(target, new))
+    return _w_deck_thin() * float(bloat_removed)
+
+
+# ============================================================
 # Reward weights（step / final / 进度）
 # ============================================================
 
@@ -244,6 +332,7 @@ def compute_step_reward(
     node_reward: float = 0.0,
     combat_reward: float = 0.0,
     floor_reward: float = 0.0,
+    deck_leanness_reward: float = 0.0,
 ) -> float:
     """每个元决策 step 的 reward。
 
@@ -251,6 +340,7 @@ def compute_step_reward(
         r = W_NODE_REWARD * node_reward
             + combat_reward
             + floor_reward
+            + deck_leanness_reward   # 默认 0（实验 V8_DECK_LEANNESS 开启才非 0）
 
     其中：
         combat_reward: env 在战斗结束时一次性塞进来的**单场胜负小信号 + 过 act boss
@@ -269,6 +359,8 @@ def compute_step_reward(
         node_reward: env 内 detect 出的节点本身特殊收益（默认 0）
         combat_reward: 本 step 期间的真实战斗胜负小信号 + 过 boss 进度（默认 0）
         floor_reward: 本 step 期间到达的新楼层进度奖励（默认 0，进度主轴）
+        deck_leanness_reward: 牌组精简引导奖励（默认 0；实验 V8_DECK_LEANNESS 开启
+            时由 env 用本 step 的 old/new deck_size 算出 compute_deck_leanness_reward）
 
     返回：
         float reward（不是 NaN / inf）
@@ -277,6 +369,7 @@ def compute_step_reward(
         W_NODE_REWARD * float(node_reward)
         + float(combat_reward)
         + float(floor_reward)
+        + float(deck_leanness_reward)
     )
 
 
@@ -304,6 +397,7 @@ __all__ = [
     "compute_boss_beat_reward",
     "compute_boss_hp_reward",
     "compute_hp_terminal_reward",
+    "compute_deck_leanness_reward",
     # weights (导出方便 trainer / unit test 引用)
     "W_NODE_REWARD",
     "GAME_WON_BONUS",
