@@ -916,6 +916,25 @@ def main() -> None:
         args.combat_head_checkpoint, n_params, n_params / 1e6,
     )
 
+    # ---- [card_mech] 启动诊断：确认客观卡牌机制特征已喂进模型视野（防死特征）----
+    # 打印机制表规模 + 几张样卡的机制向量，证明特征非全 0 且卡间有别（不是又一个死特征）。
+    try:
+        from v8.card_mech import N_MECH, card_mech_vector, _get_table  # noqa: WPS433
+
+        _tbl = _get_table()
+        _strike = card_mech_vector("STRIKE_RED", False)
+        _bash = card_mech_vector("BASH", False)
+        _defend = card_mech_vector("DEFEND_RED", False)
+        logger.info(
+            "[card_mech] N_MECH=%d table_keys=%d Strike(sum=%.2f bd=%.3f) "
+            "Bash(sum=%.2f bd=%.3f) Defend(sum=%.2f bd=%.3f) distinct=%s",
+            N_MECH, len(_tbl), sum(_strike), _strike[7], sum(_bash), _bash[7],
+            sum(_defend), _defend[7],
+            (_strike != _defend and sum(map(abs, _strike)) > 0),
+        )
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[card_mech] 启动诊断失败（不阻塞训练）: %s", _e)
+
     # 2) Wrapper（让 model 在战斗 search leaf 评估时被调用）
     wrapper = V8CombatNetWrapper(model)
 

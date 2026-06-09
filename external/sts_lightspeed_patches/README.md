@@ -65,6 +65,10 @@ git submodule update --init --recursive
   - 战斗探针：`make_test_combat` / `get_state` / `step_choice` 等（供测试台 CombatProbe）；
   - 整局驱动：`play_battle` / `make_encounter`（供 LightspeedBackend 整局导航）；
   - 遗物 / 怪物字段：遗物状态、敌人 HP / 意图字段等（供 relic / monster probe + 训练状态编码）。
+  - 卡牌客观机制字段（2026-06-09 新增）：`Card.base_damage`（成员 `getBaseDamage`）+
+    `Card.cost`（namespace 自由函数 `getEnergyCost(id, upgraded)`），连同已有的
+    `type / rarity / upgraded / innate`，供 V8 模型把"玩家能看见的客观牌面机制"喂进观测
+    （**纯客观信息，非优劣评价**）。
 - **为什么是主补丁**：`0003` = 绑定 + 0001 + 0002 三者合一。重 clone 后 **只 apply 0003**
   即可拿到全部修复 + 绑定，**别再 apply 0001 / 0002**（会与 0003 内同段改动冲突）。
 - **重建依赖**：apply 后必须 `git submodule update --init --recursive`（pybind11 子模块），

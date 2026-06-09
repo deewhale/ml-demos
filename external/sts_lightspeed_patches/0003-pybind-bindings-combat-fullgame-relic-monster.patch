@@ -1,5 +1,5 @@
 diff --git a/bindings/slaythespire.cpp b/bindings/slaythespire.cpp
-index a9afe35..0315e7e 100644
+index a9afe35..f8ad815 100644
 --- a/bindings/slaythespire.cpp
 +++ b/bindings/slaythespire.cpp
 @@ -9,6 +9,7 @@
@@ -562,43 +562,18 @@ index a9afe35..0315e7e 100644
      pybind11::class_<RelicInstance> relic(m, "Relic");
      relic.def_readwrite("id", &RelicInstance::id)
          .def_readwrite("data", &RelicInstance::data);
-diff --git a/include/constants/Cards.h b/include/constants/Cards.h
-index 9583f6c..e3aba7c 100644
---- a/include/constants/Cards.h
-+++ b/include/constants/Cards.h
-@@ -738,6 +738,7 @@ namespace sts {
-             case CardId::SECRET_WEAPON:
-             case CardId::SWIFT_STRIKE:
-             case CardId::THINKING_AHEAD:
-+            case CardId::TRIP: // 无色 Trip 是 0 费（wiki + StSRLSolver 一致）；原实现错放在 1 费组
-             case CardId::VIOLENCE:
-             case CardId::WARCRY:
-                 return 0;
-@@ -752,7 +753,6 @@ namespace sts {
-             case CardId::STRIKE_PURPLE:
-             case CardId::STRIKE_RED:
-             case CardId::SWORD_BOOMERANG:
--            case CardId::TRIP:
-             case CardId::TRUE_GRIT:
-             case CardId::WILD_STRIKE:
-                 return 1;
-diff --git a/src/combat/BattleContext.cpp b/src/combat/BattleContext.cpp
-index 965faef..76ca3d8 100644
---- a/src/combat/BattleContext.cpp
-+++ b/src/combat/BattleContext.cpp
-@@ -1263,10 +1263,11 @@ void BattleContext::useSkillCard() {
-             break;
+@@ -143,7 +677,13 @@ PYBIND11_MODULE(slaythespire, m) {
+         .def_property_readonly("is_strikeCard", &Card::isStrikeCard)
+         .def_property_readonly("is_starter_strike_or_defend", &Card::isStarterStrikeOrDefend)
+         .def_property_readonly("rarity", &Card::getRarity)
+-        .def_property_readonly("type", &Card::getType);
++        .def_property_readonly("type", &Card::getType)
++        // ---- 客观机制特征 (供 V8 模型观测, 非优劣评价) ----
++        // base_damage: 卡牌基础伤害 (随 upgraded 变, 非攻击牌为 0)。Card 成员函数。
++        .def_property_readonly("base_damage", &Card::getBaseDamage)
++        // cost: 能量费用 (随 upgraded 变, X-cost 牌引擎记为 -1)。namespace 自由函数。
++        .def_property_readonly("cost",
++            [](const Card &c) { return sts::getEnergyCost(c.getId(), c.isUpgraded()); });
  
-         case CardId::DARK_SHACKLES:
--            addToBot( Actions::DebuffEnemy<MS::STRENGTH>(t, up ? 15 : 9) );
--            if (monsters.arr[t].hasStatus<MS::ARTIFACT>()) {
--                addToBot( Actions::BuffEnemy<MS::SHACKLED>(t, up ? 15 : 9) );
--            }
-+            // Dark Shackles: 目标本回合「失去 X 力量」（debuff），回合开始时由 SHACKLED 还回去。
-+            // 原实现给的是正 +X（符号反了，实际给敌人加力量），且只在 ARTIFACT 时才挂 SHACKLED。
-+            // 正确语义：STRENGTH 减 X（临时），SHACKLED +X（敌人回合开始还原），二者恒成对出现。
-+            addToBot( Actions::DebuffEnemy<MS::STRENGTH>(t, up ? -15 : -9, false) );
-+            addToBot( Actions::BuffEnemy<MS::SHACKLED>(t, up ? 15 : 9) );
-             break;
- 
-         case CardId::DEEP_BREATH:
+     pybind11::enum_<GameOutcome> gameOutcome(m, "GameOutcome");
+     gameOutcome.value("UNDECIDED", GameOutcome::UNDECIDED)

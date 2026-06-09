@@ -790,31 +790,54 @@ class V8PPOTrainer:
         兼容性策略（2026-05-13 加 boss-aware encoding 后引入）：
         - model: 用 strict=False 加载，旧 ckpt 缺新加的 boss_proj.* keys 会被忽略
           并保留 module 内 random init（log missing/unexpected 数量）。
+        - 形状不匹配的 key（如 2026-06-09 给 deck_proj / meta_key / combat_key 第一层
+          加客观卡牌机制输入维后，这三个 Linear 的 weight 形状变了）会被**逐键过滤跳过**，
+          保留 module 内 fresh init——否则 strict=False 仍会对「present 但形状变」的 key
+          raise RuntimeError。这是「部分续训」：旧学到的本事大量保留、新机制输入投影 fresh。
         - optimizer: 如果 param 数量变了（新 model 多了 boss_proj 参数），原 optimizer
           state_dict 跟 self.optimizer.param_groups 对不上，load 会 raise ValueError。
           捕获后保留 self.optimizer 的 fresh AdamW state（旧权重仍在，仅 Adam 一阶/
           二阶矩重新积累），不阻塞 resume。
         """
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        missing, unexpected = self.model.load_state_dict(
-            ckpt["model_state_dict"], strict=False
+        # 逐键过滤形状不匹配的 param（部分续训：present 但形状变的层保留 fresh init）。
+        src_sd = ckpt["model_state_dict"]
+        cur_sd = self.model.state_dict()
+        filtered_sd = {}
+        skipped_shape = []
+        for k, v in src_sd.items():
+            if k in cur_sd and cur_sd[k].shape != v.shape:
+                skipped_shape.append(k)
+                continue
+            filtered_sd[k] = v
+        missing, unexpected = self.model.load_state_dict(filtered_sd, strict=False)
+        loaded_n = len(filtered_sd) - len(unexpected)
+        logger.info(
+            "V8PPOTrainer: model partial load: loaded=%d skipped_shape=%d "
+            "missing=%d unexpected=%d (skipped_shape keys: %s; missing preview: %s)",
+            loaded_n, len(skipped_shape), len(missing), len(unexpected),
+            skipped_shape, list(missing)[:5],
         )
-        if missing or unexpected:
-            logger.info(
-                "V8PPOTrainer: model load_state_dict missing=%d unexpected=%d "
-                "(missing keys preview: %s, unexpected preview: %s)",
-                len(missing), len(unexpected),
-                list(missing)[:5], list(unexpected)[:5],
-            )
-        try:
-            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        except (ValueError, KeyError) as e:
+        # 形状改过的 param（skipped_shape）的 Adam 动量 buffer 在旧 optimizer state 里
+        # 仍是旧形状——optimizer.load_state_dict 不校验 tensor 形状会照搬，导致后续
+        # optimizer.step() 的 exp_avg.lerp_(grad) 形状不匹配崩溃。故只要有 skipped_shape，
+        # 一律保留 fresh optimizer state（旧权重仍 load 了，只是 Adam 一阶/二阶矩重新积累）。
+        if skipped_shape:
             logger.warning(
-                "V8PPOTrainer: optimizer load_state_dict mismatch (%s: %s); "
-                "keeping fresh optimizer state (model weights still loaded). "
-                "Adam moments will rebuild over next batches.",
-                type(e).__name__, e,
+                "V8PPOTrainer: %d param(s) changed shape (%s); 保留 fresh optimizer state "
+                "(避免旧 Adam 动量 buffer 形状不匹配崩溃)。Adam moments 将重新积累。",
+                len(skipped_shape), skipped_shape,
             )
+        else:
+            try:
+                self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            except (ValueError, KeyError) as e:
+                logger.warning(
+                    "V8PPOTrainer: optimizer load_state_dict mismatch (%s: %s); "
+                    "keeping fresh optimizer state (model weights still loaded). "
+                    "Adam moments will rebuild over next batches.",
+                    type(e).__name__, e,
+                )
         logger.info("V8PPOTrainer: loaded checkpoint from %s", path)
         return ckpt.get("metadata", {})
 

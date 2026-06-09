@@ -45,6 +45,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from v8.action_space import KNOWN_PHASES
+from v8.card_mech import N_MECH, card_mech_vector, mech_vector_for_action
 from v8.state import V8State
 
 
@@ -313,8 +314,10 @@ class V8Model(nn.Module):
         # ----- Set encoder：deck / relics / potions / hand 各一个（共享 token_embed）-----
         # 给 set encoder 自己的 proj head（卡组结构 vs 遗物结构略不同）
         set_out_dim = 64
+        # deck：token embed + upgrade flag(1) + 客观机制向量(N_MECH)
+        # 机制向量给模型「看见」每张牌的牌型/费用/伤害/稀有度等客观事实（非优劣评价）。
         self.deck_proj = nn.Sequential(
-            nn.Linear(embed_dim + 1, set_out_dim), nn.ReLU()
+            nn.Linear(embed_dim + 1 + N_MECH, set_out_dim), nn.ReLU()
         )
         self.relic_proj = nn.Sequential(
             nn.Linear(embed_dim, set_out_dim), nn.ReLU()
@@ -381,8 +384,9 @@ class V8Model(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
-        # 战斗 head 的 key 输入：card_token_emb(64) + upgrade(1) + cost(1) + monster_token_emb(64) + monster_stats(4)
-        combat_key_in = embed_dim + 2 + embed_dim + 4
+        # 战斗 head 的 key 输入：card_token_emb(64) + upgrade(1) + cost(1) + 机制(N_MECH)
+        #   + monster_token_emb(64) + monster_stats(4)
+        combat_key_in = embed_dim + 2 + N_MECH + embed_dim + 4
         self.combat_key = nn.Sequential(
             nn.Linear(combat_key_in, hidden_dim),
             nn.ReLU(),
@@ -398,8 +402,11 @@ class V8Model(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
+        # 元决策 key 输入：action_token_emb(embed_dim) + 候选卡客观机制向量(N_MECH)
+        #   机制向量让选卡头「看得见牌面」（牌型/费用/伤害/稀有度等客观事实），
+        #   非选卡动作（地图/营火/拿金）机制向量为全 0。
         self.meta_key = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
+            nn.Linear(embed_dim + N_MECH, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
@@ -492,12 +499,16 @@ class V8Model(nn.Module):
             dtype=torch.long,
             device=device,
         )
-        deck_ups = torch.tensor(
-            [[1.0 if u else 0.0] for u in deck_upgrades],
+        # extra = upgrade flag(1) + 客观机制向量(N_MECH)（按 per-card upgraded 取升级态机制）
+        deck_extra = torch.tensor(
+            [
+                [1.0 if u else 0.0] + card_mech_vector(n, u)
+                for n, u in zip(deck_names, deck_upgrades)
+            ],
             dtype=torch.float32,
             device=device,
         )
-        deck_vec = self._set_pool(deck_ids, self.deck_proj, deck_ups)
+        deck_vec = self._set_pool(deck_ids, self.deck_proj, deck_extra)
 
         # ---- relics ----
         relic_names = state.relics or [""]
@@ -624,18 +635,20 @@ class V8Model(nn.Module):
             device=device,
         )
         hand_emb = self.token_embed(hand_ids)  # [H, embed]
+        # extra = upgrade(1) + cost(1) + 客观机制向量(N_MECH)
         hand_extra = torch.tensor(
             [
                 [
                     1.0 if c.get("upgraded", False) else 0.0,
                     float(c.get("cost", 0)) / 5.0,
                 ]
+                + card_mech_vector(c.get("name", ""), bool(c.get("upgraded", False)))
                 for c in hand
             ],
             dtype=torch.float32,
             device=device,
         )
-        hand_full = torch.cat([hand_emb, hand_extra], dim=-1)  # [H, embed+2]
+        hand_full = torch.cat([hand_emb, hand_extra], dim=-1)  # [H, embed+2+N_MECH]
 
         # monsters: [M, embed_dim+4]（token + hp_ratio + intent_dmg + intent_hits + block）
         monster_ids = torch.tensor(
@@ -703,7 +716,14 @@ class V8Model(nn.Module):
             device=device,
         )
         action_emb = self.token_embed(action_ids)  # [A, embed]
-        keys = self.meta_key(action_emb)  # [A, hidden_dim]
+        # 候选卡客观机制向量：选卡类标签抠卡名查表，非选卡动作为全 0。
+        action_mech = torch.tensor(
+            [mech_vector_for_action(a) for a in available_actions],
+            dtype=torch.float32,
+            device=device,
+        )  # [A, N_MECH]
+        action_full = torch.cat([action_emb, action_mech], dim=-1)  # [A, embed+N_MECH]
+        keys = self.meta_key(action_full)  # [A, hidden_dim]
 
         query = self.meta_query(state_vec)  # [hidden_dim]
         scores = (keys * query.unsqueeze(0)).sum(dim=-1)  # [A]
