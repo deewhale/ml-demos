@@ -1,5 +1,5 @@
 diff --git a/bindings/slaythespire.cpp b/bindings/slaythespire.cpp
-index a9afe35..f8ad815 100644
+index a9afe35..d8038eb 100644
 --- a/bindings/slaythespire.cpp
 +++ b/bindings/slaythespire.cpp
 @@ -9,6 +9,7 @@
@@ -10,14 +10,16 @@ index a9afe35..f8ad815 100644
  
  #include "sim/ConsoleSimulator.h"
  #include "sim/search/ScumSearchAgent2.h"
-@@ -16,11 +17,491 @@
+@@ -16,11 +17,639 @@
  #include "sim/PrintHelpers.h"
  #include "game/Game.h"
  
 +#include "combat/BattleContext.h"
++#include "combat/CardSelectInfo.h"
 +#include "sim/search/Action.h"
 +#include "sim/search/GameAction.h"
 +#include "sim/search/ScumSearchAgent2.h"
++#include "sim/search/BattleScumSearcher2.h"
 +
  #include "slaythespire.h"
  
@@ -477,6 +479,152 @@ index a9afe35..f8ad815 100644
 +        return true;
 +    }
 +
++    // ========================================================================
++    //  战斗内合法动作枚举 + 执行 (Stage 1: 模型主导战斗的命脉)
++    //  目标: 让 Python 在战斗每一步 "读当前 InputState 的合法动作 -> 选一个 -> 执行",
++    //        把战斗从黑盒 (play_battle MCTS) 拆成逐步可控的状态机, 供 RL 模型直接出牌。
++    //  设计: 复用引擎自带的合法性 / 枚举逻辑 (search::Action / BattleScumSearcher2), 只在
++    //        Python 侧暴露: input_state / get_battle_actions / execute_battle_action。
++    //  注意 (引擎事实, 见 InputState.h / BattleScumSearcher2::enumerateActionsForNode):
++    //        sts_lightspeed 战斗里实际会停下来等玩家的交互 InputState 只有两个 ——
++    //        PLAYER_NORMAL (出牌 / 喝/弃药 / 结束回合) 和 CARD_SELECT (按 cardSelectTask
++    //        细分: 弃牌 / 消耗 / 升级选牌 / Headbutt / Dual Wield / Gamble 多选 等)。
++    //        InputState.h 里其余 ~25 个枚举值 (SCRY / CHOOSE_DISCARD_CARDS / SHUFFLE_* /
++    //        CREATE_RANDOM_* 等) 在本引擎里**从不被 assign 为活动状态** (executeActions
++    //        内部瞬间消化掉), 故无需为它们单独枚举。所有"弃牌 / 消耗 / scry 式留弃"在本
++    //        引擎里都走 CARD_SELECT + cardSelectTask 这一条路。
++
++    static const char* inputStateName(InputState s) {
++        switch (s) {
++            case InputState::EXECUTING_ACTIONS:    return "EXECUTING_ACTIONS";
++            case InputState::PLAYER_NORMAL:        return "PLAYER_NORMAL";
++            case InputState::CARD_SELECT:          return "CARD_SELECT";
++            case InputState::SCRY:                 return "SCRY";
++            case InputState::CHOOSE_STANCE_ACTION: return "CHOOSE_STANCE_ACTION";
++            case InputState::CHOOSE_DISCARD_CARDS: return "CHOOSE_DISCARD_CARDS";
++            default:                               return "OTHER";
++        }
++    }
++
++    // 当前 BattleContext 的交互输入状态字符串 (供 Python 判断该枚举哪类动作 / 是否轮到玩家)
++    pybind11::str get_input_state(const BattleContext &bc) {
++        return pybind11::str(inputStateName(bc.inputState));
++    }
++
++    // 把一个 search::Action 在当前 bc 下转成中性 dict (含足够信息让 Python 区分 + 回传执行)。
++    //   通用字段: type / bits (原始 32bit 编码, 回传执行时优先用它无损还原) / label (人类可读)。
++    //   CARD:   source_idx (手牌 idx), target_idx (敌人 idx; 无目标牌为 -1), card_name。
++    //   POTION: source_idx (药水槽 idx), target_idx (敌人 idx; 弃药/无目标为 -1 或 >5)。
++    //   SINGLE_CARD_SELECT: select_idx (在对应牌堆的 idx) + card_select_task (任务名)。
++    //   MULTI_CARD_SELECT:  selected_idxs (位掩码展开) + card_select_task。
++    static pybind11::dict actionToDict(const BattleContext &bc, const search::Action &a) {
++        namespace py = pybind11;
++        py::dict d;
++        d["bits"] = a.bits;
++        switch (a.getActionType()) {
++            case search::ActionType::CARD: {
++                d["type"] = "CARD";
++                d["source_idx"] = a.getSourceIdx();
++                const auto &c = bc.cards.hand[a.getSourceIdx()];
++                d["target_idx"] = c.requiresTarget() ? a.getTargetIdx() : -1;
++                d["card_name"] = std::string(c.getName());
++                break;
++            }
++            case search::ActionType::POTION:
++                d["type"] = "POTION";
++                d["source_idx"] = a.getSourceIdx();
++                d["target_idx"] = a.getTargetIdx();
++                break;
++
++            case search::ActionType::SINGLE_CARD_SELECT:
++                d["type"] = "SINGLE_CARD_SELECT";
++                d["select_idx"] = a.getSelectIdx();
++                d["card_select_task"] =
++                    std::string(cardSelectTaskStrings[static_cast<int>(bc.cardSelectInfo.cardSelectTask)]);
++                break;
++
++            case search::ActionType::MULTI_CARD_SELECT: {
++                d["type"] = "MULTI_CARD_SELECT";
++                py::list idxs;
++                for (int x : a.getSelectedIdxs()) { idxs.append(x); }
++                d["selected_idxs"] = idxs;
++                d["card_select_task"] =
++                    std::string(cardSelectTaskStrings[static_cast<int>(bc.cardSelectInfo.cardSelectTask)]);
++                break;
++            }
++            case search::ActionType::END_TURN:
++                d["type"] = "END_TURN";
++                break;
++
++            default:
++                d["type"] = "UNKNOWN";
++                break;
++        }
++        std::ostringstream os;
++        a.printDesc(os, bc);
++        d["label"] = os.str();
++        return d;
++    }
++
++    // 枚举当前 BattleContext 在其当前 InputState 下的所有合法动作 (dict 列表)。
++    //   - PLAYER_NORMAL: 出牌 (含选目标) + 喝/弃药 + END_TURN
++    //   - CARD_SELECT  : 按 cardSelectTask 枚举可选牌 (SINGLE_CARD_SELECT, GAMBLE/EXHAUST_MANY
++    //                    为 MULTI_CARD_SELECT 占位)
++    //   - 其它 (EXECUTING_ACTIONS / 战斗已分胜负): 返回空列表 (不该轮到玩家决策)
++    // 直接复用引擎 BattleScumSearcher2::enumerateActionsForNode, 保证与 MCTS / isValidAction
++    // 完全一致, 不另写一套合法性判断。
++    pybind11::list get_battle_actions(const BattleContext &bc) {
++        namespace py = pybind11;
++        py::list out;
++        if (bc.outcome != Outcome::UNDECIDED) {
++            return out;
++        }
++        if (bc.inputState != InputState::PLAYER_NORMAL &&
++            bc.inputState != InputState::CARD_SELECT) {
++            return out;  // EXECUTING_ACTIONS 等瞬态: 不枚举
++        }
++        search::BattleScumSearcher2 searcher(bc);
++        search::BattleScumSearcher2::Node node;
++        searcher.enumerateActionsForNode(node, bc);
++        for (const auto &edge : node.edges) {
++            if (edge.action.isValidAction(bc)) {
++                out.append(actionToDict(bc, edge.action));
++            }
++        }
++        return out;
++    }
++
++    // 执行一个动作。action 是 get_battle_actions 返回的 dict (或任何含 'bits' 的 dict)。
++    // 优先用 'bits' 无损还原 search::Action; 无 bits 则按 type + idx 字段重建。
++    // 返回 true=执行成功; false=动作非法 / 当前不可执行 (不执行, 避免 assert/UB)。
++    bool execute_battle_action(BattleContext &bc, pybind11::dict action) {
++        search::Action a;
++        if (action.contains("bits")) {
++            a = search::Action(action["bits"].cast<std::uint32_t>());
++        } else {
++            std::string type = action.contains("type") ? action["type"].cast<std::string>() : "";
++            int src = action.contains("source_idx") ? action["source_idx"].cast<int>() : 0;
++            int tgt = action.contains("target_idx") ? action["target_idx"].cast<int>() : 0;
++            int sel = action.contains("select_idx") ? action["select_idx"].cast<int>() : 0;
++            if (type == "CARD") {
++                a = search::Action(search::ActionType::CARD, src, tgt < 0 ? 0 : tgt);
++            } else if (type == "POTION") {
++                a = search::Action(search::ActionType::POTION, src, tgt);
++            } else if (type == "SINGLE_CARD_SELECT") {
++                a = search::Action(search::ActionType::SINGLE_CARD_SELECT, sel);
++            } else if (type == "END_TURN") {
++                a = search::Action(search::ActionType::END_TURN);
++            } else {
++                return false;  // MULTI_CARD_SELECT 无 bits 时不支持手搓重建 (TODO)
++            }
++        }
++        if (!a.isValidAction(bc)) {
++            return false;
++        }
++        a.execute(bc);
++        return true;
++    }
++
 +    // 把当前战斗当黑盒交给引擎 MCTS 打完, 结束后写回 gc 并 regainControl (回到地图/奖励)。
 +    //   sim_count: 每回合 MCTS 模拟数 (越大越强越慢); boss_mult: boss 战的额外倍率。
 +    // 调用前提: gc.screenState == BATTLE。打完后 gc 要么进入下一个 screen (胜),
@@ -502,7 +650,7 @@ index a9afe35..f8ad815 100644
  PYBIND11_MODULE(slaythespire, m) {
      m.doc() = "pybind11 example plugin"; // optional module docstring
      m.def("play", &sts::py::play, "play Slay the Spire Console");
-@@ -105,6 +586,59 @@ PYBIND11_MODULE(slaythespire, m) {
+@@ -105,6 +734,76 @@ PYBIND11_MODULE(slaythespire, m) {
          .def_readwrite("speedrun_pace", &GameContext::speedrunPace)
          .def_readwrite("note_for_yourself_card", &GameContext::noteForYourselfCard);
  
@@ -548,6 +696,23 @@ index a9afe35..f8ad815 100644
 +    m.def("get_combat_snapshot", &sts::probe::get_combat_snapshot,
 +          pybind11::arg("bc"), "return a neutral dict snapshot of player + enemies state");
 +
++    // ===== 战斗内合法动作枚举 + 执行 (Stage 1: 模型主导战斗) =====
++    m.def("get_input_state", &sts::probe::get_input_state,
++          pybind11::arg("bc"),
++          "return the current interactive InputState name (PLAYER_NORMAL / CARD_SELECT / "
++          "EXECUTING_ACTIONS / ...); only PLAYER_NORMAL and CARD_SELECT are player decision points");
++    m.def("get_battle_actions", &sts::probe::get_battle_actions,
++          pybind11::arg("bc"),
++          "enumerate all legal actions for the BattleContext at its current InputState, as a list "
++          "of neutral dicts (type / bits / source_idx / target_idx / select_idx / card_select_task / "
++          "label). Reuses the engine BattleScumSearcher2 enumerator so it matches MCTS exactly. "
++          "Returns [] when the battle is decided or the engine is mid-resolution (EXECUTING_ACTIONS)");
++    m.def("execute_battle_action", &sts::probe::execute_battle_action,
++          pybind11::arg("bc"), pybind11::arg("action"),
++          "execute an action dict from get_battle_actions (uses 'bits' to losslessly rebuild the "
++          "engine Action; falls back to type+idx fields). Validates first; returns False (no-op) "
++          "if the action is illegal in the current state");
++
 +    // ===== 整局导航 (whole-game navigation) =====
 +    m.def("get_state", &sts::probe::get_state,
 +          pybind11::arg("gc"),
@@ -562,7 +727,7 @@ index a9afe35..f8ad815 100644
      pybind11::class_<RelicInstance> relic(m, "Relic");
      relic.def_readwrite("id", &RelicInstance::id)
          .def_readwrite("data", &RelicInstance::data);
-@@ -143,7 +677,13 @@ PYBIND11_MODULE(slaythespire, m) {
+@@ -143,7 +842,13 @@ PYBIND11_MODULE(slaythespire, m) {
          .def_property_readonly("is_strikeCard", &Card::isStrikeCard)
          .def_property_readonly("is_starter_strike_or_defend", &Card::isStarterStrikeOrDefend)
          .def_property_readonly("rarity", &Card::getRarity)
@@ -577,3 +742,43 @@ index a9afe35..f8ad815 100644
  
      pybind11::enum_<GameOutcome> gameOutcome(m, "GameOutcome");
      gameOutcome.value("UNDECIDED", GameOutcome::UNDECIDED)
+diff --git a/include/constants/Cards.h b/include/constants/Cards.h
+index 9583f6c..e3aba7c 100644
+--- a/include/constants/Cards.h
++++ b/include/constants/Cards.h
+@@ -738,6 +738,7 @@ namespace sts {
+             case CardId::SECRET_WEAPON:
+             case CardId::SWIFT_STRIKE:
+             case CardId::THINKING_AHEAD:
++            case CardId::TRIP: // 无色 Trip 是 0 费（wiki + StSRLSolver 一致）；原实现错放在 1 费组
+             case CardId::VIOLENCE:
+             case CardId::WARCRY:
+                 return 0;
+@@ -752,7 +753,6 @@ namespace sts {
+             case CardId::STRIKE_PURPLE:
+             case CardId::STRIKE_RED:
+             case CardId::SWORD_BOOMERANG:
+-            case CardId::TRIP:
+             case CardId::TRUE_GRIT:
+             case CardId::WILD_STRIKE:
+                 return 1;
+diff --git a/src/combat/BattleContext.cpp b/src/combat/BattleContext.cpp
+index 965faef..76ca3d8 100644
+--- a/src/combat/BattleContext.cpp
++++ b/src/combat/BattleContext.cpp
+@@ -1263,10 +1263,11 @@ void BattleContext::useSkillCard() {
+             break;
+ 
+         case CardId::DARK_SHACKLES:
+-            addToBot( Actions::DebuffEnemy<MS::STRENGTH>(t, up ? 15 : 9) );
+-            if (monsters.arr[t].hasStatus<MS::ARTIFACT>()) {
+-                addToBot( Actions::BuffEnemy<MS::SHACKLED>(t, up ? 15 : 9) );
+-            }
++            // Dark Shackles: 目标本回合「失去 X 力量」（debuff），回合开始时由 SHACKLED 还回去。
++            // 原实现给的是正 +X（符号反了，实际给敌人加力量），且只在 ARTIFACT 时才挂 SHACKLED。
++            // 正确语义：STRENGTH 减 X（临时），SHACKLED +X（敌人回合开始还原），二者恒成对出现。
++            addToBot( Actions::DebuffEnemy<MS::STRENGTH>(t, up ? -15 : -9, false) );
++            addToBot( Actions::BuffEnemy<MS::SHACKLED>(t, up ? 15 : 9) );
+             break;
+ 
+         case CardId::DEEP_BREATH:

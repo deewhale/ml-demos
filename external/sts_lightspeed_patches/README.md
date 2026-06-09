@@ -69,6 +69,29 @@ git submodule update --init --recursive
     `Card.cost`（namespace 自由函数 `getEnergyCost(id, upgraded)`），连同已有的
     `type / rarity / upgraded / innate`，供 V8 模型把"玩家能看见的客观牌面机制"喂进观测
     （**纯客观信息，非优劣评价**）。
+  - **战斗内合法动作枚举 + step 执行（2026-06-09 Stage1 新增，为"模型主导战斗"铺路）**：
+    - `get_input_state(bc) -> str`：当前 `BattleContext` 的交互输入状态名
+      （`PLAYER_NORMAL` / `CARD_SELECT` / `EXECUTING_ACTIONS` / ...）。**本引擎里只有
+      PLAYER_NORMAL 和 CARD_SELECT 是真正会停下来等玩家的决策点**；`InputState.h` 里其余
+      ~25 个枚举值（SCRY / CHOOSE_DISCARD_CARDS / SHUFFLE_* / CREATE_RANDOM_* 等）在本
+      引擎里**从不被 assign 为活动状态**（`executeActions` 内部瞬间消化），所有"弃牌 /
+      消耗 / scry 式留弃"都走 `CARD_SELECT` + `cardSelectInfo.cardSelectTask`。
+    - `get_battle_actions(bc) -> list[dict]`：枚举当前 InputState 下所有合法动作。
+      直接复用引擎 `BattleScumSearcher2::enumerateActionsForNode`，保证与 MCTS /
+      `isValidAction` 完全一致。每个 dict 含 `type`（CARD / POTION / SINGLE_CARD_SELECT /
+      MULTI_CARD_SELECT / END_TURN）/ `bits`（原始 32bit 编码，回传执行无损还原）/
+      `source_idx` / `target_idx` / `select_idx` / `card_select_task` / `label`。战斗已分胜负
+      或处于 EXECUTING_ACTIONS 瞬态时返回 `[]`。
+    - `execute_battle_action(bc, action) -> bool`：执行 `get_battle_actions` 返回的 dict
+      （优先用 `bits` 还原 `search::Action`；无 bits 则按 type+idx 重建）。先 `isValidAction`
+      校验，非法则返回 False 不执行（避免 assert/UB）。
+    - **覆盖**：PLAYER_NORMAL（出牌+选目标 / 喝弃药 / END_TURN）+ CARD_SELECT 单选
+      （ARMAMENTS / EXHAUST_ONE / HEADBUTT / DUAL_WIELD / DISCOVERY / ... 全部 SINGLE_CARD_SELECT
+      task）已验证通；CARD_SELECT 多选（GAMBLE / EXHAUST_MANY 的 MULTI_CARD_SELECT）会被枚举为
+      占位动作、执行走 `bits`，但**手搓 dict 重建多选暂不支持（TODO，需展开 selected_idxs 位掩码）**。
+    - **只加绑定，不动引擎核心逻辑**。验证脚本 `/tmp/stage1_verify_battle_actions.py`
+      （进战斗→拿动作→出牌→状态变化→打完回合→end_turn，11/11 通过；含 Armaments 触发
+      CARD_SELECT 子状态的多阶段验证）。
 - **为什么是主补丁**：`0003` = 绑定 + 0001 + 0002 三者合一。重 clone 后 **只 apply 0003**
   即可拿到全部修复 + 绑定，**别再 apply 0001 / 0002**（会与 0003 内同段改动冲突）。
 - **重建依赖**：apply 后必须 `git submodule update --init --recursive`（pybind11 子模块），
