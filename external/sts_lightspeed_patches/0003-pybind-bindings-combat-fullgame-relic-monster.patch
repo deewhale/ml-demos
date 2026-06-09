@@ -1,5 +1,5 @@
 diff --git a/bindings/slaythespire.cpp b/bindings/slaythespire.cpp
-index a9afe35..d8038eb 100644
+index a9afe35..6cc1c01 100644
 --- a/bindings/slaythespire.cpp
 +++ b/bindings/slaythespire.cpp
 @@ -9,6 +9,7 @@
@@ -10,7 +10,7 @@ index a9afe35..d8038eb 100644
  
  #include "sim/ConsoleSimulator.h"
  #include "sim/search/ScumSearchAgent2.h"
-@@ -16,11 +17,639 @@
+@@ -16,11 +17,682 @@
  #include "sim/PrintHelpers.h"
  #include "game/Game.h"
  
@@ -645,12 +645,55 @@ index a9afe35..d8038eb 100644
 +        bc.exitBattle(gc);
 +    }
 +
++    // ========================================================================
++    //  实时逐步战斗 (Stage 2: 模型主导战斗的入口/出口)
++    //  目标: 让 Python 在当前 gc 落在 BATTLE screen 时, 拿到一个**真实的、init 好的**
++    //        BattleContext (按当前 room 的 encounter / seed / relic 真实初始化), 然后用
++    //        get_combat_snapshot / get_battle_actions / execute_battle_action 逐步驱动它,
++    //        最后用 exit_battle 把战斗结果 (胜则推进, 死则置 outcome) 写回 gc。
++    //  设计: 复用引擎 BattleContext::init(gc) (同 play_battle 内部走的同一条初始化路径) +
++    //        exitBattle(gc) (引擎自带的战斗结算回写), 不另写一套, 保证与黑盒 play_battle
++    //        的初始化/结算完全一致。返回值堆分配 (new) + take_ownership: BattleContext 体积大
++    //        (含多个 fixed_list / Random), Python 持有它逐步打。
++    // ========================================================================
++
++    // 进入当前 gc 的战斗: 要求 gc.screenState == BATTLE。返回 init 好的真实 BattleContext
++    // (Python 持有所有权)。非 BATTLE screen 返回 nullptr (Python 侧得到 None)。
++    BattleContext* enter_battle(const GameContext &gc) {
++        if (gc.screenState != ScreenState::BATTLE) {
++            return nullptr;
++        }
++        auto *bc = new BattleContext();
++        bc->init(gc);
++        return bc;
++    }
++
++    // 把已分出胜负的战斗结果写回 gc (胜: 推进到下一 screen / 奖励; 负: gc.outcome=LOSS)。
++    // 要求 bc.outcome != UNDECIDED, 否则不写回 (战斗还没打完) 返回 false。
++    bool exit_battle(const BattleContext &bc, GameContext &gc) {
++        if (bc.outcome == Outcome::UNDECIDED) {
++            return false;
++        }
++        bc.exitBattle(gc);
++        return true;
++    }
++
++    // 战斗是否已分胜负 (outcome != UNDECIDED)。
++    bool battle_is_over(const BattleContext &bc) {
++        return bc.outcome != Outcome::UNDECIDED;
++    }
++
++    // 战斗结果字符串: "UNDECIDED" / "PLAYER_VICTORY" / "PLAYER_LOSS"。
++    pybind11::str battle_outcome(const BattleContext &bc) {
++        return pybind11::str(battleOutcomeStrings[static_cast<int>(bc.outcome)]);
++    }
++
 +}
 +
  PYBIND11_MODULE(slaythespire, m) {
      m.doc() = "pybind11 example plugin"; // optional module docstring
      m.def("play", &sts::py::play, "play Slay the Spire Console");
-@@ -105,6 +734,76 @@ PYBIND11_MODULE(slaythespire, m) {
+@@ -105,6 +777,96 @@ PYBIND11_MODULE(slaythespire, m) {
          .def_readwrite("speedrun_pace", &GameContext::speedrunPace)
          .def_readwrite("note_for_yourself_card", &GameContext::noteForYourselfCard);
  
@@ -724,10 +767,30 @@ index a9afe35..d8038eb 100644
 +          pybind11::arg("gc"), pybind11::arg("sim_count") = 1000, pybind11::arg("boss_mult") = 3.0,
 +          "let the engine MCTS play out the current battle as a black box, then return to the map");
 +
++    // ===== 实时逐步战斗 (Stage 2: 模型主导战斗的入口/出口) =====
++    m.def("enter_battle", &sts::probe::enter_battle,
++          pybind11::arg("gc"),
++          pybind11::return_value_policy::take_ownership,
++          "enter the current battle (gc must be at BATTLE screen): return a real, init'd "
++          "BattleContext (Python owns it) so the model can drive it step-by-step via "
++          "get_combat_snapshot / get_battle_actions / execute_battle_action. Returns None if "
++          "gc is not at a BATTLE screen. Uses the same BattleContext::init(gc) path as play_battle");
++    m.def("exit_battle", &sts::probe::exit_battle,
++          pybind11::arg("bc"), pybind11::arg("gc"),
++          "write a decided battle's result back to gc (win: advance to next screen/rewards; "
++          "loss: gc.outcome=LOSS). Requires bc.outcome != UNDECIDED; returns False (no-op) if the "
++          "battle is not over yet. Uses the engine's BattleContext::exitBattle(gc)");
++    m.def("battle_is_over", &sts::probe::battle_is_over,
++          pybind11::arg("bc"),
++          "True if the battle is decided (outcome != UNDECIDED)");
++    m.def("battle_outcome", &sts::probe::battle_outcome,
++          pybind11::arg("bc"),
++          "battle outcome string: UNDECIDED / PLAYER_VICTORY / PLAYER_LOSS");
++
      pybind11::class_<RelicInstance> relic(m, "Relic");
      relic.def_readwrite("id", &RelicInstance::id)
          .def_readwrite("data", &RelicInstance::data);
-@@ -143,7 +842,13 @@ PYBIND11_MODULE(slaythespire, m) {
+@@ -143,7 +905,13 @@ PYBIND11_MODULE(slaythespire, m) {
          .def_property_readonly("is_strikeCard", &Card::isStrikeCard)
          .def_property_readonly("is_starter_strike_or_defend", &Card::isStarterStrikeOrDefend)
          .def_property_readonly("rarity", &Card::getRarity)

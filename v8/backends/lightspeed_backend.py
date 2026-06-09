@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from v8.state import V8State
 from v8.backends.lightspeed_loader import load_lightspeed
+from v8.card_mech import card_mech_vector
 
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,9 @@ class LightspeedBackend:
         self._sts = load_lightspeed()
         self._gc: Optional[Any] = None
         self._seed: Optional[int] = None
+        # 实时逐步战斗 (Stage 2): 当持有真 BattleContext 逐步打时非 None；黑盒路径
+        # (play_battle) 全程为 None。两条路径互斥——实时路径绕过 _advance_past_battles。
+        self._live_bc: Optional[Any] = None
         # force_terminate 标志（lightspeed 无「强制 loss」API，用本地 flag 覆盖 game_over）
         self._forced_terminal: bool = False
 
@@ -357,9 +361,10 @@ class LightspeedBackend:
 
     @property
     def current_combat(self) -> Any:
-        """TODO(stage2): 战斗对象（.state.enemies/.hand/.turn）。lightspeed 战斗是
-        黑盒（play_battle 一气呵成），元决策点永远不在战斗内，返回 None。"""
-        return None
+        """战斗对象。黑盒路径（play_battle 一气呵成）下永远 None；实时逐步战斗路径
+        （start_combat 持有真 BattleContext）下返回该 BattleContext，供 env / 诊断
+        introspection。Stage2 加实时路径后此处随 _live_bc 透出真对象。"""
+        return self._live_bc
 
     @property
     def current_event_state(self) -> Any:
@@ -482,7 +487,148 @@ class LightspeedBackend:
         return [str(c.get("label", "")) for c in self.get_available_actions()]
 
     # =====================================================================
-    # 4. 战斗
+    # 4. 战斗 —— (a) 实时逐步战斗能力（Stage 2，新增）
+    # =====================================================================
+    # 把战斗当 step-by-step 环境：start_combat 进战斗 → get_combat_state 读 V8State →
+    # get_legal_combat_actions 拿合法动作 → step_combat_action 执行一个 → 循环到结束。
+    # 与黑盒 play_battle 路径互斥、并存（不删黑盒）。Stage 3 再让 env 切过来用这条路径。
+
+    def in_live_combat(self) -> bool:
+        """当前是否处于实时逐步战斗中（持有未结束的真 BattleContext）。"""
+        return self._live_bc is not None
+
+    def start_combat(self) -> bool:
+        """若当前停在 BATTLE screen，进战斗并持有真 BattleContext（不立即 playout 打完）。
+
+        成功返回 True，self._live_bc 持有 init 好的 BattleContext，后续用
+        get_combat_state / get_legal_combat_actions / step_combat_action 逐步驱动。
+        非 BATTLE screen（或已在实时战斗中）返回 False。
+        """
+        if self._gc is None:
+            return False
+        if self._live_bc is not None:
+            return True  # 已在实时战斗中，幂等
+        st = self._get_state()
+        if not st.get("in_battle", False):
+            return False
+        bc = self._sts.enter_battle(self._gc)
+        if bc is None:
+            return False
+        self._live_bc = bc
+        self.combat_search_calls += 1
+        return True
+
+    def get_combat_state(self) -> V8State:
+        """实时战斗中：把 get_combat_snapshot 的 hand / energy / 每个 monster 的
+        hp/block/intent 灌进 V8State（hand 带 card_mech 机制向量；in_combat=True、
+        phase=COMBAT）。非实时战斗（无 _live_bc）退回 build_v8_state（元决策态）。
+
+        hand 每张牌 dict：{name, upgraded, cost, mech}（mech 为 N_MECH 维客观机制向量，
+        供模型战斗脑 _combat_forward 吃）。monsters 每个 dict：
+        {hp, max_hp, block, intent_dmg, intent_hits, intent, powers}。
+        """
+        if self._live_bc is None:
+            return self.build_v8_state()
+
+        base = self.build_v8_state()
+        snap = dict(self._sts.get_combat_snapshot(self._live_bc))
+
+        player = dict(snap.get("player", {}))
+        energy = int(player.get("energy", 0) or 0)
+
+        # ---- hand：卡名 + 升级 + cost + 机制向量 ----
+        # snapshot 的 hand 只给卡名（display 名）；升级标记体现在名字尾的 '+'，
+        # card_mech 的 _normalize 已吸收 '+' 后缀，故用名字尾 '+' 判 upgraded。
+        hand: List[Dict[str, Any]] = []
+        for raw_name in list(snap.get("hand", [])):
+            name = str(raw_name)
+            upgraded = name.rstrip().endswith("+") or "+" in name.split()[-1] if name else False
+            hand.append({
+                "name": name,
+                "upgraded": bool(upgraded),
+                "mech": card_mech_vector(name, bool(upgraded)),
+            })
+
+        # ---- monsters：hp / block / intent ----
+        monsters: List[Dict[str, Any]] = []
+        for e in list(snap.get("enemies", [])):
+            ed = dict(e)
+            if not ed.get("alive", True):
+                continue
+            powers: Dict[str, int] = {}
+            for pk in ("strength", "vulnerable", "weak", "poison",
+                       "metallicize", "ritual", "artifact"):
+                pv = int(ed.get(pk, 0) or 0)
+                if pv:
+                    powers[pk] = pv
+            monsters.append({
+                "hp": int(ed.get("hp", 0) or 0),
+                "max_hp": int(ed.get("max_hp", 0) or 0),
+                "block": int(ed.get("block", 0) or 0),
+                "intent_dmg": int(ed.get("intent_damage", -1)),
+                "intent_hits": int(ed.get("intent_hits", 0) or 0),
+                "intent": str(ed.get("intent", "")),
+                "powers": powers,
+            })
+
+        # 用战斗内真值覆盖（snapshot 的 player.hp 是战斗中实时血量）
+        base.hp = int(player.get("hp", base.hp) or base.hp)
+        base.max_hp = int(player.get("max_hp", base.max_hp) or base.max_hp)
+        base.in_combat = True
+        base.phase = "COMBAT"
+        base.hand = hand
+        base.energy = energy
+        base.monsters = monsters
+        return base
+
+    def get_legal_combat_actions(self) -> List[Dict[str, Any]]:
+        """实时战斗中：当前 InputState 下的合法战斗动作 list（dict，含足够信息回传执行）。
+
+        包 get_battle_actions：每个 dict 含 type / bits / label（+ CARD 的 source_idx/
+        target_idx/card_name、CARD_SELECT 的 select_idx/card_select_task）。bits 是引擎
+        无损编码，step_combat_action 优先用它执行。非实时战斗或战斗已结束 → 返回 []。
+        """
+        if self._live_bc is None:
+            return []
+        if self._sts.battle_is_over(self._live_bc):
+            return []
+        return [dict(a) for a in self._sts.get_battle_actions(self._live_bc)]
+
+    def get_combat_input_state(self) -> str:
+        """实时战斗中当前 InputState 名（PLAYER_NORMAL / CARD_SELECT / EXECUTING_ACTIONS）。
+        非实时战斗返回空串。"""
+        if self._live_bc is None:
+            return ""
+        return str(self._sts.get_input_state(self._live_bc))
+
+    def step_combat_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        """实时战斗中执行一个模型选的动作（get_legal_combat_actions 返回的 dict）。
+
+        包 execute_battle_action（优先用 'bits' 无损还原）。执行后若战斗分出胜负，
+        调 exit_battle 把结果写回 gc（胜→推进下一 screen / 奖励；负→gc.outcome=LOSS）
+        并清掉 _live_bc（回到元决策态）。
+
+        返回 {ok, done, won, outcome}：
+          ok      — 动作是否合法且执行成功
+          done    — 这一步后战斗是否结束
+          won     — 战斗结束时是否胜（未结束为 None）
+          outcome — 战斗结果字符串
+        """
+        if self._live_bc is None:
+            return {"ok": False, "done": False, "won": None, "outcome": "NO_COMBAT"}
+        ok = bool(self._sts.execute_battle_action(self._live_bc, dict(action)))
+        done = bool(self._sts.battle_is_over(self._live_bc))
+        outcome = str(self._sts.battle_outcome(self._live_bc))
+        won: Optional[bool] = None
+        if done:
+            won = outcome == "PLAYER_VICTORY"
+            # 结算回写 gc（胜推进 / 负置 outcome），再清掉 live bc 回元决策态
+            self._sts.exit_battle(self._live_bc, self._gc)
+            self._live_bc = None
+        return {"ok": ok, "done": done, "won": won, "outcome": outcome}
+
+    # =====================================================================
+    # 4. 战斗 —— (b) 黑盒路径（现役，保留不删）
     # =====================================================================
     def run_combat_turn(
         self,

@@ -92,6 +92,21 @@ git submodule update --init --recursive
     - **只加绑定，不动引擎核心逻辑**。验证脚本 `/tmp/stage1_verify_battle_actions.py`
       （进战斗→拿动作→出牌→状态变化→打完回合→end_turn，11/11 通过；含 Armaments 触发
       CARD_SELECT 子状态的多阶段验证）。
+  - **实时逐步战斗 入口/出口（2026-06-09 Stage2 新增，让 backend 把战斗当 step-by-step 环境）**：
+    - `enter_battle(gc) -> BattleContext`：当 `gc.screenState == BATTLE` 时返回一个**真实、
+      init 好的** `BattleContext`（Python 持有所有权，`take_ownership`）。复用引擎
+      `BattleContext::init(gc)`——同 `play_battle` 黑盒内部走的同一条初始化路径，保证一致。
+      非 BATTLE screen 返回 `None`。之后用 `get_combat_snapshot` / `get_battle_actions` /
+      `execute_battle_action` 逐步驱动这个 bc。
+    - `exit_battle(bc, gc) -> bool`：把**已分胜负**的战斗结果写回 gc（胜→推进下一 screen /
+      奖励；负→`gc.outcome=LOSS`）。复用引擎 `BattleContext::exitBattle(gc)`。`bc.outcome`
+      仍 UNDECIDED（战斗没打完）时返回 False 不写回。
+    - `battle_is_over(bc) -> bool` / `battle_outcome(bc) -> str`：读战斗是否结束 / 结果串
+      （UNDECIDED / PLAYER_VICTORY / PLAYER_LOSS）。
+    - **与黑盒 `play_battle` 并存不冲突**：play_battle 仍可一气呵成黑盒打完；enter/exit 是
+      逐步可控的另一条路径，供 RL 模型直接出牌。**只加绑定，不动引擎核心逻辑。**
+    - 验证脚本 `/tmp/stage2_verify_live_combat.py`（进战斗→拿 V8State→拿合法动作→随机选→
+      执行→循环→分胜负，10 seed 胜 8 / 负 2；含 CARD_SELECT 子决策处理 + hand 机制向量）。
 - **为什么是主补丁**：`0003` = 绑定 + 0001 + 0002 三者合一。重 clone 后 **只 apply 0003**
   即可拿到全部修复 + 绑定，**别再 apply 0001 / 0002**（会与 0003 内同段改动冲突）。
 - **重建依赖**：apply 后必须 `git submodule update --init --recursive`（pybind11 子模块），
