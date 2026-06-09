@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import Counter, deque
 from typing import Any, Deque, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -298,6 +299,19 @@ class V8Env:
         self._backend: Optional[GameBackend] = None
         self._current_state: Optional[V8State] = None
 
+        # 实时逐步战斗门控（Stage3+4）：默认关 = 现有黑盒战斗路径（_run_combat_turn /
+        # play_battle 一气呵成，战斗不进 trajectory），行为一字不变。开（V8_LIVE_COMBAT=1）
+        # = 战斗成决策点：env 停在战斗、返回 COMBAT 态 V8State（含 combat_actions）给
+        # trainer，模型逐步出牌，每个战斗动作成 trajectory step。需 backend 实现
+        # start_combat/get_combat_state/get_legal_combat_actions/step_combat_action
+        # （目前仅 LightspeedBackend 有；其他 backend 无则自动退回黑盒路径）。
+        self._live_combat: bool = os.environ.get("V8_LIVE_COMBAT", "") not in (
+            "", "0", "false", "False",
+        )
+        # 当前是否停在一个实时战斗决策点（_advance 停在 COMBAT 时置 True，
+        # step 据此把 action_idx 解码成战斗动作而非元决策动作）。
+        self._at_live_combat_decision: bool = False
+
         # reward 计算需要的历史
         self._prev_state: Optional[V8State] = None
 
@@ -414,6 +428,11 @@ class V8Env:
         # 引擎中间层（2026-06）：创建后端（内部建 GameRunner + TurnSolverAdapter）。
         # combat_net 随机桩禁用等行为细节在 StSRLBackend.reset 内，与重构前一致。
         self._backend = self._backend_factory()
+        # 实时战斗门控：若开关开 + backend 支持，打开 backend 实时战斗模式（take_action
+        # 落进战斗不再自动 play_battle 打完，留给 env 逐步驱动）。reset 前调用，确保开局
+        # 第一场战斗就走实时路径。
+        if self._live_combat_available() and hasattr(self._backend, "enable_live_combat"):
+            self._backend.enable_live_combat(True)
         self._backend.reset(seed)
 
         self._step_count = 0
@@ -468,13 +487,15 @@ class V8Env:
         except Exception as e:  # noqa: BLE001
             logger.warning("[seed] log failed: %s: %s", type(e).__name__, e)
 
-        # 推进到第一个元决策 phase（NEOW 一般直接就是；保险起见 advance）
+        # 实时战斗决策标志清零（防跨局残留）
+        self._at_live_combat_decision = False
+
+        # 推进到第一个决策点（一般是 NEOW 元决策；实时路径下若首个就是战斗则停在战斗）
         self._advance_to_meta_decision()
 
-        # 构造初始 V8State；v5 起 deck_strength 填 card_scorer 牌组 5 维聚合当模型特征
-        # （开局没打过仗 → 各维 0）。
-        state = self._backend.build_v8_state()
-        self._fill_deck_strength_feature(state)
+        # 构造初始 V8State（实时战斗态 or 元决策态）；deck_strength 填 card_scorer
+        # 牌组 5 维聚合当模型特征（开局没打过仗 → 各维 0）。
+        state = self._build_current_state()
 
         self._current_state = state
         self._prev_state = state
@@ -506,6 +527,11 @@ class V8Env:
             "deck_strength_evaluated": False,
             "error": None,
         }
+
+        # 实时逐步战斗决策点（V8_LIVE_COMBAT）：当前 step 是一个战斗内动作，
+        # 单独走 _step_live_combat 解码 + 执行，不进下面的元决策 take_action 路径。
+        if self._at_live_combat_decision:
+            return self._step_live_combat(action_idx, info, step_t0)
 
         # 记录 step 开始快照（detect node_reward 用）
         rs = self._backend.run_state
@@ -590,10 +616,11 @@ class V8Env:
         if stall_terminated:
             info["error"] = "event_stall"
 
-        # 推进结束 → 构造 next_state；v5 起 deck_strength 填 card_scorer 牌组 5 维聚合
-        # 当模型特征（_log_combat_exit 已在本 step 期间用本场细账更新过 card_scorer）。
-        next_state = self._backend.build_v8_state()
-        self._fill_deck_strength_feature(next_state)
+        # 推进结束 → 构造 next_state（实时战斗态 or 元决策态）；v5 起 deck_strength 填
+        # card_scorer 牌组 5 维聚合当模型特征（_log_combat_exit 已在本 step 期间用本场
+        # 细账更新过 card_scorer）。实时路径若推进后停在战斗决策点，_build_current_state
+        # 会构造含 combat_actions 的 COMBAT 态。
+        next_state = self._build_current_state()
         self._last_act_for_cache = next_state.act
         info["deck_strength_evaluated"] = True
 
@@ -672,6 +699,110 @@ class V8Env:
         self.env_step_time_sec += time.time() - step_t0
         return next_state, float(step_reward), done, info
 
+    def _step_live_combat(
+        self, action_idx: int, info: Dict[str, Any], step_t0: float
+    ) -> Tuple[V8State, float, bool, Dict[str, Any]]:
+        """实时逐步战斗 step：解码模型在当前战斗决策点选的合法动作并执行。
+
+        - action_idx 对齐 self._current_state.combat_actions（模型战斗指针网 logits 同序）。
+        - 执行 backend.step_combat_action：未结束 → 仍停在战斗（下一 step 继续逐步出牌）；
+          结束 → backend 已 exit_battle 把结果回写 gc（胜推进/负置 LOSS）+ 清 live_bc，
+          这里 _at_live_combat_decision 置 False，再 _advance_to_meta_decision 推到下一
+          元决策点，并收割本场战斗 pending reward（胜负小信号 + 过 boss + 楼层进度）。
+
+        in-combat 单动作步本身**不发 in-combat shaping reward**（红线：战斗 reward 设计
+        是单独下一步）。reward 只在战斗结束那步通过现有 _pending_combat/floor 汇入。
+        """
+        assert self._backend is not None
+        assert self._current_state is not None
+        info["phase_before"] = "COMBAT"
+
+        combat_actions = list(self._current_state.combat_actions or [])
+        if not combat_actions:
+            # 无合法战斗动作（理论上至少有 END_TURN）：保险退出实时战斗 → 黑盒兜底推进
+            self._at_live_combat_decision = False
+            self._advance_to_meta_decision()
+            next_state = self._build_current_state()
+            self._step_count += 1
+            self._prev_state = next_state
+            self._current_state = next_state
+            info["phase_after"] = next_state.phase
+            info["error"] = "live_combat_no_actions"
+            self.env_step_time_sec += time.time() - step_t0
+            return next_state, 0.0, bool(self._backend.game_over), info
+
+        if action_idx < 0 or action_idx >= len(combat_actions):
+            logger.warning(
+                "V8Env._step_live_combat: idx=%d out of range [0,%d), fallback 0",
+                action_idx, len(combat_actions),
+            )
+            action_idx = 0
+        chosen = combat_actions[action_idx]
+
+        self._last_action_repr = str(chosen.get("label", chosen.get("type", "?")))
+        self._recent_actions.append(self._last_action_repr)
+
+        # 执行战斗动作
+        res = self._backend.step_combat_action(chosen)
+        self._actions_taken += 1
+        self.combat_search_calls += 1
+        info["live_combat_action"] = self._last_action_repr
+        info["live_combat_done"] = bool(res.get("done", False))
+
+        step_reward = 0.0
+        done = False
+
+        if not res.get("done", False):
+            # 战斗未结束：仍停在战斗决策点，构造下一个战斗态 V8State 给模型
+            # （_at_live_combat_decision 仍为 True）
+            next_state = self._build_current_state()
+            info["phase_after"] = "COMBAT"
+        else:
+            # 战斗结束：backend 已 exit_battle（胜推进/负 LOSS）+ 清 live_bc。
+            # 收尾日志 + 退出实时战斗态，推进到下一个元决策点。
+            self._at_live_combat_decision = False
+            won = bool(res.get("won", False))
+            if self._in_combat:
+                self._log_combat_exit(reason="victory" if won else "defeat")
+            # 推进到下一个元决策点（中途若再遇战斗，实时路径会再次停下）
+            self._advance_to_meta_decision()
+            next_state = self._build_current_state()
+            self._last_act_for_cache = next_state.act
+            info["phase_after"] = next_state.phase
+
+            # 收割本场战斗结束累计的 reward（胜负小信号 + 过 boss + 楼层进度）
+            combat_reward = float(self._pending_combat_reward)
+            self._pending_combat_reward = 0.0
+            floor_reward = float(self._pending_floor_reward)
+            self._pending_floor_reward = 0.0
+            info["combat_reward"] = combat_reward
+            info["floor_reward"] = floor_reward
+            step_reward = combat_reward + floor_reward
+
+            done = bool(self._backend.game_over)
+            if done:
+                step_reward += compute_final_reward(
+                    game_won=bool(self._backend.game_won),
+                    final_hp_ratio=self._final_hp_ratio(),
+                )
+
+        # 步数 cap（战斗内动作也计 step）
+        self._step_count += 1
+        if not done and self._step_count >= self.max_steps_per_episode:
+            logger.warning(
+                "V8Env._step_live_combat: hit max_steps_per_episode=%d, force done",
+                self.max_steps_per_episode,
+            )
+            if not self._backend.game_over:
+                self._force_terminate_run(reason="max_steps_exceeded")
+            done = True
+            info["error"] = "max_steps_exceeded"
+
+        self._prev_state = next_state
+        self._current_state = next_state
+        self.env_step_time_sec += time.time() - step_t0
+        return next_state, float(step_reward), done, info
+
     def get_available_actions(self) -> List[str]:
         """当前 state 下的合法 action 字符串描述（pointer network 输入）。
 
@@ -679,6 +810,12 @@ class V8Env:
         """
         if self._backend is None or self._current_state is None:
             return []
+        # 实时战斗决策点：返回合法战斗动作的 label（与 combat_actions / step idx 同序）。
+        if self._at_live_combat_decision:
+            return [
+                str(a.get("label", a.get("type", "?")))
+                for a in (self._current_state.combat_actions or [])
+            ]
         return self._backend.get_available_action_labels(self._current_state)
 
     def close(self) -> None:
@@ -741,14 +878,52 @@ class V8Env:
     # Internal: 内部 loop 推进到元决策 phase
     # ---------------------------------------------------------------------
 
-    def _advance_to_meta_decision(self) -> bool:
-        """推进 runner 直到下一个**元决策** phase（或 game_over）。
+    def _live_combat_available(self) -> bool:
+        """实时逐步战斗是否可用：门控开 + backend 实现了实时战斗 API。
 
-        中间所有 COMBAT phase 由 TurnSolver 一气呵成；不暴露给 RL trajectory。
+        backend 缺任一实时战斗方法（如 StSRLBackend）→ 自动退回黑盒路径（返回 False），
+        保证门控开但后端不支持时不崩、行为退化到黑盒。
+        """
+        if not self._live_combat or self._backend is None:
+            return False
+        be = self._backend
+        return all(
+            hasattr(be, m)
+            for m in (
+                "start_combat", "get_combat_state",
+                "get_legal_combat_actions", "step_combat_action",
+            )
+        )
 
-        返回：本次推进过程中是否发生过 COMBAT（True 即战斗结束，触发 post-battle）。
+    def _build_current_state(self) -> V8State:
+        """构造当前决策点的 V8State（实时战斗态 or 元决策态），并填 deck_strength 特征。
+
+        实时战斗决策点（_at_live_combat_decision）→ backend.get_combat_state()
+        （含 hand + monsters + combat_actions），phase=COMBAT；否则 → build_v8_state()。
         """
         assert self._backend is not None
+        if self._at_live_combat_decision:
+            state = self._backend.get_combat_state()
+            # 填合法战斗动作列表（模型战斗指针网对它逐个打分；env.step 按同序 idx 解码）
+            state.combat_actions = list(self._backend.get_legal_combat_actions())
+        else:
+            state = self._backend.build_v8_state()
+        self._fill_deck_strength_feature(state)
+        return state
+
+    def _advance_to_meta_decision(self) -> bool:
+        """推进 runner 直到下一个**元决策** phase（或 game_over），或停在实时战斗决策点。
+
+        黑盒路径（默认）：中间所有 COMBAT phase 由 TurnSolver / play_battle 一气呵成；
+        不暴露给 RL trajectory。
+        实时路径（V8_LIVE_COMBAT 开 + backend 支持）：进战斗后停在 COMBAT 决策点
+        （置 _at_live_combat_decision=True），让外部模型逐步出牌；战斗在 step 里逐动作推进。
+
+        返回：本次推进过程中是否发生过 COMBAT（True 即战斗结束，触发 post-battle）。
+        实时路径停在战斗决策点时返回 False（战斗尚未结束）。
+        """
+        assert self._backend is not None
+        live = self._live_combat_available()
 
         battle_happened = False
         guard = 0
@@ -757,6 +932,18 @@ class V8Env:
         while not self._backend.game_over and guard < guard_cap:  # noqa: PLR0915
             guard += 1
             phase = self._backend.phase
+
+            # 实时战斗路径：到 COMBAT 就 start_combat 并停下，返回让外部模型逐步决策
+            if live and phase == PHASE_COMBAT:
+                if self._backend.start_combat():
+                    # start_combat 后 backend.current_combat 持有真 BattleContext，
+                    # _log_combat_enter 读敌人快照才有值。
+                    if not self._in_combat:
+                        self._log_combat_enter()
+                    self._at_live_combat_decision = True
+                    return battle_happened
+                # start_combat 失败（罕见，非 BATTLE screen）→ 退回黑盒推进
+                live = False
 
             # 诊断：floor 变化日志（每次 floor 跳变都打一次，不管是哪种 room）
             # 放在最前面：MAP→COMBAT 中间 floor 已 +1，combat enter 之前先打

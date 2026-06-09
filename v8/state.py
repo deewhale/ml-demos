@@ -77,6 +77,14 @@ class V8State:
     #    "block": int, "powers": dict[str, int]}
     monsters: List[Dict[str, Any]] = field(default_factory=list)
 
+    # ----- 实时逐步战斗：当前 InputState 下的合法战斗动作 list（仅 V8_LIVE_COMBAT 路径填）-----
+    # 每个 action dict（来自 backend.get_legal_combat_actions）：
+    #   {type, card_name, source_idx, target_idx, label, bits, ...}
+    #   + backend 富化的目标怪物特征 target_hp_ratio / target_intent_dmg / ...
+    # 模型战斗指针网 _combat_pointer_forward 对这个变长列表逐个打分（与元决策指针网同构）。
+    # 黑盒战斗路径（play_battle 一气呵成）下此字段为空 list——战斗不进 trajectory。
+    combat_actions: List[Dict[str, Any]] = field(default_factory=list)
+
     # ----- 当前 phase -----
     # 取值: NEOW / MAP / COMBAT / EVENT / SHOP / REST / TREASURE
     #       CARD_REWARDS / BOSS_REWARDS

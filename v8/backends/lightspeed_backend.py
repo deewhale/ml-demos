@@ -161,6 +161,11 @@ class LightspeedBackend:
         # 实时逐步战斗 (Stage 2): 当持有真 BattleContext 逐步打时非 None；黑盒路径
         # (play_battle) 全程为 None。两条路径互斥——实时路径绕过 _advance_past_battles。
         self._live_bc: Optional[Any] = None
+        # 实时战斗模式开关（Stage3+4）：开启时 take_action 落进战斗后**不**自动 play_battle
+        # 打完（_advance_past_battles 跳过），把战斗留给 env 走 start_combat 逐步驱动。
+        # 默认关 = 黑盒路径（take_action 内 play_battle 一气呵成），训练现状不变。
+        # env 在 _live_combat_available() 为真时调 enable_live_combat(True) 打开。
+        self._live_combat_mode: bool = False
         # force_terminate 标志（lightspeed 无「强制 loss」API，用本地 flag 覆盖 game_over）
         self._forced_terminal: bool = False
 
@@ -210,6 +215,9 @@ class LightspeedBackend:
         每场战斗按当前 room 选 sim_count（分级开启时 boss/精英用更高搜索预算）。
         """
         if self._gc is None:
+            return
+        # 实时战斗模式：不自动 play_battle 打完，把战斗留给 env 逐步驱动（start_combat）。
+        if self._live_combat_mode:
             return
         guard = 0
         while (
@@ -493,6 +501,12 @@ class LightspeedBackend:
     # get_legal_combat_actions 拿合法动作 → step_combat_action 执行一个 → 循环到结束。
     # 与黑盒 play_battle 路径互斥、并存（不删黑盒）。Stage 3 再让 env 切过来用这条路径。
 
+    def enable_live_combat(self, on: bool = True) -> None:
+        """打开/关闭实时战斗模式（Stage3+4）：开启时 take_action 不再自动 play_battle
+        打完，把战斗留给 env 走 start_combat / step_combat_action 逐步驱动。
+        env 在 _live_combat_available() 为真时调用此方法打开。"""
+        self._live_combat_mode = bool(on)
+
     def in_live_combat(self) -> bool:
         """当前是否处于实时逐步战斗中（持有未结束的真 BattleContext）。"""
         return self._live_bc is not None
@@ -592,7 +606,29 @@ class LightspeedBackend:
             return []
         if self._sts.battle_is_over(self._live_bc):
             return []
-        return [dict(a) for a in self._sts.get_battle_actions(self._live_bc)]
+        actions = [dict(a) for a in self._sts.get_battle_actions(self._live_bc)]
+        # 富化每个带目标动作的目标怪物特征（hp_ratio / intent），供模型战斗指针网
+        # per-action 特征用——让模型「看见」这个动作打的是哪个怪、它多血/什么意图。
+        # 从同一 BattleContext 的 combat snapshot 读敌人（idx 对齐 target_idx）。
+        snap = dict(self._sts.get_combat_snapshot(self._live_bc))
+        enemies = list(snap.get("enemies", []))
+        by_idx: Dict[int, Dict[str, Any]] = {}
+        for e in enemies:
+            ed = dict(e)
+            by_idx[int(ed.get("idx", -1))] = ed
+        for a in actions:
+            tgt = int(a.get("target_idx", -1))
+            ed = by_idx.get(tgt)
+            if ed is None:
+                continue
+            mhp = float(ed.get("max_hp", 0) or 0)
+            a["target_hp_ratio"] = (
+                float(ed.get("hp", 0) or 0) / mhp if mhp > 0 else 0.0
+            )
+            a["target_intent_dmg"] = int(ed.get("intent_damage", -1))
+            a["target_intent_hits"] = int(ed.get("intent_hits", 0) or 0)
+            a["target_block"] = int(ed.get("block", 0) or 0)
+        return actions
 
     def get_combat_input_state(self) -> str:
         """实时战斗中当前 InputState 名（PLAYER_NORMAL / CARD_SELECT / EXECUTING_ACTIONS）。

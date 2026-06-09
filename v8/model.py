@@ -55,6 +55,18 @@ from v8.state import V8State
 DECK_STRENGTH_NORM: float = 10.0
 
 
+# 实时逐步战斗（V8_LIVE_COMBAT）合法动作的类型枚举（与 lightspeed search::ActionType 对齐）。
+# 战斗指针网把每个合法动作的 type 编成 one-hot 喂进 per-action 特征。
+COMBAT_ACTION_TYPES: List[str] = [
+    "CARD",
+    "POTION",
+    "SINGLE_CARD_SELECT",
+    "MULTI_CARD_SELECT",
+    "END_TURN",
+]
+N_COMBAT_ACTION_TYPES: int = len(COMBAT_ACTION_TYPES)
+
+
 # ===== Hash → token id =====
 
 
@@ -395,6 +407,28 @@ class V8Model(nn.Module):
         # End turn 单独 key（特殊 action，不需要 card/target）
         self.end_turn_key = nn.Parameter(torch.randn(hidden_dim) * 0.01)
 
+        # ----- 实时逐步战斗指针网 Head（V8_LIVE_COMBAT，新增）-----
+        # 对 backend.get_legal_combat_actions 返回的「变长合法动作列表」逐个打分
+        # （与元决策指针网 _meta_forward 同构，天然 mask 非法动作、统一处理
+        #  出牌 / 选目标 / 喝药 / CARD_SELECT 子决策 / END_TURN）。
+        # per-action 特征（combat_action_feat_dim 维）：
+        #   action_type one-hot(N_COMBAT_ACTION_TYPES)
+        #   + 卡 token emb(embed_dim) + 卡机制向量(N_MECH)
+        #   + has_target(1) + 目标怪物特征(4: hp_ratio/intent_dmg/intent_hits/block)
+        combat_action_feat_dim = (
+            N_COMBAT_ACTION_TYPES + embed_dim + N_MECH + 1 + 4
+        )
+        self.combat_action_query = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.combat_action_key = nn.Sequential(
+            nn.Linear(combat_action_feat_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
         # ----- 元决策 Head -----
         # state_vec + action_token_emb → score
         self.meta_query = nn.Sequential(
@@ -690,6 +724,76 @@ class V8Model(nn.Module):
         logits = torch.cat([scores, end_score], dim=0)  # [H*M + 1]
         return logits
 
+    # ===== 实时逐步战斗指针网 head（V8_LIVE_COMBAT）=====
+
+    def _combat_pointer_forward(
+        self,
+        state: V8State,
+        state_vec: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """实时逐步战斗 forward：对 state.combat_actions（变长合法动作列表）逐个打分。
+
+        与 _meta_forward 同构：每个合法动作编成 per-action 特征向量，state_vec 做 query
+        打分，softmax 选。logits 顺序与 state.combat_actions 严格对齐（env.step 按同序
+        idx 解码执行）。combat_actions 为空 → 返回单位 logit（env 兜底）。
+
+        Args:
+            state:     单 V8State（phase=="COMBAT" 且 combat_actions 非空）
+            state_vec: [hidden_dim]
+        Returns:
+            logits: [n_legal_actions]
+        """
+        actions = state.combat_actions or []
+        if not actions:
+            return torch.zeros(1, device=device)
+
+        type_index = {t: i for i, t in enumerate(COMBAT_ACTION_TYPES)}
+
+        card_ids: List[int] = []
+        non_emb_feats: List[List[float]] = []
+        for a in actions:
+            atype = str(a.get("type", "") or "")
+            # 卡名：CARD 用 card_name；CARD_SELECT 标签里也带卡名，尽量抠出来
+            card_name = str(a.get("card_name", "") or "")
+            upgraded = card_name.rstrip().endswith("+")
+            mech = card_mech_vector(card_name, upgraded)
+
+            # action_type one-hot
+            type_oh = [0.0] * N_COMBAT_ACTION_TYPES
+            ti = type_index.get(atype, type_index["END_TURN"])
+            type_oh[ti] = 1.0
+
+            # 目标怪物特征：target_idx >= 0 时由 backend 富化进 action dict
+            tgt_idx = int(a.get("target_idx", -1))
+            has_target = 1.0 if tgt_idx >= 0 else 0.0
+            tgt_feats = [
+                float(a.get("target_hp_ratio", 0.0) or 0.0),
+                float(a.get("target_intent_dmg", 0.0) or 0.0) / 30.0,
+                float(a.get("target_intent_hits", 0.0) or 0.0) / 5.0,
+                float(a.get("target_block", 0.0) or 0.0) / 30.0,
+            ]
+
+            card_ids.append(hash_to_token_id(card_name, self.vocab_size))
+            non_emb_feats.append(type_oh + mech + [has_target] + tgt_feats)
+
+        card_ids_t = torch.tensor(card_ids, dtype=torch.long, device=device)
+        card_emb = self.token_embed(card_ids_t)  # [A, embed]
+        non_emb = torch.tensor(non_emb_feats, dtype=torch.float32, device=device)  # [A, ...]
+
+        # 拼成 per-action 特征：[type_oh | card_emb | mech | has_target | tgt_feats]
+        # non_emb 已含 type_oh + mech + has_target + tgt_feats；按 key MLP 期望的
+        # combat_action_feat_dim = N_TYPE + embed + N_MECH + 1 + 4 顺序插入 card_emb。
+        n_type = N_COMBAT_ACTION_TYPES
+        type_part = non_emb[:, :n_type]                 # [A, N_TYPE]
+        rest_part = non_emb[:, n_type:]                 # [A, N_MECH+1+4]
+        action_full = torch.cat([type_part, card_emb, rest_part], dim=-1)  # [A, feat_dim]
+
+        keys = self.combat_action_key(action_full)      # [A, hidden_dim]
+        query = self.combat_action_query(state_vec)     # [hidden_dim]
+        scores = (keys * query.unsqueeze(0)).sum(dim=-1)  # [A]
+        return scores
+
     # ===== 元决策 head =====
 
     def _meta_forward(
@@ -751,7 +855,14 @@ class V8Model(nn.Module):
         state_vec = self._encode_single_state(state, device)  # [hidden_dim]
 
         if state.phase == "COMBAT":
-            logits = self._combat_forward(state, state_vec, device)
+            # 实时逐步战斗（V8_LIVE_COMBAT）：env 把合法动作列表填进 state.combat_actions，
+            # 走指针网对该变长列表打分（logits 与列表同序，env.step 按 idx 解码执行）。
+            # 旧黑盒战斗路径不会让 model 进 COMBAT；万一 combat_actions 空，退回旧
+            # _combat_forward（hand×monster cross-product），保持向后兼容。
+            if state.combat_actions:
+                logits = self._combat_pointer_forward(state, state_vec, device)
+            else:
+                logits = self._combat_forward(state, state_vec, device)
         else:
             logits = self._meta_forward(state_vec, available_actions, device)
 
