@@ -1371,7 +1371,10 @@ class V8Env:
         # 按 (card_id, upgraded) 计数
         counter: Counter = Counter()
         for c in getattr(rs, "deck", []) or []:
-            cid = getattr(c, "id", None) or ""
+            cid = getattr(c, "id", None)
+            # cid 可能是 lightspeed 的 CardId 枚举（不支持 < 比较）——统一成字符串，
+            # 否则下面 sorted 的 (-cnt, name) 在计数相等时会比较 CardId 报 TypeError。
+            cid = getattr(cid, "name", None) or str(cid or "")
             upgraded = bool(getattr(c, "upgraded", False))
             display = f"{cid}+1" if upgraded else cid
             counter[display] += 1
