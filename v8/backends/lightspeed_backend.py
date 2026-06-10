@@ -637,6 +637,17 @@ class LightspeedBackend:
             return ""
         return str(self._sts.get_input_state(self._live_bc))
 
+    def combat_turn(self) -> int:
+        """实时战斗中当前回合数（从 combat snapshot 的 'turn' 字段读）。
+
+        供 env 的战斗回合上限兜底（[combat_cap]）判断「打了太多回合」。
+        非实时战斗（无 _live_bc）返回 0。
+        """
+        if self._live_bc is None:
+            return 0
+        snap = dict(self._sts.get_combat_snapshot(self._live_bc))
+        return int(snap.get("turn", 0) or 0)
+
     def step_combat_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         """实时战斗中执行一个模型选的动作（get_legal_combat_actions 返回的 dict）。
 

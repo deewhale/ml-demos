@@ -105,6 +105,14 @@ SOLVER_BUDGETS = {
 DEFAULT_MAX_STEPS_PER_EPISODE: int = 5_000
 
 
+# 实时战斗（V8_LIVE_COMBAT）单场战斗回合上限兜底：未训练的模型不会主动结束回合，
+# 会无限打 → 无限循环/挂死。回合数 > V8_COMBAT_TURN_CAP（默认 40）或战斗内 step
+# > V8_COMBAT_STEP_CAP（300，双保险）时强制结束该场战斗、判负（走现有 LOSS 路径，
+# reward.py 不改）。仅实时路径（_at_live_combat_decision）生效，黑盒路径不受影响。
+V8_COMBAT_TURN_CAP: int = int(os.environ.get("V8_COMBAT_TURN_CAP", "40"))
+V8_COMBAT_STEP_CAP: int = 300
+
+
 # =============================================================================
 # 诊断辅助：action 描述 / 战斗内状态提取
 #
@@ -748,6 +756,38 @@ class V8Env:
         self.combat_search_calls += 1
         info["live_combat_action"] = self._last_action_repr
         info["live_combat_done"] = bool(res.get("done", False))
+
+        # 回合上限兜底：单场战斗回合数 > V8_COMBAT_TURN_CAP（未训练模型不会主动结束
+        # 回合，防一场仗无限打拖垮 episode / 挂死）。超回合 = 这场打不赢 = STS 里等于
+        # 死 = 整局判负（与 max_steps 同款 _force_terminate_run，reward 走现有终局判负，
+        # 不加任何 in-combat shaping）。
+        cap_turn = (
+            self._backend.combat_turn()
+            if hasattr(self._backend, "combat_turn")
+            else 0
+        )
+        if not res.get("done", False) and cap_turn > V8_COMBAT_TURN_CAP:
+            logger.warning(
+                "[combat_cap] ep=%s floor=%s turns=%d reason=cap force-terminate",
+                self._episode_idx,
+                getattr(self._current_state, "floor", "?"),
+                cap_turn,
+            )
+            self._at_live_combat_decision = False
+            if not self._backend.game_over:
+                self._force_terminate_run(reason="combat_turn_cap")
+            next_state = self._build_current_state()
+            self._step_count += 1
+            self._prev_state = next_state
+            self._current_state = next_state
+            info["phase_after"] = next_state.phase
+            info["error"] = "combat_turn_cap"
+            step_reward = compute_final_reward(
+                game_won=False,
+                final_hp_ratio=self._final_hp_ratio(),
+            )
+            self.env_step_time_sec += time.time() - step_t0
+            return next_state, float(step_reward), True, info
 
         step_reward = 0.0
         done = False

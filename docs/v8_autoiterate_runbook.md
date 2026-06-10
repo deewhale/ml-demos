@@ -61,10 +61,39 @@ ps -ef | grep v8_ppo_train | grep -v grep      # 当前 trial 的训练子进程
 > 是小样本噪声，**不要再引用 48 种子数**。归因复核里一组跑出真通关 6/96=6.25%，仍属稀有
 > 事件，采纳口径记 won=0。
 
-## plateau 现状 + 下一步：转持续长训
+## ✅ 长训已启动（2026-06-08 17:21）——自驱迭代已停
+
+**当前活跃：持续长训 v8_longtrain_v1**（不再跑自驱迭代驱动；驱动已优雅停掉退出）。
+
+| 项 | 值 |
+|---|---|
+| 状态 | 运行中（PID 93465，nohup） |
+| log | `/tmp/v8_longtrain_v1.log` |
+| output_dir | `sts_models/v8_longtrain_v1/` |
+| 起点 ckpt | `sts_models/iter_best/best_t0029_c2_explore++.pt`（ep8608） |
+| 目标局数 | `--num_episodes 24000`（累计目标，增量训 15392 ep） |
+| 配置 | `--engine lightspeed --combat_tier --entropy_coef 0.08`（= 最优 c2_explore++） |
+| 其它旋钮 | `--batch_size 32 --eval_frequency 384 --checkpoint_frequency 512 --device mps` |
+
+**长训巡检要点**：
+- 活吗：`ps -ef | grep v8_ppo_train | grep -v grep`（PID 93465）
+- 进度/心跳：`grep "\[heartbeat\]" /tmp/v8_longtrain_v1.log | tail -1`
+- 周期 eval（每 384 局）：`grep -E "a1=|a2=|won=" /tmp/v8_longtrain_v1.log | tail -5`
+- 异常：`grep -cE "Traceback|guard_cap|Error" /tmp/v8_longtrain_v1.log`
+- ckpt 落盘：`ls sts_models/v8_longtrain_v1/`
+- **早停红线**：eval 连续 ≥3-4 个周期不涨（a2 / won 无趋势）→ 早停，别白跑到 24000。
+- **hang**：心跳间隔超 5min 怀疑 boss 深搜索；30min+ 无心跳立刻杀。
+- 出成果（won>0 或 a2 显著涨）→ 把成果 ckpt 设为新 best，按需重启自驱迭代驱动。
+
+**重启自驱迭代驱动**（若决定停长训回到搜索）：先 `rm -f /tmp/v8_iter_STOP`，
+再 `cd <repo> && nohup bash tools/v8_autoiterate.sh > /tmp/v8_autoiterate.out 2>&1 &`。
+
+### 转长训的背景（2026-06-08）
 
 CLI 旋钮搜索（探索熵 0.05/0.08/0.10/0.12、boss 搜索 10k/20k、late_boss_bonus 牵引）
 已 ≥2 轮全 no-gain，won 恒 0、a2 在 0.27~0.54 噪声带内无趋势上涨——**探索/搜索维度榨干**。
+最后一档探索 hp_explore_max（entropy 0.12）17:07 跑完 score=64.18 < BEST 77.66 无采纳、won=0，
+plateau 彻底坐实，遂转长训（自驱迭代驱动 17:19 优雅退出，BEST 保留）。
 
 **下一步：对最优基座长训**，给 agent 时间学三幕 boss。命令模板（`<repo>` 下，把
 `<best>` 换成当前 `iter_best/` 里的最优文件名）：
