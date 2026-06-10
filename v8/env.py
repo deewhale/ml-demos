@@ -1385,7 +1385,10 @@ class V8Env:
         ]
         relics_ids: List[str] = []
         for r in getattr(rs, "relics", []) or []:
-            rid = getattr(r, "id", None) or str(r)
+            rid = getattr(r, "id", None)
+            # rid 可能是 lightspeed RelicId 枚举——统一成字符串，否则下面 ",".join 崩
+            # (TypeError: sequence item: expected str, RelicId found)。
+            rid = getattr(rid, "name", None) or str(rid or "")
             relics_ids.append(rid)
         logger.info(
             "[deck] ep=%s floor=%d room=%s cards=%s relics=%s",
