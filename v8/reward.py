@@ -237,8 +237,14 @@ W_BOSS_HP: float = 15.0
 W_COMBAT_WIN: float = 1.0
 W_COMBAT_LOSE: float = 5.0   # 输的惩罚（绝对值，符号在公式里取负）
 
+# 「打赢且少失血」HP 留存奖励权重（gated，默认关，见开关 V8_COMBAT_HP_EFF）。
+# 只在打赢时生效，额外加 W_COMBAT_HP_EFF×(hp_after/hp_before)：留血多→接近 0.3，放血多→接近 0。
+# 量级要求（关键）：0.3 < W_COMBAT_WIN(1.0)，远小于闯关主线（floor +3/层、过 boss +25、通关 +100），
+# 不接近进度量级，可调。只奖打赢的仗（输的完全不加），杜绝苟活/逃战刷分。
+W_COMBAT_HP_EFF: float = 0.3
 
-def compute_combat_reward(*, won: bool) -> float:
+
+def compute_combat_reward(*, won: bool, hp_before: int | None = None, hp_after: int | None = None) -> float:
     """单场真实战斗结束时的即时小信号（只剩胜负，刷分项已删）。
 
     每场战斗只算一次、不累加进 episode buffer，env 算完直接塞进当步 step_reward。
@@ -254,11 +260,27 @@ def compute_combat_reward(*, won: bool) -> float:
 
     参数：
         won: 这场战斗有没赢（player 没死且 enemies 全死）
+        hp_before / hp_after: 进入 / 离开这场战斗时的 current_hp（仅 gated HP 项用）。
 
     返回：
         float（不是 NaN / inf）
+
+    **gated HP 留存项（默认关，开关 V8_COMBAT_HP_EFF）**：
+        只在 **打赢** 且 hp_before/hp_after 都给定且 hp_before>0 时，
+        额外加 W_COMBAT_HP_EFF × clamp(hp_after/hp_before, 0, 1)。
+        留血多→接近 0.3，放血多→接近 0；输的仗永不加（即便开关打开）。
+        默认关时返回值与原来 byte-for-byte 一致。
     """
-    return W_COMBAT_WIN if won else -W_COMBAT_LOSE
+    base = W_COMBAT_WIN if won else -W_COMBAT_LOSE
+    hp_eff_on = os.environ.get("V8_COMBAT_HP_EFF", "") not in ("", "0", "false", "False")
+    if hp_eff_on and won and hp_before is not None and hp_after is not None and hp_before > 0:
+        ratio = hp_after / hp_before
+        if ratio < 0.0:
+            ratio = 0.0
+        elif ratio > 1.0:
+            ratio = 1.0
+        base += W_COMBAT_HP_EFF * ratio
+    return base
 
 
 def compute_floor_progress_reward(num_new_floors: int = 1) -> float:
@@ -407,6 +429,7 @@ __all__ = [
     "W_BOSS_HP",
     "W_COMBAT_WIN",
     "W_COMBAT_LOSE",
+    "W_COMBAT_HP_EFF",
     "NODE_REWARD_EVENT_SUCCESS",
     "NODE_REWARD_SHOP_RELIC",
     "NODE_REWARD_REST_USE",

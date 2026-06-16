@@ -1185,7 +1185,11 @@ class V8Env:
 
         # 单场胜负小信号（刷分项 damage_ratio 已删，只剩 ±胜负）。
         try:
-            combat_reward = compute_combat_reward(won=won)
+            combat_reward = compute_combat_reward(
+                won=won,
+                hp_before=self._combat_enter_hp,
+                hp_after=hp_after,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "compute_combat_reward failed: %s: %s; fallback 0",
