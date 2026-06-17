@@ -343,6 +343,41 @@ NODE_REWARD_SHOP_RELIC: float = 3.0
 NODE_REWARD_REST_USE: float = 2.0
 NODE_REWARD_TREASURE: float = 3.0
 
+# 营火升级卡引导奖励（gated，默认关，开关 V8_SMITH_REWARD）。
+# 只在血量够（hp_ratio = current_hp/max_hp >= 0.5）时给：营火选升级卡（SMITH）
+# 额外 +W_SMITH_UPGRADE，引导模型在不缺血时探索升级卡（牌组变强），而不是 25/25 全休息。
+# 血量 <0.5 时不给（让它该回血就回血）；选休息（REST）不给、非营火不给。
+# 不可刷分：营火数量天然有上限（每幕固定几个），即便每个营火都升级，累计也极小。
+# 量级（可调）：1.0，远小于闯关主线（floor +3/层、过 boss +25、通关 +100），不接近进度量级。
+W_SMITH_UPGRADE: float = 1.0
+
+
+def compute_smith_reward(*, is_smith: bool, current_hp: int | None, max_hp: int | None) -> float:
+    """营火升级卡引导奖励（gated，默认关，开关 V8_SMITH_REWARD）。
+
+    只在营火选**升级卡（SMITH）** 且 **hp_ratio >= 0.5** 时返回 +W_SMITH_UPGRADE，
+    其余一律返回 0.0。开关关时永远返回 0.0（byte-for-byte 不影响原 reward）。
+
+    参数：
+        is_smith: 本次营火动作是不是升级卡（SMITH/upgrade）。
+        current_hp / max_hp: 做这个营火决策那一刻的血量（算 hp_ratio 用）。
+
+    防御：max_hp<=0 或 hp 缺失 → 跳过（返回 0.0）。
+    """
+    on = os.environ.get("V8_SMITH_REWARD", "") not in ("", "0", "false", "False")
+    if not on:
+        return 0.0
+    if not is_smith:
+        return 0.0
+    if current_hp is None or max_hp is None:
+        return 0.0
+    if max_hp <= 0:
+        return 0.0
+    hp_ratio = current_hp / max_hp
+    if hp_ratio >= 0.5:
+        return W_SMITH_UPGRADE
+    return 0.0
+
 
 # ============================================================
 # 主入口：step / final reward

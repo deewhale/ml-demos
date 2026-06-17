@@ -73,6 +73,7 @@ from v8.reward import (
     compute_boss_beat_reward,
     compute_boss_hp_reward,
     compute_deck_leanness_reward,
+    compute_smith_reward,
     NODE_REWARD_EVENT_SUCCESS,
     NODE_REWARD_SHOP_RELIC,
     NODE_REWARD_REST_USE,
@@ -148,6 +149,21 @@ def _safe_action_repr(action: Any) -> str:
         return cls_name
     except Exception:  # noqa: BLE001
         return type(action).__name__
+
+
+def _safe_action_label(action: Any) -> str:
+    """取 lightspeed 动作的可读 label 串（{idx,label} dict）。
+
+    lightspeed 后端 chosen_action 是 dict（含 'label' 如 'CAMPFIRE_SMITH' /
+    'MAP->node_x=3'）；legacy 后端是对象（无 label）→ 返回 ""。
+    供营火 SMITH 识别等需要按 label 文本判别的场景用。
+    """
+    try:
+        if isinstance(action, dict):
+            return str(action.get("label", "") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 def _combat_enemies_brief(backend: GameBackend) -> List[Dict[str, Any]]:
@@ -573,6 +589,20 @@ class V8Env:
             action_idx = 0
         chosen_action = engine_actions[action_idx]
 
+        # 营火升级卡引导（实验 V8_SMITH_REWARD，默认关 → 恒 0、不影响 reward）：
+        # 在动作执行前快照「这是不是营火升级卡（SMITH）」+ 决策那一刻血量
+        # （rs 是 step 开始的 run_state，current_hp/max_hp 即升级决策瞬间的血量）。
+        # 必须同时兼容两种后端的动作表示（lightspeed 现役；legacy StSRL 留档）：
+        #   - lightspeed：chosen_action 是 {idx,label} dict，营火升级 label=="CAMPFIRE_SMITH"
+        #   - legacy StSRL：RestAction 对象，action_type=="upgrade"
+        # 只在 REST phase 且命中其一才算 smith；其余 is_smith=False。
+        _is_smith_action = self._step_start_phase == PHASE_REST and (
+            str(getattr(chosen_action, "action_type", "")) == "upgrade"
+            or str(_safe_action_label(chosen_action)).upper() == "CAMPFIRE_SMITH"
+        )
+        _smith_cur_hp = int(getattr(rs, "current_hp", 0) or 0)
+        _smith_max_hp = int(getattr(rs, "max_hp", 0) or 0)
+
         # 记录 last_action（诊断 guard_cap 用）
         self._last_action_repr = _safe_action_repr(chosen_action)
         self._recent_actions.append(self._last_action_repr)
@@ -641,6 +671,22 @@ class V8Env:
             next_phase=self._backend.phase,
         )
         info["node_reward"] = node_reward
+
+        # 营火升级卡引导奖励（gated，默认关）：血量够时营火选升级卡额外 +W_SMITH_UPGRADE。
+        # 开关关时 compute_smith_reward 恒返回 0.0，node_reward byte-for-byte 不变。
+        smith_reward = compute_smith_reward(
+            is_smith=_is_smith_action,
+            current_hp=_smith_cur_hp,
+            max_hp=_smith_max_hp,
+        )
+        if smith_reward != 0.0:
+            node_reward += smith_reward
+            info["smith_reward"] = smith_reward
+            logger.info(
+                "[smith] ep=%s floor=%s hp=%d/%d smith_reward=+%.2f",
+                self._episode_idx, getattr(next_state, "floor", "?"),
+                _smith_cur_hp, _smith_max_hp, smith_reward,
+            )
 
         # 拿出本 step 期间累计的真实战斗 reward（_log_combat_exit 算好缓存的：
         # 单场胜负小信号 + 过 act boss 进度）
